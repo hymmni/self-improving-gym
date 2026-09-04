@@ -173,6 +173,32 @@ def test_fingers_stay_symmetric_when_one_side_is_pushed():
   assert worst <= 1e-6, f'좌우 비대칭 {worst:.3f}mm'
 
 
+# --------------------------------------------------- 8. 여닫는 방향 비대칭 클립
+def test_closing_force_scales_with_grip_but_opening_force_does_not():
+  """쥐는 방향(err<0)은 grip에 비례해 최대힘이 줄고, 여는 방향(err>0)은
+  grip과 무관하게 항상 grip_force로 클립된다(2026-09-04 비대칭 클립 —
+  얕은 파지가 빠른 캐리 중 미끄러질 수 있어야 재파지가 의미 있다)."""
+  cfg = CarryConfig()
+
+  def right_finger_force(grip):
+    space = make_space(cfg)
+    g = Gripper(space, cfg, (256.0, 300.0))
+    g.apply_grip(grip)            # 초기 gap=중간 개도, step 전이라 힘이 그대로 남아있다
+    return g.fingers[1].force.x   # 오른손가락: +x=여는 방향, -x=닫는 방향
+
+  weak_close = right_finger_force(0.6)
+  full_close = right_finger_force(1.0)
+  assert weak_close < 0 and full_close < 0
+  assert weak_close == pytest.approx(-0.6 * cfg.grip_force, rel=0.02)
+  assert full_close == pytest.approx(-1.0 * cfg.grip_force, rel=0.02)
+
+  weak_open = right_finger_force(0.05)
+  less_weak_open = right_finger_force(0.4)
+  assert weak_open > 0 and less_weak_open > 0
+  assert weak_open == pytest.approx(cfg.grip_force, rel=0.02)
+  assert less_weak_open == pytest.approx(cfg.grip_force, rel=0.02)
+
+
 def test_symmetry_projection_transfers_momentum_to_the_base():
   """공통모드 속도를 지울 때 그 운동량이 사라지지 않고 베이스로 넘어간다.
 
