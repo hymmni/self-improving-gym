@@ -185,8 +185,31 @@ _TELEOP_TOP_Y = 5.0        # _CEILING_Y(20)보다 살짝 위 여유
 _TELEOP_BOTTOM_MARGIN = 30.0  # record_carry._FLOOR_MARGIN과 동일
 
 
+def _grip_hud(env: GraspCarry2D, grip: float) -> str:
+  """지금 grip이 노리는 목표 개도 vs 실제 개도를 보여주는 HUD 텍스트.
+
+  2026-09-04: `gripper.apply_grip`이 여닫는 방향마다 다른 최대힘으로
+  클립하도록 바뀌어(쥐는 방향은 grip에 비례) grip 값이 곧 "얼마나 세게
+  쥐는지"가 됐다 — 화면만 보고는 지금 얼마나 쥐고 있는지 가늠하기 어려워서
+  숫자/오버레이로 보여준다."""
+  cfg = env.cfg
+  target_gap = cfg.finger_opening_max - float(grip) * (
+      cfg.finger_opening_max - cfg.finger_opening_min)
+  return (f'grip={grip * 100:.0f}%  '
+         f'gap target={target_gap:.0f}mm actual={env.gripper.gap:.0f}mm')
+
+
 def _draw(ax, env, action=None):
   draw_env(ax, env, action=action)
+  if action is not None:
+    cfg = env.cfg
+    grip = float(action[3])
+    target_gap = cfg.finger_opening_max - grip * (
+        cfg.finger_opening_max - cfg.finger_opening_min)
+    bx = float(env.gripper.base.position.x)
+    y0, y1 = env.gripper.pad_span_y()
+    for x in (bx - target_gap / 2.0, bx + target_gap / 2.0):
+      ax.plot([x, x], [y0, y1], color='red', lw=1.5, ls='--', zorder=4)
   ax.set_xlim(0.0, env.cfg.world_width)
   ax.set_ylim(env.cfg.floor_y + _TELEOP_BOTTOM_MARGIN, _TELEOP_TOP_Y)
 
@@ -250,7 +273,8 @@ def collect_one_episode(env: GraspCarry2D, cfg: CarryConfig, seed: int,
 
     _draw(ax, env, action=a)
     tag = f"   [{info['outcome'].upper()}]" if info['outcome'] == 'tipped' else ''
-    ax.set_title(ax.get_title() + tag + '   ' + _descend_hud(env), fontsize=8)
+    ax.set_title(ax.get_title() + tag + '   ' + _descend_hud(env)
+                + '   ' + _grip_hud(env, ms.grip), fontsize=8)
     fig.canvas.draw_idle()
     plt.pause(pause_dt)
 
