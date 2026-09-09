@@ -14,11 +14,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # cmake: robomimic 의존성 egl_probe가 소스에서 빌드될 때 필요.
 # libgl/libegl/libosmesa: mujoco 오프스크린(EGL) + onscreen(mjviewer/GLFW) 렌더링에 필요.
 # libx11 등: mjviewer/matplotlib TkAgg 창을 DISPLAY로 띄울 때 필요 (X11 forwarding 시).
+# libsm6/libice6: opencv-python(cv2)이 번들한 Qt의 xcb 플랫폼 플러그인이 요구하는
+# libSM.so.6/libICE.so.6 — 없으면 cv2.imshow가 "Could not load the Qt platform plugin
+# xcb"로 죽는다(2026-09-09 GPU 서버에서 실측 — ldd로 누락 라이브러리 직접 확인).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv python3-tk python3-dev \
         git ffmpeg build-essential cmake \
         libgl1 libglx-mesa0 libegl1 libosmesa6 libglew2.2 libglfw3 \
         libx11-6 libxext6 libxrender1 libxrandr2 libxinerama1 libxcursor1 libxi6 \
+        libsm6 libice6 \
         nodejs npm \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g @anthropic-ai/claude-code
