@@ -144,3 +144,51 @@ def test_frame_stats_use_training_demos_only(tmp_path):
     ds.apply_frame_stats(mean, std)
     x, _ = ds[train_idx[0]]
     assert torch.isfinite(x).all()
+
+
+from square_assembly.policies.diffusion.dino_stg_predictor import (
+    DinoStgHead,
+    load_checkpoint,
+    save_checkpoint,
+)
+
+
+def test_head_shape_and_gradients():
+    head = DinoStgHead(in_dim=12, num_bins=7, head_hidden=(8, 8))
+    x = torch.randn(3, 12)
+
+    logits = head(x)
+    assert logits.shape == (3, 7)
+
+    logits.sum().backward()
+    grads = [p.grad for p in head.parameters()]
+    assert all(g is not None for g in grads)
+    assert any(torch.any(g != 0) for g in grads)
+
+
+def test_checkpoint_roundtrip_preserves_predictions(tmp_path):
+    """온라인 추론이 학습과 같은 전처리를 재현할 수 있어야 하므로, 전처리 메타가
+    체크포인트에 남고 헤드가 그대로 복원돼야 한다."""
+    head = DinoStgHead(in_dim=12, num_bins=7, head_hidden=(8, 8))
+    x = torch.randn(3, 12)
+    expected = head(x)
+
+    path = tmp_path / "predictor.pt"
+    save_checkpoint(
+        str(path),
+        head,
+        {
+            "in_dim": 12,
+            "num_bins": 7,
+            "head_hidden": [8, 8],
+            "obs_horizon": 2,
+            "frame_mean": np.zeros(6, dtype=np.float32),
+            "frame_std": np.ones(6, dtype=np.float32),
+            "cache_meta": {"model": "vit_small_patch14_reg4_dinov2.lvd142m", "crop": 76, "size": 224},
+        },
+    )
+
+    loaded, ckpt = load_checkpoint(str(path))
+    torch.testing.assert_close(loaded(x), expected)
+    assert ckpt["cache_meta"]["crop"] == 76
+    assert ckpt["num_bins"] == 7
