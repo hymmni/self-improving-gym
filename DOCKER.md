@@ -88,6 +88,23 @@ xhost +local:docker
 
 그 다음 평소처럼 `docker compose run` 하면 `DISPLAY`가 자동으로 전달됩니다 (`.env`의 `DISPLAY` 값 사용, 보통 호스트와 동일한 `:0` 등).
 
+**GDM 로그인 화면을 거친 그래픽 세션(예: 원격 GPU 서버를 RustDesk/실물 모니터로 보는 경우)은
+`DISPLAY`가 `:0`이 아니라 `:1`(또는 그 이상)일 수 있고, 인증 파일도 `~/.Xauthority`가 아니라
+GDM이 관리하는 `/run/user/$(id -u)/gdm/Xauthority`에 있다** — 기본 `xhost +local:docker`가
+"명령 안 먹힘"처럼 조용히 안 먹거나, 컨테이너에서 `cv2.imshow`/`mjviewer`가 "Invalid
+MIT-MAGIC-COOKIE-1 key"로 죽는다면 이 케이스다(2026-09-09 GPU 서버에서 실측 — `who`로 실제
+세션 번호를 확인). 그 경우 명시적으로 지정해야 합니다:
+
+```bash
+DISPLAY=:1 XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority xhost +local:docker
+docker compose run --rm -e DISPLAY=:1 dev bash   # 이후 run은 -e DISPLAY=:1만 오버라이드하면 됨
+```
+
+(ssh `-X`로 원격 포워딩한 디스플레이를 쓰려는 시도는 권장하지 않습니다 — sshd가
+`X11UseLocalhost no`로 설정된 환경에서는 호스트명 기반 DISPLAY·family 불일치로 Docker
+브리지 네트워크를 넘나들며 같은 종류의 인증 실패가 반복해서 나기 쉽습니다. 위 방식처럼
+서버의 **실제 로컬 세션**에 직접 붙는 편이 훨씬 안정적입니다.)
+
 - jax venv: matplotlib TkAgg 백엔드 사용 (이미지에 `python3-tk` 설치됨)
 - torch venv: mujoco `mjviewer` 온스크린 창 사용 시 컨테이너 환경변수 `MUJOCO_GL`을 비워야 함 (compose 기본값은 `MUJOCO_GL=egl`, 헤드리스 학습/평가용). 온스크린이 필요하면:
   ```bash
