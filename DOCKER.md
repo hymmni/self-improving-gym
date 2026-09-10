@@ -100,10 +100,47 @@ DISPLAY=:1 XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority xhost +local:docker
 docker compose run --rm -e DISPLAY=:1 dev bash   # 이후 run은 -e DISPLAY=:1만 오버라이드하면 됨
 ```
 
-(ssh `-X`로 원격 포워딩한 디스플레이를 쓰려는 시도는 권장하지 않습니다 — sshd가
-`X11UseLocalhost no`로 설정된 환경에서는 호스트명 기반 DISPLAY·family 불일치로 Docker
-브리지 네트워크를 넘나들며 같은 종류의 인증 실패가 반복해서 나기 쉽습니다. 위 방식처럼
-서버의 **실제 로컬 세션**에 직접 붙는 편이 훨씬 안정적입니다.)
+### ssh -X 포워딩으로 컨테이너 GUI 보기 (RustDesk 등 원격 데스크톱 없이)
+
+순수 `ssh -X`만으로도 되지만, 2026-09-10 실측으로 세 가지를 순서대로 잡아야 했다 —
+아래 증상이 보이면 해당 항목을 확인한다.
+
+1. **`sshd_config`의 `X11UseLocalhost`가 `no`로 되어 있으면 안 된다.** `no`면 `DISPLAY`가
+   `localhost:N.0`이 아니라 `<호스트명>:N.0` 형태로 잡히고, Docker 기본 브리지 네트워크에서
+   그 호스트명이 해석되지 않거나(컨테이너 자신의 네트워크 namespace라 호스트를 못 찾음)
+   TCP로 붙어도 인증 family가 안 맞아 죽는다. 기본값(`yes`, 또는 주석 처리)으로 되돌린다:
+   ```bash
+   sudo sed -i 's/^X11UseLocalhost no/X11UseLocalhost yes/' /etc/ssh/sshd_config
+   sudo systemctl restart ssh   # 서비스명이 sshd가 아니라 ssh인 배포판이 많다(Ubuntu/Debian)
+   ```
+   (재시작해도 이미 붙어있는 세션은 안 끊긴다 — 새로 접속하는 세션부터 적용된다.)
+
+2. **tmux를 거치면 `$DISPLAY`/쿠키가 스테일해질 수 있다.** 오래 떠 있던 tmux 세션에
+   재접속(`tmux attach`)하면 그 pane의 `$DISPLAY`가 지금 이 ssh 연결이 아니라 그 pane이
+   맨 처음 만들어졌을 때의 값을 그대로 들고 있다 — 디스플레이 번호가 그새 재사용되면서
+   `~/.Xauthority`의 쿠키와 어긋나 `Invalid MIT-MAGIC-COOKIE-1 key`로 죽는다(로컬 클라이언트
+   쪽 tmux도 마찬가지 — 클라이언트의 `ssh -X`도 자기 자신의 `$DISPLAY`를 참조해서 되돌려줄
+   곳을 정하므로 로컬/서버 양쪽 tmux 모두 의심 대상이다). **tmux를 아예 안 거친 새 터미널로
+   `ssh -X` 접속**해서 재현되는지 먼저 확인한다 — 이게 원인이면 그걸로 끝이다.
+
+3. **이 서버의 sshd는 X11 forwarding에 유닉스소켓 파일을 안 만들고(`/tmp/.X11-unix/`에
+   해당 디스플레이 번호가 안 보임) `xauth`에 등록되는 쿠키도 FamilyLocal
+   (`<호스트명>/unix:N` 형태, `xauth list $DISPLAY`로 확인 가능)로만 발급한다.** 즉 컨테이너가
+   호스트의 forwarding 포트(예: `127.0.0.1:6010`)에 실제로 TCP로 닿아야 하는데, Docker 기본
+   브리지 네트워크는 컨테이너 자신의 루프백이 따로 있어 호스트의 루프백에 안 닿는다.
+   `docker-compose.yml`의 `dev` 서비스에 `network_mode: "host"`를 이미 설정해뒀으므로(이
+   레포에 다른 서비스가 없어 브리지 격리를 포기해도 트레이드오프가 거의 없음),
+   `~/.Xauthority`만 추가로 마운트해서 `docker compose run`을 쓰면 된다(레포 전체 사용자가
+   `~/.Xauthority`를 갖고 있진 않으므로 compose 파일 자체엔 이 마운트를 넣지 않았다 — 필요한
+   사람만 `-v`로 얹는다):
+   ```bash
+   docker compose run --rm -e NUMBA_CACHE_DIR=/tmp/numba_cache \
+     -v $HOME/.Xauthority:$HOME/.Xauthority:ro \
+     dev bash
+   ```
+
+위 세 가지를 다 잡았는데도 안 되면, 원격 데스크톱(RustDesk 등)으로 서버의 **실제 로컬
+세션**(`:1` 등, GDM 관리 — 위 GDM 문단 참고)에 붙는 쪽이 훨씬 간단하고 안정적이다.
 
 - jax venv: matplotlib TkAgg 백엔드 사용 (이미지에 `python3-tk` 설치됨)
 - torch venv: mujoco `mjviewer` 온스크린 창 사용 시 컨테이너 환경변수 `MUJOCO_GL`을 비워야 함 (compose 기본값은 `MUJOCO_GL=egl`, 헤드리스 학습/평가용). 온스크린이 필요하면:
