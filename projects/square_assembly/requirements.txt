@@ -56,3 +56,8 @@ transformers==4.40.1
 peft==0.11.1
 timm==0.9.16
 accelerate
+
+# VIP(policy=STG용 대체 인코더, scripts/cache_vip_feats.py) — 선택 설치.
+# PyPI에 없어 공식 레포를 git 설치한다. 버전 미고정(레포 자체가 태그를 안 씀) —
+# 서버에서 최초 설치해보고 의존성 충돌이 나면 여기에 근거를 남기고 고정한다.
+vip @ git+https://github.com/facebookresearch/vip.git
