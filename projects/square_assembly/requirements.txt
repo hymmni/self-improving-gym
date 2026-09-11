@@ -1,8 +1,14 @@
 # square_assembly 고정 의존성 (재현성 단일 출처). 버전 근거: docs/plan.md M0.
---extra-index-url https://download.pytorch.org/whl/cu121
+# cu128(torch 2.7.1)로 올린 이유: GPU 서버가 RTX 5090(compute capability sm_120,
+# Blackwell)인데 cu121 휠(torch 2.5.1)은 sm_90(Hopper)까지만 커널을 담고 있어
+# 가장 기본적인 텐서 연산도 "no kernel image is available"로 죽었다(2026-09-10
+# 서버에서 실측, feat/vip-stg-encoder에서 먼저 발견해 이 브랜치에도 이식 — nvidia-smi/
+# 드라이버는 GPU를 정상 인식, 문제는 순수 pip 휠 자체). torch 2.7.x부터 cu128 휠에
+# Blackwell(sm_120) 커널이 포함된다.
+--extra-index-url https://download.pytorch.org/whl/cu128
 
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
 
 # 시뮬레이션 벤치마크
 # robomimic은 PyPI(0.3.0)가 아닌 git v0.4.0 태그 고정.
