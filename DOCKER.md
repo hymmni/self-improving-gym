@@ -142,6 +142,17 @@ docker compose run --rm -e DISPLAY=:1 dev bash   # 이후 run은 -e DISPLAY=:1�
 위 세 가지를 다 잡았는데도 안 되면, 원격 데스크톱(RustDesk 등)으로 서버의 **실제 로컬
 세션**(`:1` 등, GDM 관리 — 위 GDM 문단 참고)에 붙는 쪽이 훨씬 간단하고 안정적이다.
 
+**2026-09-11 실측 — 이 서버는 결국 ssh -X 자체가 GUI 앱엔 안 맞았다.** 위 1~3번을 전부
+적용(`X11UseLocalhost yes`, tmux 안 거침, `~/.Xauthority` 마운트)하고 `-X`→`-Y`(trusted
+forwarding)까지 바꿔봐도, cv2(Qt/xcb)가 연결 초기화 중 보내는 확장 버전 질의
+(`xcb_shm_query_version`, 그다음 `xcb_xfixes_query_version`)에서 응답을 영영 못 받고
+멈췄다(py-spy 네이티브 스택으로 확인). `QT_XCB_NO_MITSHM=1` 등 Qt 쪽 개별 확장 우회 env로
+하나를 넘겨도 바로 다음 확장에서 똑같이 멈춰, 확장을 하나씩 꺼가는 방식으론 끝이 안 난다 —
+이 sshd의 X11 forwarding 프록시가 확장-질의류 응답을 구조적으로 못 돌려주는 것으로 보인다.
+**결론: 이 서버에서 cv2.imshow 같은 실시간 GUI가 필요하면 처음부터 ssh -X를 시도하지 말고
+RustDesk로 바로 가라** — 이미 서비스가 떠 있어(`systemctl status rustdesk`) 추가 설정이
+필요 없다.
+
 - jax venv: matplotlib TkAgg 백엔드 사용 (이미지에 `python3-tk` 설치됨)
 - torch venv: mujoco `mjviewer` 온스크린 창 사용 시 컨테이너 환경변수 `MUJOCO_GL`을 비워야 함 (compose 기본값은 `MUJOCO_GL=egl`, 헤드리스 학습/평가용). 온스크린이 필요하면:
   ```bash
