@@ -17,10 +17,10 @@ KeyboardIntervention(robosuite Keyboard device + pynput)이 필요 없다.
   RuntimeError를 낼 수 있다(2026-09-09 서버에서 실측) — `NUMBA_CACHE_DIR=/tmp/numba_cache`
   같은 쓰기 가능한 경로를 지정해 우회한다.
 
-사용:
+사용(컨테이너 WORKDIR=/workspace, 즉 레포 루트에서 실행 기준):
     MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache \
     python -m square_assembly.scripts.collect_square_scripted_intervention \
-        --base-ckpt checkpoints/square_base_policy/policy_epoch1060.pt \
+        --base-ckpt projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt \
         --episodes 20 --max-steps 500 \
         --out data/square_scripted_intv_v1.hdf5
 
@@ -138,7 +138,10 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--base-ckpt", default="checkpoints/square_base_policy/policy_epoch1060.pt")
+    ap.add_argument(
+        "--base-ckpt",
+        default="projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt",
+    )
     ap.add_argument("--episodes", type=int, default=20)
     ap.add_argument("--max-steps", type=int, default=500)
     ap.add_argument("--out", default="data/square_scripted_intv.hdf5")
