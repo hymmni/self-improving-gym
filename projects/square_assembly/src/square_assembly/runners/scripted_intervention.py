@@ -3,7 +3,8 @@
 KeyboardIntervention(runners/intervention_rollout.py — robosuite Keyboard device로 사람이
 로봇을 직접 몬다)과 다르다. 여기선 사람이 조종하지 않는다 — 트리거 시점만 사람이 정하고,
 그 뒤 recovery_steps 동안은 고정된 회복 액션(그리퍼 열기 + 위로 후퇴)이 실행된 뒤 정책에
-제어를 돌려준다.
+제어를 돌려준다. 그래서 pynput/robosuite Keyboard device가 필요 없다 — 이미 화면에
+띄우는 뷰어 창의 키 입력(cv2.waitKey)만으로 충분하다.
 
 collect_episode(runners/intervention_rollout.py)의 두 콜백 계약에 이 클래스 하나로 꽂는다:
   render_fn=interv.render         (매 스텝 프레임 표시 + 트리거/종료 키 감지)
@@ -20,15 +21,9 @@ action_dim=7과 일치) 레이아웃을 가정한다: action = [dx, dy, dz, drx,
 z는 월드 상승 방향, gripper는 양수=닫힘/음수=열림(robosuite 표준 관례 — 서버에서
 load_composite_controller_config(robot="Panda")로 직접 확인함, 2026-09-09). 다른
 로봇/컨트롤러 레이아웃(예: 양팔)엔 그대로 안 맞을 수 있다.
-
-화면 표시는 cv2.imshow(X11 GUI 창)가 아니라 utils/live_view.LiveView(MJPEG 스트림 +
-터미널 키 입력)를 쓴다 — 이 서버의 sshd가 ssh -X/-Y 어느 쪽에서도 cv2(Qt/xcb)의 확장 질의
-응답을 안 줘서 GUI가 영원히 멈추는 문제 때문(2026-09-12, 근거는 live_view.py 참고).
 """
 
 import numpy as np
-
-from square_assembly.utils.live_view import LiveView
 
 _Z_INDEX = 2
 _GRIPPER_INDEX = -1
@@ -45,11 +40,11 @@ class ScriptedFailureIntervention:
         recovery_steps (int): 트리거 후 스크립트가 제어하는 스텝 수.
         retract_z (float): 회복 중 z축 델타 액션 크기(컨트롤러 input 범위 [-1,1], 양수=상승).
         gripper_open (float): 회복 중 그리퍼 액션 값(음수=열림).
-        http_port (int): LiveView MJPEG 스트림 포트. 0이면 OS가 빈 포트를 골라준다(테스트용).
+        window_name (str): cv2 창 이름.
     """
 
     def __init__(self, camera_key, action_dim=7, trigger_key="s", quit_key="q",
-                 recovery_steps=20, retract_z=1.0, gripper_open=-1.0, http_port=8765):
+                 recovery_steps=20, retract_z=1.0, gripper_open=-1.0, window_name="rollout"):
         self.camera_key = camera_key
         self.action_dim = action_dim
         self.trigger_key = ord(trigger_key)
@@ -57,12 +52,11 @@ class ScriptedFailureIntervention:
         self.recovery_steps = recovery_steps
         self.retract_z = retract_z
         self.gripper_open = gripper_open
+        self.window_name = window_name
         self._pending_trigger = False
         self._recovery_remaining = 0
         self._quit_requested = False
         self.num_triggers = 0  # 에피소드당 트리거 횟수(진단/로그용)
-
-        self._view = LiveView(port=http_port)  # 생성만으로는 포트/터미널에 손대지 않음
 
     def reset(self):
         """에피소드 시작마다 호출한다(collect_episode는 이 객체를 자동 리셋하지 않는다)."""
@@ -97,19 +91,19 @@ class ScriptedFailureIntervention:
         return self._recovery_action()
 
     def _handle_key(self, key):
-        """키 코드 -> 상태 갱신. LiveView 의존 없이 테스트 가능하게 render()에서 분리."""
+        """키 코드 -> 상태 갱신. cv2 의존 없이 테스트 가능하게 render()에서 분리."""
         if key == self.trigger_key:
             self.trigger()
         elif key == self.quit_key:
             self._quit_requested = True
 
     def render(self, obs_raw):
-        """render_fn 계약: 프레임을 LiveView로 내보내고 터미널 키 입력을 감지한다.
-        False 반환 시 에피소드 종료.
+        """render_fn 계약: 프레임을 화면에 띄우고 키 입력을 감지한다. False 반환 시 에피소드 종료.
 
-        obs_raw[camera_key]는 postprocess_visual_obs=True(기본)를 거쳐 이미 CHW,float[0,1].
+        obs_raw[camera_key]는 postprocess_visual_obs=True(기본)를 거쳐 이미 CHW,float[0,1]
+        - 화면 표시용으로만 HWC,uint8,BGR로 변환한다(cv2 관례, 저장에는 안 씀).
         """
-        import cv2  # GUI 없는 순수 코덱 연산(imencode/putText)만 쓴다 - X11 불필요.
+        import cv2
 
         frame = np.asarray(obs_raw[self.camera_key])
         if frame.ndim == 3 and frame.shape[0] in (1, 3) and frame.shape[0] < frame.shape[-1]:
@@ -127,15 +121,12 @@ class ScriptedFailureIntervention:
             bgr, f"[{chr(self.trigger_key)}]=trigger recovery  [{chr(self.quit_key)}]=quit",
             (6, bgr.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1,
         )
+        cv2.imshow(self.window_name, bgr)
 
-        ok, buf = cv2.imencode(".jpg", bgr)
-        if ok:
-            self._view.push_jpeg(buf.tobytes())
-
-        key = self._view.poll_key()
-        if key is not None:
-            self._handle_key(key)
+        self._handle_key(cv2.waitKey(1) & 0xFF)
         return not self._quit_requested
 
     def close(self):
-        self._view.close()
+        import cv2
+
+        cv2.destroyWindow(self.window_name)
