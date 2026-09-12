@@ -29,6 +29,24 @@ _Z_INDEX = 2
 _GRIPPER_INDEX = -1
 
 
+def open_window(window_name="rollout"):
+    """빈 창을 미리 띄워 cv2(Qt/xcb)의 X 연결을 먼저 확립한다.
+
+    **robosuite/robomimic을 끌어오는 임포트(즉 이 프로젝트의 factory/task_utils/
+    intervention_rollout)보다 먼저 호출해야 한다.** 순서가 반대면 첫 `cv2.imshow`가 Qt/xcb의
+    확장 질의(`xcb_shm_query_version`)에서 응답을 영영 못 받고 메인 스레드가 멈춘다 —
+    NVIDIA EGL/GL 라이브러리가 먼저 로드되면 Xlib 잠금이 꼬이는 것으로 보인다.
+
+    2026-09-12 서버에서 이분 탐색으로 확인(ssh -X/RustDesk 어느 화면이든 동일하게 재현):
+    최소 프로세스·torch CUDA·`import robosuite`·`import robomimic`까지는 전부 정상,
+    이 프로젝트 모듈 임포트 후 imshow에서 정지, 창을 먼저 열면 그 뒤 전부 정상.
+    """
+    import cv2
+
+    cv2.imshow(window_name, np.zeros((10, 10, 3), dtype=np.uint8))
+    cv2.waitKey(1)
+
+
 class ScriptedFailureIntervention:
     """실패로 보이면 트리거 -> recovery_steps 동안 [그리퍼 열기 + 위로 후퇴] -> 정책 복귀.
 
@@ -96,20 +114,6 @@ class ScriptedFailureIntervention:
             self.trigger()
         elif key == self.quit_key:
             self._quit_requested = True
-
-    def open_window(self):
-        """빈 창을 미리 띄워 cv2(Qt/xcb)의 X 연결을 먼저 확립한다.
-
-        **MuJoCo EGL 환경(make_eval_env)을 만들기 전에 반드시 호출해야 한다.** 순서가 반대면
-        cv2가 X에 처음 붙는 시점에 첫 확장 질의(xcb_shm_query_version)의 응답을 영영 못 받고
-        메인 스레드가 멈춘다 — NVIDIA EGL/GL 라이브러리가 먼저 로드되면 Xlib 잠금이 꼬이는
-        것으로 보인다(2026-09-12 서버에서 이분 탐색으로 확인: EGL env 생성 후 imshow = 무한
-        정지, 창을 먼저 열면 정상. ssh -X/RustDesk 어느 화면이든 동일하게 재현).
-        """
-        import cv2
-
-        cv2.imshow(self.window_name, np.zeros((10, 10, 3), dtype=np.uint8))
-        cv2.waitKey(1)
 
     def render(self, obs_raw):
         """render_fn 계약: 프레임을 화면에 띄우고 키 입력을 감지한다. False 반환 시 에피소드 종료.
