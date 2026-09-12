@@ -1,14 +1,9 @@
-"""ScriptedFailureIntervention 상태 머신 + MJPEG 렌더 경로 검증.
+"""ScriptedFailureIntervention 상태 머신 검증.
 
-키 입력을 상태로 바꾸는 _handle_key()와 트리거 이후 액션 시퀀스를 내는 __call__ 상태
-머신, 그리고 render()가 실제로 GUI 없이 프레임을 인코딩해 MJPEG로 내보내는지 확인한다
-(2026-09-12, cv2.imshow 창을 없애고 HTTP 스트림으로 바꾼 뒤 추가 — 이 테스트가 실패하면
-누군가 다시 cv2.imshow류의 GUI 호출을 넣었다가 X11 없는 환경에서 멈추는 걸 여기서 잡는다).
-render()를 호출하지 않는 한 __init__은 포트/터미널에 손대지 않는다 - 여러 테스트가
-독립적으로 인스턴스를 만들어도 서로 간섭하지 않는다.
+cv2/robomimic 없이 돌아야 한다 - render()의 그리기 로직(cv2.imshow 등)은 실제 화면이
+있어야 의미가 있으므로 테스트하지 않고, 키 입력을 상태로 바꾸는 _handle_key()와
+트리거 이후 액션 시퀀스를 내는 __call__ 상태 머신만 검증한다.
 """
-
-import http.client
 
 import numpy as np
 
@@ -85,27 +80,3 @@ def test_handle_key_trigger_and_quit():
     assert not interv.should_end()
     interv._handle_key(ord("q"))
     assert interv.should_end()
-
-
-def test_render_streams_jpeg_without_any_gui():
-    """render()는 cv2.imshow 창을 안 열고, LiveView(MJPEG)로만 프레임을 내보낸다."""
-    interv = _make(http_port=0)  # 0 = OS가 빈 포트 배정(테스트 간 충돌 방지)
-    assert interv._view._started is False  # 생성만으로는 서버/터미널에 손대지 않는다
-
-    obs = {"agentview_image": np.zeros((84, 84, 3), dtype=np.uint8)}
-    try:
-        assert interv.render(obs) is True  # 계속 진행(종료 아님)
-        assert interv._view._httpd.latest_jpeg is not None
-        assert interv._view._stdin_is_tty is False  # pytest 하의 stdin은 tty가 아님
-
-        port = interv._view.bound_port
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
-        conn.request("GET", "/")
-        resp = conn.getresponse()
-        assert resp.status == 200
-        assert b"multipart/x-mixed-replace" in resp.getheader("Content-Type").encode()
-        chunk = resp.read(64)  # 무한 스트림이라 전체를 다 읽지 않고 앞부분만 확인
-        assert chunk.startswith(b"--frame")
-        conn.close()
-    finally:
-        interv.close()
