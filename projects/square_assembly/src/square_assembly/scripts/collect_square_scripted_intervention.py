@@ -8,24 +8,25 @@ r"""정책이 실패로 가는 걸 사람이 보고 판단해서 트리거하면
 KeyboardIntervention(robosuite Keyboard device + pynput)이 필요 없다.
 
 ## 실행 전제
-- 이미지 task라 매 스텝 obs에 카메라 프레임이 이미 들어있다(offscreen render) — 별도
-  onscreen 렌더러를 켜지 않고 그 프레임을 cv2 창에 그대로 띄운다. `MUJOCO_GL=egl` +
-  `DISPLAY`(X11 화면, 예: 도커 컴포즈가 전달하는 값)가 필요하다(README의 image task
-  render=true 패턴과 동일 — mjviewer 온스크린과 동시에 켜면 GL 충돌로 세그폴트한다는
-  실측 지뢰가 있으니 mjviewer는 절대 같이 켜지 않는다).
+- 이미지 task라 매 스텝 obs에 카메라 프레임이 이미 들어있다(offscreen render, `MUJOCO_GL=egl`
+  필요 — GPU 오프스크린 렌더링, X11/DISPLAY와는 무관). 화면 표시는 X11 GUI 창이 아니라
+  MJPEG 스트림(runners/scripted_intervention.py 상단 docstring 참고, 2026-09-12) — ssh -X도
+  RustDesk도 필요 없고, 평범한 `ssh -L`로 포트포워딩만 하면 브라우저로 볼 수 있다.
 - robosuite/numba가 컨테이너 site-packages 경로에 캐시를 못 써서 import 시점에
   RuntimeError를 낼 수 있다(2026-09-09 서버에서 실측) — `NUMBA_CACHE_DIR=/tmp/numba_cache`
   같은 쓰기 가능한 경로를 지정해 우회한다.
 
-사용(컨테이너 WORKDIR=/workspace, 즉 레포 루트에서 실행 기준):
+사용(컨테이너 WORKDIR=/workspace, 즉 레포 루트에서 실행 기준 — X11 관련 옵션 전부 불필요):
     MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache \
     python -m square_assembly.scripts.collect_square_scripted_intervention \
         --base-ckpt projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt \
         --episodes 20 --max-steps 500 \
         --out data/square_scripted_intv_v1.hdf5
 
-창이 뜨면 정책이 자동으로 진행한다. 실패로 보이면 's'를 눌러 회복(그리퍼 열기+후퇴)을
-트리거하고, 정책이 다시 이어받는다. 에피소드를 포기하려면 'q'.
+실행하면 콘솔에 `ssh -L <port>:localhost:<port> <server>` 안내가 뜬다. 로컬 터미널에서
+그대로 포트포워딩한 뒤 브라우저로 `http://localhost:<port>` 접속하면 화면이 보인다. 정책은
+자동으로 진행되고, 화면을 보고 있는 이 스크립트의 SSH 터미널에서(브라우저 아님) 's'를 누르면
+회복(그리퍼 열기+후퇴)을 트리거한다. 에피소드를 포기하려면 'q'.
 """
 
 import argparse
@@ -54,7 +55,7 @@ def _to_storage(key, val, rgb_keys):
 
 
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
-        recovery_steps, retract_z, gripper_open, control_fps):
+        recovery_steps, retract_z, gripper_open, control_fps, http_port):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     saved = load_run_config(base_ckpt)
@@ -79,7 +80,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     interv = ScriptedFailureIntervention(
         camera_key=camera, action_dim=task_cfg.action_dim, trigger_key=trigger_key,
         quit_key=quit_key, recovery_steps=recovery_steps, retract_z=retract_z,
-        gripper_open=gripper_open,
+        gripper_open=gripper_open, http_port=http_port,
     )
 
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
@@ -152,10 +153,11 @@ def main():
     ap.add_argument("--retract-z", type=float, default=1.0, help="회복 중 z축(상승) 액션 크기 [-1,1]")
     ap.add_argument("--gripper-open", type=float, default=-1.0, help="회복 중 그리퍼 액션 값(음수=열림)")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
+    ap.add_argument("--http-port", type=int, default=8765, help="MJPEG 스트림 포트(ssh -L로 포워딩)")
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
         args.trigger_key, args.quit_key, args.recovery_steps, args.retract_z,
-        args.gripper_open, args.control_fps)
+        args.gripper_open, args.control_fps, args.http_port)
 
 
 if __name__ == "__main__":
