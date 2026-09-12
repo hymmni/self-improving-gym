@@ -154,11 +154,16 @@ xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XC
 난다(NVIDIA EGL/GL 라이브러리가 Xlib 잠금을 선점하는 것으로 보임). 이분 탐색으로 확인:
 - 최소 프로세스에서 `cv2.imshow` → 정상
 - torch CUDA 초기화 후 `cv2.imshow` → 정상
+- `import robosuite`만, `import robomimic.utils.obs_utils`만 → 각각 정상
 - robosuite EGL env 생성 후 `cv2.imshow` → **무한 정지**
-- **cv2 창을 먼저 열어두고** EGL env 생성 → 그 뒤 `imshow` 반복도 전부 정상
+- 이 프로젝트 모듈 임포트(`square_assembly.factory` / `utils.task_utils` /
+  `runners.intervention_rollout`)만 해도 그 뒤 `cv2.imshow` → **무한 정지**
+- **cv2 창을 먼저 열어두고** 그 임포트·EGL env 생성 → 그 뒤 `imshow` 반복도 전부 정상
 
-**해결**: GUI 창을 EGL 초기화보다 **먼저** 한 번 띄워라(빈 프레임 + `waitKey(1)`이면 충분).
-`runners/scripted_intervention.py`의 `open_window()`와 그 호출 지점이 이 패턴의 예다.
+**해결**: GUI 창을 robosuite/robomimic을 끌어오는 임포트보다 **먼저** 한 번 띄워라(빈 프레임 +
+`waitKey(1)`이면 충분). `runners/scripted_intervention.py`의 모듈 함수 `open_window()`와,
+그걸 무거운 임포트 앞에서 호출하려고 그 임포트들을 `run()` 안으로 내린
+`scripts/collect_square_scripted_intervention.py`가 이 패턴의 예다.
 
 **주의 — 2026-09-11에 이 문단에 적었던 "이 서버 sshd의 X11 forwarding이 확장 질의 응답을
 구조적으로 못 돌려준다"는 진단은 틀렸다.** 같은 증상이 ssh를 전혀 안 거치는 RustDesk의 로컬

@@ -35,12 +35,10 @@ import h5py
 import numpy as np
 import torch
 
-from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
-from square_assembly.factory import registry
-from square_assembly.runners.intervention_rollout import _predict_chunk, collect_episode
-from square_assembly.runners.scripted_intervention import ScriptedFailureIntervention
-from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_config
-from square_assembly.utils.task_utils import is_image_task, make_eval_env, task_obs_keys
+# scripted_intervention은 모듈 단계에서 numpy만 쓴다(robosuite/EGL을 안 건드림) — 그래서
+# 여기서 임포트해도 안전하다. robosuite/robomimic을 끌어오는 나머지 임포트는 run() 안에서
+# open_window() 뒤에 한다(이유는 open_window docstring, DOCKER.md §4).
+from square_assembly.runners.scripted_intervention import ScriptedFailureIntervention, open_window
 
 
 def _to_storage(key, val, rgb_keys):
@@ -54,7 +52,17 @@ def _to_storage(key, val, rgb_keys):
 
 
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
-        recovery_steps, retract_z, gripper_open, control_fps):
+        recovery_steps, retract_z, gripper_open, control_fps, window_name="rollout"):
+    # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
+    # cv2.imshow가 영영 멈춘다.
+    open_window(window_name)
+
+    from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
+    from square_assembly.factory import registry
+    from square_assembly.runners.intervention_rollout import _predict_chunk, collect_episode
+    from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_config
+    from square_assembly.utils.task_utils import is_image_task, make_eval_env, task_obs_keys
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     saved = load_run_config(base_ckpt)
@@ -74,11 +82,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     interv = ScriptedFailureIntervention(
         camera_key=camera, action_dim=task_cfg.action_dim, trigger_key=trigger_key,
         quit_key=quit_key, recovery_steps=recovery_steps, retract_z=retract_z,
-        gripper_open=gripper_open,
+        gripper_open=gripper_open, window_name=window_name,
     )
-    # 반드시 make_eval_env(=MuJoCo EGL 초기화)보다 먼저 — 순서가 바뀌면 첫 imshow에서
-    # 영원히 멈춘다(이유는 ScriptedFailureIntervention.open_window docstring).
-    interv.open_window()
 
     env = make_eval_env(task_cfg)
 
