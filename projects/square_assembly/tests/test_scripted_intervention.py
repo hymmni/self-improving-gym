@@ -88,17 +88,17 @@ def test_handle_key_trigger_and_quit():
 
 
 def test_render_streams_jpeg_without_any_gui():
-    """render()는 cv2.imshow 창을 안 열고, MJPEG 스트림으로만 프레임을 내보낸다."""
+    """render()는 cv2.imshow 창을 안 열고, LiveView(MJPEG)로만 프레임을 내보낸다."""
     interv = _make(http_port=0)  # 0 = OS가 빈 포트 배정(테스트 간 충돌 방지)
-    assert interv._started is False  # 생성만으로는 서버/터미널에 손대지 않는다
+    assert interv._view._started is False  # 생성만으로는 서버/터미널에 손대지 않는다
 
     obs = {"agentview_image": np.zeros((84, 84, 3), dtype=np.uint8)}
     try:
         assert interv.render(obs) is True  # 계속 진행(종료 아님)
-        assert interv._httpd.latest_jpeg is not None
-        assert interv._stdin_is_tty is False  # pytest 하의 stdin은 tty가 아님
+        assert interv._view._httpd.latest_jpeg is not None
+        assert interv._view._stdin_is_tty is False  # pytest 하의 stdin은 tty가 아님
 
-        port = interv._httpd.server_port
+        port = interv._view.bound_port
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
         conn.request("GET", "/")
         resp = conn.getresponse()
