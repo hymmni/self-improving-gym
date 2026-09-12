@@ -153,7 +153,10 @@ class ScriptedFailureIntervention:
             return
         self._started = True
 
-        self._httpd = ThreadingHTTPServer(("0.0.0.0", self.http_port), _MJPEGHandler)
+        # 127.0.0.1로만 바인드 - network_mode: host라 0.0.0.0이면 서버 실제 네트워크
+        # 인터페이스에 인증 없이 노출된다. 루프백만 열면 서버 자신 또는 `ssh -L` 터널을
+        # 통해서만 접근 가능(2026-09-12, 사용자 지적으로 발견).
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", self.http_port), _MJPEGHandler)
         self._httpd.latest_jpeg = None
         self._http_thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._http_thread.start()
