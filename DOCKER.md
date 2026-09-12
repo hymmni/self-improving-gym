@@ -142,16 +142,29 @@ docker compose run --rm -e DISPLAY=:1 dev bash   # 이후 run은 -e DISPLAY=:1�
 위 세 가지를 다 잡았는데도 안 되면, 원격 데스크톱(RustDesk 등)으로 서버의 **실제 로컬
 세션**(`:1` 등, GDM 관리 — 위 GDM 문단 참고)에 붙는 쪽이 훨씬 간단하고 안정적이다.
 
-**2026-09-11 실측 — 이 서버는 결국 ssh -X 자체가 GUI 앱엔 안 맞았다.** 위 1~3번을 전부
-적용(`X11UseLocalhost yes`, tmux 안 거침, `~/.Xauthority` 마운트)하고 `-X`→`-Y`(trusted
-forwarding)까지 바꿔봐도, cv2(Qt/xcb)가 연결 초기화 중 보내는 확장 버전 질의
-(`xcb_shm_query_version`, 그다음 `xcb_xfixes_query_version`)에서 응답을 영영 못 받고
-멈췄다(py-spy 네이티브 스택으로 확인). `QT_XCB_NO_MITSHM=1` 등 Qt 쪽 개별 확장 우회 env로
-하나를 넘겨도 바로 다음 확장에서 똑같이 멈춰, 확장을 하나씩 꺼가는 방식으론 끝이 안 난다 —
-이 sshd의 X11 forwarding 프록시가 확장-질의류 응답을 구조적으로 못 돌려주는 것으로 보인다.
-**결론: 이 서버에서 cv2.imshow 같은 실시간 GUI가 필요하면 처음부터 ssh -X를 시도하지 말고
-RustDesk로 바로 가라** — 이미 서비스가 떠 있어(`systemctl status rustdesk`) 추가 설정이
-필요 없다.
+### cv2.imshow가 멈춘다면: MuJoCo EGL 초기화 순서 문제다 (2026-09-12 실측, 중요)
+
+**증상**: `cv2.imshow`가 첫 호출에서 영영 안 돌아온다. py-spy 네이티브 스택을 뜨면 Qt의
+xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XCB_NO_MITSHM=1`로 그걸
+끄면 그다음 `xcb_xfixes_query_version`)에서 `xcb_wait_for_reply`에 박혀 있다. Ctrl+C도 안
+먹고(네이티브 코드라), 겉보기엔 CPU 100%라 "뭔가 계산 중"처럼 보인다(실제론 OpenMP 스핀).
+
+**원인**: X11/ssh/도커 문제가 아니다. **MuJoCo EGL 환경(`MUJOCO_GL=egl`, robosuite
+`make_eval_env` 등)을 먼저 만들면, 그 뒤에 cv2(Qt/xcb)가 X 서버에 처음 붙을 때 데드락**이
+난다(NVIDIA EGL/GL 라이브러리가 Xlib 잠금을 선점하는 것으로 보임). 이분 탐색으로 확인:
+- 최소 프로세스에서 `cv2.imshow` → 정상
+- torch CUDA 초기화 후 `cv2.imshow` → 정상
+- robosuite EGL env 생성 후 `cv2.imshow` → **무한 정지**
+- **cv2 창을 먼저 열어두고** EGL env 생성 → 그 뒤 `imshow` 반복도 전부 정상
+
+**해결**: GUI 창을 EGL 초기화보다 **먼저** 한 번 띄워라(빈 프레임 + `waitKey(1)`이면 충분).
+`runners/scripted_intervention.py`의 `open_window()`와 그 호출 지점이 이 패턴의 예다.
+
+**주의 — 2026-09-11에 이 문단에 적었던 "이 서버 sshd의 X11 forwarding이 확장 질의 응답을
+구조적으로 못 돌려준다"는 진단은 틀렸다.** 같은 증상이 ssh를 전혀 안 거치는 RustDesk의 로컬
+`:1` 화면에서도 똑같이 재현돼서 드러났다. ssh -X 경로 자체는 위 1~3번(`X11UseLocalhost yes`,
+tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
+뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
 
 - jax venv: matplotlib TkAgg 백엔드 사용 (이미지에 `python3-tk` 설치됨)
 - torch venv: mujoco `mjviewer` 온스크린 창 사용 시 컨테이너 환경변수 `MUJOCO_GL`을 비워야 함 (compose 기본값은 `MUJOCO_GL=egl`, 헤드리스 학습/평가용). 온스크린이 필요하면:
