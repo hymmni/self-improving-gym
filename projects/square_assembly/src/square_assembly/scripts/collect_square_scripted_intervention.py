@@ -71,16 +71,19 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     if camera not in rgb_keys:
         raise ValueError(f"--camera {camera}는 task.rgb_keys {rgb_keys}에 없다")
 
-    env = make_eval_env(task_cfg)
-
-    def predict_fn(history):
-        return _predict_chunk(policy, normalizer, history, obs_keys, device, rgb_keys=rgb_keys)
-
     interv = ScriptedFailureIntervention(
         camera_key=camera, action_dim=task_cfg.action_dim, trigger_key=trigger_key,
         quit_key=quit_key, recovery_steps=recovery_steps, retract_z=retract_z,
         gripper_open=gripper_open,
     )
+    # 반드시 make_eval_env(=MuJoCo EGL 초기화)보다 먼저 — 순서가 바뀌면 첫 imshow에서
+    # 영원히 멈춘다(이유는 ScriptedFailureIntervention.open_window docstring).
+    interv.open_window()
+
+    env = make_eval_env(task_cfg)
+
+    def predict_fn(history):
+        return _predict_chunk(policy, normalizer, history, obs_keys, device, rgb_keys=rgb_keys)
 
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     outcomes = {"success": 0, "fail": 0}
