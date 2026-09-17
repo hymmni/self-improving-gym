@@ -60,6 +60,31 @@ from square_assembly.runners.square_oracle import SquareAssemblyOracle
 _MAX_DISPLAY = 480
 
 
+def check_render(env, camera_name, display_size):
+    """렌더가 실제로 그려지는지 한 번 확인한다 — 안 그러면 노이즈를 수집하게 된다.
+
+    2026-09-17 서버에서 실측: 어떤 컨테이너에선 MuJoCo 오프스크린 렌더가 조용히 아무것도
+    안 하고(프레임당 0.0ms) 초기화되지 않은 메모리를 돌려준다. obs도 같이 노이즈가 되므로
+    정책은 헛것을 보고, 화면도 지지직거린다(에러는 안 난다). 같은 이미지·드라이버·GPU인데
+    먼저 떠 있던 컨테이너는 멀쩡하고 새로 만든 컨테이너만 그랬다(DOCKER.md §4 참고).
+
+    이웃 픽셀 차이의 평균으로 판별한다 — 정상 장면은 84픽셀에서 ~4, 노이즈는 30~76이었다.
+    """
+    obs = env.reset()
+    frame = env.render(mode="rgb_array", height=84, width=84, camera_name=camera_name)
+    rough = float(np.abs(np.diff(frame.astype(int), axis=1)).mean())
+    big = env.render(mode="rgb_array", height=display_size, width=display_size, camera_name=camera_name)
+    big_rough = float(np.abs(np.diff(big.astype(int), axis=1)).mean())
+    print(f"렌더 점검: 이웃 픽셀 차이 84={rough:.1f} {display_size}={big_rough:.2f}", flush=True)
+    if not 0.5 < rough < 15 or big_rough < 0.05:
+        raise RuntimeError(
+            f"렌더가 장면이 아니라 노이즈/검은 화면을 내고 있다(84={rough:.1f}, "
+            f"{display_size}={big_rough:.2f}) — 이대로 수집하면 obs까지 노이즈라 데이터가 쓸모없다. "
+            "다른 컨테이너에서 실행해야 한다(DOCKER.md §4 '렌더가 노이즈로 나올 때')."
+        )
+    return obs
+
+
 def _to_storage(key, val, rgb_keys):
     """collect_square_rollouts._to_storage와 동일 — CHW,float[0,1] -> HWC,uint8."""
     val = np.asarray(val)
@@ -105,10 +130,12 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         raise ValueError(f"--camera {camera}는 task.rgb_keys {rgb_keys}에 없다")
 
     env = make_eval_env(task_cfg)
+    display_camera = camera[: -len("_image")]
+    check_render(env, display_camera, display_size)
+
     interv = ScriptedFailureIntervention(
         SquareAssemblyOracle(env), trigger_key=trigger_key, quit_key=quit_key, window_name=window_name,
     )
-    display_camera = camera[: -len("_image")]
 
     def predict_fn(history):
         return _predict_chunk(policy, normalizer, history, obs_keys, device, rgb_keys=rgb_keys)

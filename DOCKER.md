@@ -171,6 +171,39 @@ xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XC
 tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
 뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
 
+### 렌더가 노이즈로 나올 때: 컨테이너를 바꿔라 (2026-09-17 실측, 원인 미해결)
+
+**증상**: 에러 없이 화면이 지지직거리고, 정책이 갑자기 아무것도 못 한다. MuJoCo 오프스크린
+렌더가 **조용히 아무 일도 안 하고**(프레임당 0.0ms) 초기화되지 않은 메모리를 돌려준다 —
+화면뿐 아니라 **정책이 보는 obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다.
+
+같은 이미지·같은 드라이버(595.84)·같은 GPU·같은 compose 설정인데도 **먼저 떠 있던 컨테이너는
+정상, 그 뒤에 새로 만든 컨테이너는 전부 깨졌다**(compose up/run, DISPLAY, cv2 창 유무,
+NVIDIA_DRIVER_CAPABILITIES와 무관하게 재현). EGL 컨텍스트 자체는 정상으로 만들어지고
+(`GL_RENDERER: NVIDIA GeForce RTX 5090`) 에러도 안 난다. 원인은 아직 모름 — 공용 서버라
+다른 사용자가 GPU를 96% 쓰고 있던 상태였다는 점만 기록해둔다.
+
+**확인**: collect_square_scripted_intervention.py가 시작할 때 `check_render()`로 자동 점검하고
+깨졌으면 수집 전에 멈춘다. 직접 확인하려면 컨테이너 안에서:
+
+```bash
+source /opt/venvs/torch/bin/activate
+MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache python -c "
+import numpy as np
+from square_assembly.envs.robomimic.factory import make_image_env
+env = make_image_env('NutAssemblySquare', 'Panda', ['robot0_eef_pos'], ['agentview_image'], ['agentview'], image_size=84)
+env.reset()
+im = env.render(mode='rgb_array', height=84, width=84, camera_name='agentview')
+r = np.abs(np.diff(im.astype(int), axis=1)).mean()
+print('이웃 픽셀 차이', round(float(r), 1), '->', '정상' if r < 15 else '노이즈(이 컨테이너에선 수집하지 마라)')
+"
+```
+
+정상 장면은 ~4, 깨진 컨테이너는 30~76이 나온다.
+
+**대처**: 렌더가 정상인 컨테이너에서 실행한다(`docker exec -it <그 컨테이너> bash`).
+새로 만든 컨테이너가 전부 깨진다면 호스트 쪽 GPU/드라이버 상태 문제일 가능성이 크다.
+
 ### cv2 창을 띄운 채 오프스크린 렌더 해상도를 키우면 죽는다 (2026-09-17 실측)
 
 **증상**: `mujoco.FatalError: Default framebuffer is not complete, error 0x0` — 이어서
