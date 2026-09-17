@@ -171,6 +171,19 @@ xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XC
 tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
 뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
 
+### cv2 창을 띄운 채 오프스크린 렌더 해상도를 키우면 죽는다 (2026-09-17 실측)
+
+**증상**: `mujoco.FatalError: Default framebuffer is not complete, error 0x0` — 이어서
+`AttributeError: 'MjRenderContextOffscreen' object has no attribute 'con'`.
+
+robosuite 오프스크린 버퍼는 640x480(MJCF 기본)으로 잡힌다. 그보다 큰 렌더를 요청하면
+`binding_utils.update_offscreen_size`가 `MjrContext`를 **다시 만드는데**, cv2(Qt) 창이 이미
+떠 있는 프로세스에선 그 재생성이 EGL에서 실패한다. 같은 코드가 창 없이 헤드리스면 512도
+정상이고, compose run 컨테이너에서 창을 띄우면 512는 죽고 480은 정상이었다.
+
+→ 화면 표시용 렌더는 **480 이하**로 요청한다(정책 입력 84픽셀과 별개로 크게 보고 싶을 때).
+collect_square_scripted_intervention.py의 `--display-size`가 이 상한을 강제한다.
+
 - jax venv: matplotlib TkAgg 백엔드 사용 (이미지에 `python3-tk` 설치됨)
 - torch venv: mujoco `mjviewer` 온스크린 창 사용 시 컨테이너 환경변수 `MUJOCO_GL`을 비워야 함 (compose 기본값은 `MUJOCO_GL=egl`, 헤드리스 학습/평가용). 온스크린이 필요하면:
   ```bash

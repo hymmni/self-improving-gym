@@ -28,7 +28,8 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
 끝까지 오라클이 잡는다 — 정책에 돌려주지 않는다). 포기하려면 'q'.
 
 화면은 --display-size 해상도로 따로 렌더해서 보여준다(학습/저장 데이터는 task의
-image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리).
+image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리). 480을 넘길 순 없다
+(_MAX_DISPLAY 참고).
 
 오라클은 한 번에 실패해도 처음부터 반복하므로 스텝만 충분하면 결국 성공한다(고정 시드
 20에피소드 실측, 2026-09-17: 트리거 후 성공까지 중앙값 224스텝·최대 539스텝) —
@@ -49,6 +50,16 @@ from square_assembly.runners.scripted_intervention import ScriptedFailureInterve
 from square_assembly.runners.square_oracle import SquareAssemblyOracle
 
 
+# robosuite 오프스크린 버퍼는 640x480(MJCF 기본)으로 잡히고, 그보다 큰 렌더를 요청하면
+# binding_utils.update_offscreen_size가 MjrContext를 다시 만든다. 그런데 cv2(Qt) 창이 이미
+# 떠 있는 프로세스에선 그 재생성이 EGL에서 실패한다 — `mujoco.FatalError: Default framebuffer
+# is not complete, error 0x0` (2026-09-17 서버 실측: compose run 컨테이너에서 512는 죽고 480은
+# 정상, 같은 코드가 창 없이 헤드리스면 512도 정상).
+# ponytail: 480 상한. 더 크게 보려면 render context를 직접 큰 max_width/max_height로 만들어
+# sim.add_render_context로 꽂아야 하는데, 모니터링 화면에 그만한 값어치는 없다.
+_MAX_DISPLAY = 480
+
+
 def _to_storage(key, val, rgb_keys):
     """collect_square_rollouts._to_storage와 동일 — CHW,float[0,1] -> HWC,uint8."""
     val = np.asarray(val)
@@ -64,6 +75,12 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다.
     open_window(window_name)
+
+    if display_size > _MAX_DISPLAY:
+        raise ValueError(
+            f"--display-size는 {_MAX_DISPLAY} 이하여야 한다(요청 {display_size}) — "
+            "그보다 크면 첫 프레임에서 MjrContext 재생성이 EGL에서 실패한다(_MAX_DISPLAY 주석 참고)."
+        )
 
     from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
     from square_assembly.factory import registry
@@ -166,7 +183,8 @@ def main():
     ap.add_argument("--camera", default="agentview_image")
     ap.add_argument("--trigger-key", default="s", help="실패 판단 시 오라클에 넘기는 키")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
-    ap.add_argument("--display-size", type=int, default=512, help="화면 표시용 렌더 해상도(저장 데이터와 무관)")
+    ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
+                    help=f"화면 표시용 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY})")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
