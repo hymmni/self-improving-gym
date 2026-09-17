@@ -1,11 +1,11 @@
-r"""정책이 실패로 가는 걸 사람이 보고 판단해서 트리거하면, 회복은 고정 스크립트가
-실행하는 반개입(半介入) 수집. collect_square_rollouts.py(완전 무개입, 헤드리스 배치)의
-"성공만 필터해서 추가 학습"용 성공 데모를 더 효율적으로 늘리기 위한 변형이다.
+r"""정책이 실패로 가는 걸 사람이 보고 판단해서 트리거하면, 그 뒤는 룰 기반 오라클이
+성공까지 끌고 가는 반개입(半介入) 수집. collect_square_rollouts.py(완전 무개입, 헤드리스
+배치)의 "성공만 필터해서 추가 학습"용 성공 데모를 더 효율적으로 늘리기 위한 변형이다.
 
 사람은 조종하지 않는다 — 화면을 보고 있다가 실패로 보이면 트리거 키를 누르는 것뿐이고,
-그 뒤 recovery_steps 동안은 runners/scripted_intervention.ScriptedFailureIntervention이
-고정 회복 액션(그리퍼 열기 + 위로 후퇴)을 실행한 뒤 정책에 제어를 돌려준다. 그래서
-KeyboardIntervention(robosuite Keyboard device + pynput)이 필요 없다.
+그 뒤는 runners/square_oracle.SquareAssemblyOracle이 sim의 특권 정보(너트/핸들/peg 위치)로
+너트를 peg에 꽂을 때까지 제어한다. 그래서 KeyboardIntervention(robosuite Keyboard device +
+pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드는 성공으로 끝난다.
 
 ## 실행 전제
 - 이미지 task라 매 스텝 obs에 카메라 프레임이 이미 들어있다(offscreen render) — 별도
@@ -21,11 +21,18 @@ KeyboardIntervention(robosuite Keyboard device + pynput)이 필요 없다.
     MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache \
     python -m square_assembly.scripts.collect_square_scripted_intervention \
         --base-ckpt projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt \
-        --episodes 20 --max-steps 500 \
+        --episodes 20 --max-steps 700 \
         --out data/square_scripted_intv_v1.hdf5
 
-창이 뜨면 정책이 자동으로 진행한다. 실패로 보이면 's'를 눌러 회복(그리퍼 열기+후퇴)을
-트리거하고, 정책이 다시 이어받는다. 에피소드를 포기하려면 'q'.
+창이 뜨면 정책이 자동으로 진행한다. 실패로 보이면 's'를 눌러 오라클에 넘긴다(그 에피소드는
+끝까지 오라클이 잡는다 — 정책에 돌려주지 않는다). 포기하려면 'q'.
+
+화면은 --display-size 해상도로 따로 렌더해서 보여준다(학습/저장 데이터는 task의
+image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리).
+
+오라클은 한 번에 실패해도 처음부터 반복하므로 스텝만 충분하면 결국 성공한다(고정 시드
+20에피소드 실측, 2026-09-17: 트리거 후 성공까지 중앙값 224스텝·최대 539스텝) —
+--max-steps는 넉넉히(700 이상) 주는 게 좋다.
 """
 
 import argparse
@@ -39,6 +46,7 @@ import torch
 # 여기서 임포트해도 안전하다. robosuite/robomimic을 끌어오는 나머지 임포트는 run() 안에서
 # open_window() 뒤에 한다(이유는 open_window docstring, DOCKER.md §4).
 from square_assembly.runners.scripted_intervention import ScriptedFailureIntervention, open_window
+from square_assembly.runners.square_oracle import SquareAssemblyOracle
 
 
 def _to_storage(key, val, rgb_keys):
@@ -52,7 +60,7 @@ def _to_storage(key, val, rgb_keys):
 
 
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
-        recovery_steps, retract_z, gripper_open, control_fps, window_name="rollout"):
+        control_fps, display_size, window_name="rollout"):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다.
     open_window(window_name)
@@ -79,13 +87,11 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     if camera not in rgb_keys:
         raise ValueError(f"--camera {camera}는 task.rgb_keys {rgb_keys}에 없다")
 
-    interv = ScriptedFailureIntervention(
-        camera_key=camera, action_dim=task_cfg.action_dim, trigger_key=trigger_key,
-        quit_key=quit_key, recovery_steps=recovery_steps, retract_z=retract_z,
-        gripper_open=gripper_open, window_name=window_name,
-    )
-
     env = make_eval_env(task_cfg)
+    interv = ScriptedFailureIntervention(
+        SquareAssemblyOracle(env), trigger_key=trigger_key, quit_key=quit_key, window_name=window_name,
+    )
+    display_camera = camera[: -len("_image")]
 
     def predict_fn(history):
         return _predict_chunk(policy, normalizer, history, obs_keys, device, rgb_keys=rgb_keys)
@@ -103,7 +109,11 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
                 def track(obs_raw, _store=obs_ep):
                     _store.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
-                    return interv.render(obs_raw)
+                    # 저장/학습은 obs의 84픽셀 그대로, 화면만 따로 고해상도로 렌더한다.
+                    return interv.render(env.render(
+                        mode="rgb_array", height=display_size, width=display_size,
+                        camera_name=display_camera,
+                    ))
 
                 result = collect_episode(
                     env, policy, normalizer, obs_keys,
@@ -151,19 +161,16 @@ def main():
         default="projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt",
     )
     ap.add_argument("--episodes", type=int, default=20)
-    ap.add_argument("--max-steps", type=int, default=500)
+    ap.add_argument("--max-steps", type=int, default=700)
     ap.add_argument("--out", default="data/square_scripted_intv.hdf5")
     ap.add_argument("--camera", default="agentview_image")
-    ap.add_argument("--trigger-key", default="s", help="실패 판단 시 회복을 트리거하는 키")
+    ap.add_argument("--trigger-key", default="s", help="실패 판단 시 오라클에 넘기는 키")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
-    ap.add_argument("--recovery-steps", type=int, default=20, help="트리거 후 스크립트가 제어하는 스텝 수")
-    ap.add_argument("--retract-z", type=float, default=1.0, help="회복 중 z축(상승) 액션 크기 [-1,1]")
-    ap.add_argument("--gripper-open", type=float, default=-1.0, help="회복 중 그리퍼 액션 값(음수=열림)")
+    ap.add_argument("--display-size", type=int, default=512, help="화면 표시용 렌더 해상도(저장 데이터와 무관)")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
-        args.trigger_key, args.quit_key, args.recovery_steps, args.retract_z,
-        args.gripper_open, args.control_fps)
+        args.trigger_key, args.quit_key, args.control_fps, args.display_size)
 
 
 if __name__ == "__main__":
