@@ -22,6 +22,7 @@ pynput 리스너로 받는다(pynput은 전역 리스너라 다른 창에 타이
 """
 
 import os
+import time
 
 import numpy as np
 
@@ -57,6 +58,7 @@ class MouseTeleopController:
         self.target_yaw = None     # None이면 현재 야우 유지
         self.grip_cmd = -1.0
         self.z_up = self.z_down = False
+        self.z_up_until = 0.0       # cv2 키 경로(space=32)로 들어온 z-up이 유효한 시각(time.time())
         self.grip_pressed = False
         self._prev_xy = None
 
@@ -85,7 +87,7 @@ class MouseTeleopController:
             delta = self.kp * (self.target_xy - xy) - self.kd * v
             a[:2] = np.clip(delta / _POS_SCALE, -self.pos_cap, self.pos_cap)
 
-        dz = float(self.z_up) - float(self.z_down)
+        dz = float(self.z_up or time.time() < self.z_up_until) - float(self.z_down)
         if (dz > 0 and grip[2] >= self.z_max) or (dz < 0 and grip[2] <= self.z_min):
             dz = 0.0
         a[2] = self.z_speed * dz
@@ -130,7 +132,7 @@ class MouseTeleopIntervention:
         state_fn: 테스트용 — sim 상태 dict를 돌려주는 함수(None이면 read_privileged_state).
     """
 
-    _HELP = "[h]=human  [p]=policy  [s]=pause  [q]=give up   Space/Shift=z up/down  wheel=yaw  LMB=grip"
+    _HELP = "[h]=human [p]=policy [s]=pause [q]=give up  Space/Shift=z up/down  wheel or a/d=yaw  LMB=grip"
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
                  takeover_key="h", handback_key="p", pause_key="s", quit_key="q", state_fn=None):
@@ -140,7 +142,8 @@ class MouseTeleopIntervention:
         self.map = TopDownMap(table[:2] if table is not None else (0.0, 0.0), map_extent, map_size)
         self.window_name = window_name
         self.keys = {ord(takeover_key): "takeover", ord(handback_key): "handback",
-                     ord(pause_key): "pause", ord(quit_key): "quit"}
+                     ord(pause_key): "pause", ord(quit_key): "quit",
+                     ord(" "): "z_up", ord("a"): "yaw_left", ord("d"): "yaw_right"}
         self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
         self._listener = None      # pynput, render()에서 지연 생성(테스트는 창 없이 돈다)
         self._mouse_bound = False
@@ -182,6 +185,14 @@ class MouseTeleopIntervention:
             self._paused = not self._paused
         elif what == "quit":
             self._quit_requested = True
+        # 아래 셋은 pynput이 못 받는 환경(원격 데스크톱이 문자로 주입)을 위한 cv2 경로.
+        # space는 키 반복이 오는 동안 z-up이 유지되게 짧은 유효시간을 준다.
+        elif what == "z_up":
+            self.controller.z_up_until = time.time() + 0.25
+        elif what == "yaw_left":
+            self.controller.wheel(-1)
+        elif what == "yaw_right":
+            self.controller.wheel(+1)
 
     def _on_mouse(self, event, x, y, flags, _param):
         import cv2

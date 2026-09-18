@@ -141,3 +141,17 @@ def test_reset_clears_everything():
     interv.reset()
     assert interv(0, {}) is None and not interv._paused and not interv.should_end()
     assert interv.num_triggers == 0
+
+
+def test_cv2_key_paths_for_space_and_yaw():
+    """pynput 없이도 space(32)·a/d가 cv2 키 경로로 z-up·야우를 움직인다."""
+    interv = _make()
+    interv._handle_key(ord("h"))
+    interv._handle_key(ord(" "))
+    assert interv(0, {})[2] > 0            # 유효시간 안: z-up
+    interv.controller.z_up_until = 0.0
+    assert interv(1, {})[2] == 0.0
+    interv._handle_key(ord("d"))
+    assert interv(2, {})[5] > 0            # +5도 목표 -> z축 양의 회전
+    interv._handle_key(ord("a")); interv._handle_key(ord("a"))
+    assert interv(3, {})[5] < 0
