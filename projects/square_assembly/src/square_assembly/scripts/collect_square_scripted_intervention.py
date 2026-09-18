@@ -37,6 +37,7 @@ image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아�
 """
 
 import argparse
+import time
 import os
 
 import h5py
@@ -61,29 +62,48 @@ from square_assembly.runners.square_oracle import SquareAssemblyOracle
 _MAX_DISPLAY = 480
 
 
-def check_render(env, camera_name, display_size):
-    """렌더가 실제로 그려지는지 한 번 확인한다 — 안 그러면 노이즈를 수집하게 된다.
+def frame_roughness(im):
+    """이웃 픽셀 차이의 평균 — 정상 장면은 84픽셀에서 4~10, 노이즈는 30~130, 검은 화면은 ~0."""
+    return float(np.abs(np.diff(np.asarray(im).astype(int), axis=1)).mean())
 
-    2026-09-17 서버에서 실측: 어떤 컨테이너에선 MuJoCo 오프스크린 렌더가 조용히 아무것도
-    안 하고(프레임당 0.0ms) 초기화되지 않은 메모리를 돌려준다. obs도 같이 노이즈가 되므로
-    정책은 헛것을 보고, 화면도 지지직거린다(에러는 안 난다). 같은 이미지·드라이버·GPU인데
-    먼저 떠 있던 컨테이너는 멀쩡하고 새로 만든 컨테이너만 그랬다(DOCKER.md §4 참고).
 
-    이웃 픽셀 차이의 평균으로 판별한다 — 정상 장면은 84픽셀에서 ~4, 노이즈는 30~76이었다.
+def renderer_is_noisy(env, camera_name, display_size, n_steps=5):
+    """reset 뒤 n_steps 스텝을 진행한 프레임까지 보고 렌더 고장을 판정한다.
+
+    2026-09-18 pororo 실측으로 고장의 정확한 서명을 잡았다: 고장난 컨테이너/구간에서는
+    **reset 직후 첫 프레임은 정상이고 step 이후 프레임부터 전부 노이즈**(또는 검은 화면)다.
+    그래서 첫 프레임만 보던 예전 점검은 고장을 그대로 통과시켰다(v2 수집 첫 에피소드 700스텝이
+    노이즈로 저장된 사고). 같은 이미지·GPU·드라이버·코드인데 컨테이너를 만든 시각에 따라
+    정상/고장이 갈리고(16:30~16:55에 만든 것 전부 고장, 그 전후는 정상), 한 프로세스 안에서
+    시간이 지나면 회복되기도 한다. GPU 부하·DISPLAY·TTY·마운트 디렉터리는 실험으로 배제했다
+    (DOCKER.md §4). 원인은 미상 — 그래서 판정과 재시도로 막는다.
     """
     obs = env.reset()
-    frame = env.render(mode="rgb_array", height=84, width=84, camera_name=camera_name)
-    rough = float(np.abs(np.diff(frame.astype(int), axis=1)).mean())
-    big = env.render(mode="rgb_array", height=display_size, width=display_size, camera_name=camera_name)
-    big_rough = float(np.abs(np.diff(big.astype(int), axis=1)).mean())
-    print(f"렌더 점검: 이웃 픽셀 차이 84={rough:.1f} {display_size}={big_rough:.2f}", flush=True)
-    if not 0.5 < rough < 15 or big_rough < 0.05:
-        raise RuntimeError(
-            f"렌더가 장면이 아니라 노이즈/검은 화면을 내고 있다(84={rough:.1f}, "
-            f"{display_size}={big_rough:.2f}) — 이대로 수집하면 obs까지 노이즈라 데이터가 쓸모없다. "
-            "다른 컨테이너에서 실행해야 한다(DOCKER.md §4 '렌더가 노이즈로 나올 때')."
-        )
-    return obs
+    for _ in range(n_steps):
+        obs, _, _, _ = env.step(np.zeros(env.action_dimension if hasattr(env, "action_dimension") else 7))
+    small = frame_roughness(np.transpose(obs[camera_name], (1, 2, 0)) * 255.0)
+    big = frame_roughness(env.render(mode="rgb_array", height=display_size, width=display_size,
+                                     camera_name=camera_name[: -len("_image")]))
+    print(f"렌더 점검(step {n_steps} 이후): 이웃 픽셀 차이 84={small:.1f} {display_size}={big:.2f}", flush=True)
+    return not (2.0 < small < 15.0) or big < 0.05
+
+
+def wait_for_renderer(make_env, camera_name, display_size, timeout_s=120.0, retry_s=5.0):
+    """렌더가 정상인 env를 돌려준다 — 고장이면 env를 닫고 다시 만들며 timeout_s까지 기다린다."""
+    t0 = time.time()
+    while True:
+        env = make_env()
+        if not renderer_is_noisy(env, camera_name, display_size):
+            return env
+        if hasattr(env, "close"):
+            env.close()
+        if time.time() - t0 > timeout_s:
+            raise RuntimeError(
+                f"{timeout_s:.0f}초 동안 렌더가 노이즈/검은 화면만 냈다 — 이대로 수집하면 obs까지 노이즈라 "
+                "데이터가 쓸모없다. 컨테이너를 새로 만들어 다시 시도한다(DOCKER.md §4 '렌더가 노이즈로 나올 때')."
+            )
+        print(f"  렌더 고장 — {retry_s:.0f}초 뒤 env를 다시 만들어 재점검 ({time.time() - t0:.0f}s 경과)", flush=True)
+        time.sleep(retry_s)
 
 
 def _to_storage(key, val, rgb_keys):
@@ -130,9 +150,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     if camera not in rgb_keys:
         raise ValueError(f"--camera {camera}는 task.rgb_keys {rgb_keys}에 없다")
 
-    env = make_eval_env(task_cfg)
+    env = wait_for_renderer(lambda: make_eval_env(task_cfg), camera, display_size)
     display_camera = camera[: -len("_image")]
-    check_render(env, display_camera, display_size)
 
     if mode == "mouse":
         interv = MouseTeleopIntervention(
@@ -187,6 +206,15 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     obs_grp.create_dataset(k, data=stacked, compression="gzip" if k in rgb_keys else None)
 
                 is_success = bool(result["success"])
+                # 에피소드 중간에 렌더가 고장나도 데이터에 못 들어가게: 프레임 거칠기가 하나라도
+                # 노이즈 범위면 실패로 기록한다(merge_demo_hdf5가 실패분을 버린다).
+                frames = obs_grp[camera]
+                sampled = [frame_roughness(frames[i]) for i in np.linspace(0, T - 1, min(16, T)).astype(int)]
+                render_ok = all(2.0 < r < 15.0 for r in sampled)
+                demo_grp.attrs["render_ok"] = render_ok
+                if not render_ok:
+                    print(f"  !! ep {ep}: 프레임 거칠기 {min(sampled):.1f}~{max(sampled):.1f} — 렌더 노이즈, 실패로 기록", flush=True)
+                    is_success = False
                 demo_grp.attrs["is_success"] = is_success
                 outcomes["success" if is_success else "fail"] += 1
                 total += T
