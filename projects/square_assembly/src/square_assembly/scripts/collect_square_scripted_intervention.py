@@ -170,10 +170,15 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     outcomes = {"success": 0, "fail": 0}
 
     try:
-        with h5py.File(out, "w") as f:
-            data_grp = f.create_group("data")
-            total = 0
-            ep = 0
+        # 파일이 이미 있으면 이어서 모은다("a") — 같은 --out으로 다시 실행해도 기존 에피소드가 안 날아간다.
+        with h5py.File(out, "a") as f:
+            data_grp = f.require_group("data")
+            outcomes["success"] = sum(k.startswith("demo_") for k in data_grp.keys())
+            outcomes["fail"] = sum(k.startswith("fail_") for k in data_grp.keys())
+            total = int(data_grp.attrs.get("total", 0))
+            ep = outcomes["success"] + outcomes["fail"]
+            if ep:
+                print(f"이어서 수집: 기존 성공 {outcomes['success']} / 실패 {outcomes['fail']} -> 목표 성공 {episodes}", flush=True)
             # episodes = 저장할 *성공* 에피소드 수. 실패도 저장은 되지만(is_success=False, 병합에서 제외)
             # 개수에는 안 센다 — 라운드마다 "성공 N개"를 맞추려는 것이지 시도 횟수가 아니다.
             while outcomes["success"] < episodes:
