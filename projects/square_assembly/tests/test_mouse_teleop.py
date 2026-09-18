@@ -151,7 +151,7 @@ def test_cv2_key_paths_for_space_and_yaw():
     assert interv(0, {})[2] > 0            # 유효시간 안: z-up
     interv.controller.z_up_until = 0.0
     assert interv(1, {})[2] == 0.0
-    interv._handle_key(ord("d"))
-    assert interv(2, {})[5] > 0            # +5도 목표 -> z축 양의 회전
-    interv._handle_key(ord("a")); interv._handle_key(ord("a"))
+    interv._handle_key(ord("a"))
+    assert interv(2, {})[5] > 0            # a: +5도 목표 -> z축 양의 회전
+    interv._handle_key(ord("d")); interv._handle_key(ord("d"))
     assert interv(3, {})[5] < 0

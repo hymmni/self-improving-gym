@@ -189,10 +189,10 @@ class MouseTeleopIntervention:
         # space는 키 반복이 오는 동안 z-up이 유지되게 짧은 유효시간을 준다.
         elif what == "z_up":
             self.controller.z_up_until = time.time() + 0.25
-        elif what == "yaw_left":
-            self.controller.wheel(-1)
-        elif what == "yaw_right":
+        elif what == "yaw_left":   # a: 화면에서 봤을 때 반시계로 도는 쪽(2026-09-18 사용자 요청으로 방향 결정)
             self.controller.wheel(+1)
+        elif what == "yaw_right":  # d
+            self.controller.wheel(-1)
 
     def _on_mouse(self, event, x, y, flags, _param):
         import cv2
