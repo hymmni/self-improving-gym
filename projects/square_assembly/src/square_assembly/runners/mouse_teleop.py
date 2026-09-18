@@ -21,6 +21,8 @@ pynput 리스너로 받는다(pynput은 전역 리스너라 다른 창에 타이
 중에만 z에 반영되므로 실사용에선 문제가 안 됐다).
 """
 
+import os
+
 import numpy as np
 
 from square_assembly.runners.square_oracle import (
@@ -211,7 +213,11 @@ class MouseTeleopIntervention:
             # 아니라 KeyCode(char=' ')로 들어온다(2026-09-18 pororo 실측: Shift는 되는데 Space만 무반응).
             return key in up or getattr(key, "char", None) == " "
 
+        debug = bool(os.environ.get("MOUSE_TELEOP_DEBUG"))
+
         def on_press(key):
+            if debug:
+                print(f"[teleop] key press: {key!r} char={getattr(key, 'char', None)!r} vk={getattr(key, 'vk', None)!r}", flush=True)
             if is_up(key):
                 self.controller.z_up = True
             elif key in down:
