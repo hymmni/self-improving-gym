@@ -6,6 +6,13 @@ services:
     image: self-improving-gym/dev:latest
     user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     working_dir: /workspace
+    # ssh -X로 포워딩된 X11 디스플레이는 이 서버(sshd, X11UseLocalhost yes)에서 유닉스소켓
+    # 파일 없이 루프백 TCP로만 열리고, xauth 쿠키도 FamilyLocal("<hostname>/unix:N")로만
+    # 발급된다 — 기본 브리지 네트워크에서는 컨테이너 자신의 루프백이 따로 있어 호스트의
+    # 포워딩 포트에 닿지 않는다(2026-09-10 GPU 서버에서 실측, DOCKER.md §4 경위 참고).
+    # host 네트워킹은 이 문제만 해결하며, 이 compose 파일엔 다른 서비스가 없어 브리지
+    # 격리를 포기해도 트레이드오프가 거의 없다(개인 개발 서버 전제).
+    network_mode: "host"
     volumes:
       - .:/workspace
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
@@ -16,5 +23,9 @@ services:
       - WANDB_API_KEY=${WANDB_API_KEY}
       - MUJOCO_GL=egl
       - HOME=${HOME}
+    # PyTorch DataLoader 워커는 배치를 공유 메모리로 넘긴다. 도커 기본 /dev/shm은 64MB라
+    # num_workers>0로 이미지 배치를 실어나르면 "DataLoader worker is killed by signal:
+    # Bus error"로 죽는다(2026-09-18 pororo에서 square DP 학습 실측 — 첫 epoch 진입도 못 함).
+    shm_size: "8gb"
     stdin_open: true
     tty: true

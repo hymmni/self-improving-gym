@@ -88,6 +88,140 @@ xhost +local:docker
 
 그 다음 평소처럼 `docker compose run` 하면 `DISPLAY`가 자동으로 전달됩니다 (`.env`의 `DISPLAY` 값 사용, 보통 호스트와 동일한 `:0` 등).
 
+**GDM 로그인 화면을 거친 그래픽 세션(예: 원격 GPU 서버를 RustDesk/실물 모니터로 보는 경우)은
+`DISPLAY`가 `:0`이 아니라 `:1`(또는 그 이상)일 수 있고, 인증 파일도 `~/.Xauthority`가 아니라
+GDM이 관리하는 `/run/user/$(id -u)/gdm/Xauthority`에 있다** — 기본 `xhost +local:docker`가
+"명령 안 먹힘"처럼 조용히 안 먹거나, 컨테이너에서 `cv2.imshow`/`mjviewer`가 "Invalid
+MIT-MAGIC-COOKIE-1 key"로 죽는다면 이 케이스다(2026-09-09 GPU 서버에서 실측 — `who`로 실제
+세션 번호를 확인). 그 경우 명시적으로 지정해야 합니다:
+
+```bash
+DISPLAY=:1 XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority xhost +local:docker
+docker compose run --rm -e DISPLAY=:1 dev bash   # 이후 run은 -e DISPLAY=:1만 오버라이드하면 됨
+```
+
+### ssh -X 포워딩으로 컨테이너 GUI 보기 (RustDesk 등 원격 데스크톱 없이)
+
+순수 `ssh -X`만으로도 되지만, 2026-09-10 실측으로 세 가지를 순서대로 잡아야 했다 —
+아래 증상이 보이면 해당 항목을 확인한다.
+
+1. **`sshd_config`의 `X11UseLocalhost`가 `no`로 되어 있으면 안 된다.** `no`면 `DISPLAY`가
+   `localhost:N.0`이 아니라 `<호스트명>:N.0` 형태로 잡히고, Docker 기본 브리지 네트워크에서
+   그 호스트명이 해석되지 않거나(컨테이너 자신의 네트워크 namespace라 호스트를 못 찾음)
+   TCP로 붙어도 인증 family가 안 맞아 죽는다. 기본값(`yes`, 또는 주석 처리)으로 되돌린다:
+   ```bash
+   sudo sed -i 's/^X11UseLocalhost no/X11UseLocalhost yes/' /etc/ssh/sshd_config
+   sudo systemctl restart ssh   # 서비스명이 sshd가 아니라 ssh인 배포판이 많다(Ubuntu/Debian)
+   ```
+   (재시작해도 이미 붙어있는 세션은 안 끊긴다 — 새로 접속하는 세션부터 적용된다.)
+
+2. **tmux를 거치면 `$DISPLAY`/쿠키가 스테일해질 수 있다.** 오래 떠 있던 tmux 세션에
+   재접속(`tmux attach`)하면 그 pane의 `$DISPLAY`가 지금 이 ssh 연결이 아니라 그 pane이
+   맨 처음 만들어졌을 때의 값을 그대로 들고 있다 — 디스플레이 번호가 그새 재사용되면서
+   `~/.Xauthority`의 쿠키와 어긋나 `Invalid MIT-MAGIC-COOKIE-1 key`로 죽는다(로컬 클라이언트
+   쪽 tmux도 마찬가지 — 클라이언트의 `ssh -X`도 자기 자신의 `$DISPLAY`를 참조해서 되돌려줄
+   곳을 정하므로 로컬/서버 양쪽 tmux 모두 의심 대상이다). **tmux를 아예 안 거친 새 터미널로
+   `ssh -X` 접속**해서 재현되는지 먼저 확인한다 — 이게 원인이면 그걸로 끝이다.
+
+3. **이 서버의 sshd는 X11 forwarding에 유닉스소켓 파일을 안 만들고(`/tmp/.X11-unix/`에
+   해당 디스플레이 번호가 안 보임) `xauth`에 등록되는 쿠키도 FamilyLocal
+   (`<호스트명>/unix:N` 형태, `xauth list $DISPLAY`로 확인 가능)로만 발급한다.** 즉 컨테이너가
+   호스트의 forwarding 포트(예: `127.0.0.1:6010`)에 실제로 TCP로 닿아야 하는데, Docker 기본
+   브리지 네트워크는 컨테이너 자신의 루프백이 따로 있어 호스트의 루프백에 안 닿는다.
+   `docker-compose.yml`의 `dev` 서비스에 `network_mode: "host"`를 이미 설정해뒀으므로(이
+   레포에 다른 서비스가 없어 브리지 격리를 포기해도 트레이드오프가 거의 없음),
+   `~/.Xauthority`만 추가로 마운트해서 `docker compose run`을 쓰면 된다(레포 전체 사용자가
+   `~/.Xauthority`를 갖고 있진 않으므로 compose 파일 자체엔 이 마운트를 넣지 않았다 — 필요한
+   사람만 `-v`로 얹는다):
+   ```bash
+   docker compose run --rm -e NUMBA_CACHE_DIR=/tmp/numba_cache \
+     -v $HOME/.Xauthority:$HOME/.Xauthority:ro \
+     dev bash
+   ```
+
+위 세 가지를 다 잡았는데도 안 되면, 원격 데스크톱(RustDesk 등)으로 서버의 **실제 로컬
+세션**(`:1` 등, GDM 관리 — 위 GDM 문단 참고)에 붙는 쪽이 훨씬 간단하고 안정적이다.
+
+### cv2.imshow가 멈춘다면: MuJoCo EGL 초기화 순서 문제다 (2026-09-12 실측, 중요)
+
+**증상**: `cv2.imshow`가 첫 호출에서 영영 안 돌아온다. py-spy 네이티브 스택을 뜨면 Qt의
+xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XCB_NO_MITSHM=1`로 그걸
+끄면 그다음 `xcb_xfixes_query_version`)에서 `xcb_wait_for_reply`에 박혀 있다. Ctrl+C도 안
+먹고(네이티브 코드라), 겉보기엔 CPU 100%라 "뭔가 계산 중"처럼 보인다(실제론 OpenMP 스핀).
+
+**원인**: X11/ssh/도커 문제가 아니다. **MuJoCo EGL 환경(`MUJOCO_GL=egl`, robosuite
+`make_eval_env` 등)을 먼저 만들면, 그 뒤에 cv2(Qt/xcb)가 X 서버에 처음 붙을 때 데드락**이
+난다(NVIDIA EGL/GL 라이브러리가 Xlib 잠금을 선점하는 것으로 보임). 이분 탐색으로 확인:
+- 최소 프로세스에서 `cv2.imshow` → 정상
+- torch CUDA 초기화 후 `cv2.imshow` → 정상
+- `import robosuite`만, `import robomimic.utils.obs_utils`만 → 각각 정상
+- robosuite EGL env 생성 후 `cv2.imshow` → **무한 정지**
+- 이 프로젝트 모듈 임포트(`square_assembly.factory` / `utils.task_utils` /
+  `runners.intervention_rollout`)만 해도 그 뒤 `cv2.imshow` → **무한 정지**
+- **cv2 창을 먼저 열어두고** 그 임포트·EGL env 생성 → 그 뒤 `imshow` 반복도 전부 정상
+
+**해결**: GUI 창을 robosuite/robomimic을 끌어오는 임포트보다 **먼저** 한 번 띄워라(빈 프레임 +
+`waitKey(1)`이면 충분). `runners/scripted_intervention.py`의 모듈 함수 `open_window()`와,
+그걸 무거운 임포트 앞에서 호출하려고 그 임포트들을 `run()` 안으로 내린
+`scripts/collect_square_scripted_intervention.py`가 이 패턴의 예다.
+
+**주의 — 2026-09-11에 이 문단에 적었던 "이 서버 sshd의 X11 forwarding이 확장 질의 응답을
+구조적으로 못 돌려준다"는 진단은 틀렸다.** 같은 증상이 ssh를 전혀 안 거치는 RustDesk의 로컬
+`:1` 화면에서도 똑같이 재현돼서 드러났다. ssh -X 경로 자체는 위 1~3번(`X11UseLocalhost yes`,
+tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
+뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
+
+### 렌더가 노이즈로 나올 때: 컨테이너를 바꿔라 (2026-09-17 실측, 원인 미해결)
+
+**증상**: 에러 없이 화면이 지지직거리고, 정책이 갑자기 아무것도 못 한다. MuJoCo 오프스크린
+렌더가 **조용히 아무 일도 안 하고**(프레임당 0.0ms) 초기화되지 않은 메모리를 돌려준다 —
+화면뿐 아니라 **정책이 보는 obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다.
+
+같은 이미지·같은 드라이버(595.84)·같은 GPU·같은 compose 설정인데도 **그 시간대에 먼저 떠
+있던 컨테이너는 정상, 그 뒤에 새로 만든 컨테이너는 전부 깨졌다**(compose up/run, DISPLAY,
+cv2 창 유무, NVIDIA_DRIVER_CAPABILITIES와 무관하게 재현). EGL 컨텍스트 자체는 정상으로
+만들어지고(`GL_RENDERER: NVIDIA GeForce RTX 5090`) 에러도 안 난다.
+
+**일시적이다 — GPU 부하와 같이 움직였다**: 깨지던 동안 이 공용 서버의 GPU는 다른 사용자
+때문에 사용률 96%였고, 사용률이 0%로 떨어지자 **새로 만든 컨테이너도 곧바로 정상**으로
+돌아왔다(연속 2회 확인). 인과까지 증명한 건 아니지만, 깨졌을 때 기다렸다 다시 해보는 게
+첫 번째 대처다. 먼저 떠 있던 컨테이너가 그 와중에도 멀쩡했던 이유는 아직 설명 못 한다.
+
+**확인**: collect_square_scripted_intervention.py가 시작할 때 `check_render()`로 자동 점검하고
+깨졌으면 수집 전에 멈춘다. 직접 확인하려면 컨테이너 안에서:
+
+```bash
+source /opt/venvs/torch/bin/activate
+MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache python -c "
+import numpy as np
+from square_assembly.envs.robomimic.factory import make_image_env
+env = make_image_env('NutAssemblySquare', 'Panda', ['robot0_eef_pos'], ['agentview_image'], ['agentview'], image_size=84)
+env.reset()
+im = env.render(mode='rgb_array', height=84, width=84, camera_name='agentview')
+r = np.abs(np.diff(im.astype(int), axis=1)).mean()
+print('이웃 픽셀 차이', round(float(r), 1), '->', '정상' if r < 15 else '노이즈(이 컨테이너에선 수집하지 마라)')
+"
+```
+
+정상 장면은 ~4, 깨진 컨테이너는 30~76이 나온다.
+
+**대처**: (1) 점검이 통과할 때까지 기다렸다 다시 실행하거나, (2) 렌더가 정상인 다른
+컨테이너에서 실행한다(`docker exec -it <그 컨테이너> bash`). 어느 쪽이든 수집 전에 위
+점검이 통과하는지부터 확인한다.
+
+### cv2 창을 띄운 채 오프스크린 렌더 해상도를 키우면 죽는다 (2026-09-17 실측)
+
+**증상**: `mujoco.FatalError: Default framebuffer is not complete, error 0x0` — 이어서
+`AttributeError: 'MjRenderContextOffscreen' object has no attribute 'con'`.
+
+robosuite 오프스크린 버퍼는 640x480(MJCF 기본)으로 잡힌다. 그보다 큰 렌더를 요청하면
+`binding_utils.update_offscreen_size`가 `MjrContext`를 **다시 만드는데**, cv2(Qt) 창이 이미
+떠 있는 프로세스에선 그 재생성이 EGL에서 실패한다. 같은 코드가 창 없이 헤드리스면 512도
+정상이고, compose run 컨테이너에서 창을 띄우면 512는 죽고 480은 정상이었다.
+
+→ 화면 표시용 렌더는 **480 이하**로 요청한다(정책 입력 84픽셀과 별개로 크게 보고 싶을 때).
+collect_square_scripted_intervention.py의 `--display-size`가 이 상한을 강제한다.
+
 - jax venv: matplotlib TkAgg 백엔드 사용 (이미지에 `python3-tk` 설치됨)
 - torch venv: mujoco `mjviewer` 온스크린 창 사용 시 컨테이너 환경변수 `MUJOCO_GL`을 비워야 함 (compose 기본값은 `MUJOCO_GL=egl`, 헤드리스 학습/평가용). 온스크린이 필요하면:
   ```bash
