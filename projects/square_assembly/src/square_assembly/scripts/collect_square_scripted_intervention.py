@@ -215,7 +215,10 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 T = len(actions)
                 assert T == len(obs_ep), f"obs/action 스텝 수 불일치: {len(obs_ep)} vs {T}"
 
-                demo_grp = data_grp.create_group(f"demo_{ep}")
+                # 그룹 이름은 성공/실패를 따로 센다: 성공은 demo_0..N(학습용, 번호가 곧 성공 개수),
+                # 실패는 fail_0..M(fail-aware STG용으로 보존, 병합은 is_success로 거른다).
+                is_success = bool(result["success"])
+                demo_grp = data_grp.create_group(f"demo_{outcomes['success']}" if is_success else f"fail_{outcomes['fail']}")
                 demo_grp.attrs["num_samples"] = T
                 demo_grp.create_dataset("actions", data=actions)
                 demo_grp.create_dataset("action_mode", data=result["action_modes"])
@@ -224,7 +227,6 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     stacked = np.stack([o[k] for o in obs_ep], axis=0)
                     obs_grp.create_dataset(k, data=stacked, compression="gzip" if k in rgb_keys else None)
 
-                is_success = bool(result["success"])
                 # 에피소드 중간에 렌더가 고장나도 데이터에 못 들어가게: 프레임 거칠기가 하나라도
                 # 노이즈 범위면 실패로 기록한다(merge_demo_hdf5가 실패분을 버린다).
                 frames = obs_grp[camera]
@@ -233,6 +235,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 demo_grp.attrs["render_ok"] = render_ok
                 if not render_ok:
                     print(f"  !! ep {ep}: 프레임 거칠기 {min(sampled):.1f}~{max(sampled):.1f} — 렌더 노이즈, 실패로 기록", flush=True)
+                    if is_success:
+                        data_grp.move(demo_grp.name.split("/")[-1], f"fail_{outcomes['fail']}")
+                        demo_grp = data_grp[f"fail_{outcomes['fail']}"]
                     is_success = False
                 demo_grp.attrs["is_success"] = is_success
                 outcomes["success" if is_success else "fail"] += 1
