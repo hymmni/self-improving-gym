@@ -205,14 +205,19 @@ class MouseTeleopIntervention:
         up = KeyboardIntervention._resolve_keys("space", pynput_keyboard)
         down = KeyboardIntervention._resolve_keys("shift", pynput_keyboard)
 
+        def is_up(key):
+            # RustDesk 같은 원격 데스크톱은 공백을 "키"가 아니라 문자 ' '로 주입해서 Key.space가
+            # 아니라 KeyCode(char=' ')로 들어온다(2026-09-18 pororo 실측: Shift는 되는데 Space만 무반응).
+            return key in up or getattr(key, "char", None) == " "
+
         def on_press(key):
-            if key in up:
+            if is_up(key):
                 self.controller.z_up = True
             elif key in down:
                 self.controller.z_down = True
 
         def on_release(key):
-            if key in up:
+            if is_up(key):
                 self.controller.z_up = False
             elif key in down:
                 self.controller.z_down = False
