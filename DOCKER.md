@@ -171,32 +171,36 @@ xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XC
 tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
 뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
 
-### 렌더가 노이즈로 나온다: numpy 2.4 + mujoco 3.2.3 조합이 원인 (2026-09-18 확정)
+### 렌더가 노이즈로 나온다: 컨테이너에선 env 생성 후 첫 에피소드가 항상 노이즈 (2026-09-18 확정)
 
 **증상**: 에러 없이 화면이 지지직거리고 정책이 갑자기 아무것도 못 한다. MuJoCo 오프스크린
 렌더가 초기화되지 않은 메모리(노이즈) 또는 검은 화면을 돌려주며, 화면뿐 아니라 **정책이 보는
 obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다. `env.reset()` 직후 첫 프레임은
 정상이고 step 프레임부터 깨지는 게 서명이라, "reset 후 한 장" 점검으로는 못 잡는다.
 
-**원인**: numpy **2.4.6**과 mujoco 3.2.3의 조합. 같은 코드·GPU·드라이버에서 numpy만 2.2.6으로
-바꾸면 호스트 네이티브(pororo `sig`)와 컨테이너 모두 즉시 정상이 된다(각 3/3, 2.4.6은 각각
-재현). 이틀간 의심했던 것들은 전부 무관하다: GPU 부하, DISPLAY, TTY, 마운트 디렉터리, cv2 창,
-X11 MIT-SHM, NVIDIA ICD, glFinish, EGL device id, 그리고 **도커 자체**(rupy 네이티브가 멀쩡했던
-이유는 그 env의 numpy가 2.2.6이었기 때문). `projects/square_assembly/requirements.txt`에
-`numpy==2.2.6`으로 고정했다 — 이미지를 다시 빌드해야 컨테이너에 반영된다.
+**확정된 사실**(pororo, 세 조건을 1분 간격으로 번갈아 30회 — `outputs/interleaved_probe.log`):
+- 컨테이너(이미지 그대로): **env 생성 후 첫 에피소드 30/30 노이즈**, 두 번째 reset부터 0/60.
+- 호스트 네이티브(conda `sig`): numpy 2.2.6이든 2.4.6이든 첫 에피소드 1/30 노이즈, 이후 0/60.
+- 즉 컨테이너는 결정적, 네이티브는 드물게(3%) 같은 현상이 난다. numpy 버전은 무관하다(한때
+  numpy 2.4가 원인이라고 적었던 건 시간대 효과를 통제 못 한 오판이었다). 실험으로 배제한 것:
+  GPU 부하, DISPLAY, TTY, 마운트 디렉터리, cv2 창, X11 MIT-SHM, NVIDIA ICD 고정, glFinish,
+  EGL device id. 근본 원인(드라이버/glvnd 조합으로 추정)은 못 잡았다.
 
-**코드 쪽 방어**(collect_square_scripted_intervention.py, 원인과 무관하게 유지): 시작 시 reset+5 step
-프레임으로 점검하고 고장이면 env를 다시 만들며 최대 2분 대기(`wait_for_renderer`), 에피소드 도중
-연속 3프레임 노이즈면 그 에피소드를 버리고 렌더가 돌아올 때까지 기다렸다 같은 번호로 재수집,
-저장 시 프레임 거칠기를 다시 재서 `render_ok` 속성을 남기고 노이즈면 실패로 기록(병합에서 제외).
+**방어**(원인과 무관하게 동작):
+- `make_eval_env`가 image env를 만들자마자 첫 에피소드(reset+30 step)를 버린다
+  (`_burn_first_episode`) — 학습 중 eval, eval.py, 수집 스크립트 모두 이 경로를 탄다.
+- collect_square_scripted_intervention.py: 시작 시 reset+5 step 프레임 점검 후 고장이면 env 재생성
+  (`wait_for_renderer`), 에피소드 도중 연속 3프레임 노이즈면 그 에피소드를 버리고 렌더 복구 뒤
+  같은 번호로 재수집, 저장 시 프레임 거칠기를 다시 재서 `render_ok` 속성을 남기고 노이즈면
+  실패로 기록(병합에서 제외).
 
 **직접 확인**(어디서든): reset 뒤 step을 20번 돌린 프레임의 이웃 픽셀 차이 평균 —
-정상 84px 장면은 4~10, 노이즈는 30~130, 검은 화면은 ~0.
+정상 84px 장면은 4~10, 노이즈는 30~130, 검은 화면은 ~0. 두 에피소드를 찍어 첫 번째만 깨지면
+위 현상이다.
 
 ```bash
 MUJOCO_GL=egl python -c "
 import numpy as np, robosuite as suite
-print('numpy', np.__version__)
 env = suite.make('NutAssemblySquare', robots='Panda', has_renderer=False, has_offscreen_renderer=True,
                  use_camera_obs=True, camera_names='agentview', camera_heights=84, camera_widths=84, control_freq=20)
 for k in range(2):

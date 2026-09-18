@@ -22,10 +22,6 @@ robomimic @ git+https://github.com/ARISE-Initiative/robomimic.git@v0.4.0
 # 이는 구 API 시그니처. mujoco 3.10.0(확인 시점 latest)은 mj_fullM(model, data, dst)로 바뀌어
 # TypeError 발생 (M0에서 실행해 확인 — 3.2.3은 동작 확인, 3.2.4~3.9.x 사이 정확한 변경 지점은 미확인).
 mujoco==3.2.3
-# numpy 2.4.x에서는 mujoco 3.2.3의 mjr_readPixels가 출력 배열을 못 채워 오프스크린 렌더가
-# 초기화되지 않은 메모리(노이즈)로 나온다 — 2026-09-18 pororo/rupy 실측: 2.4.6은 네이티브·컨테이너
-# 모두 재현, 2.2.6으로만 바꾸면 둘 다 정상(DOCKER.md §4). obs가 노이즈면 데이터가 통째로 망가지므로 고정.
-numpy==2.2.6
 
 # Diffusion Policy 구현 (자체 포팅, flare/lerobot 코드는 참조만 하고 import하지 않음)
 diffusers==0.30.3
