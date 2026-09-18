@@ -35,6 +35,13 @@ COPY projects/square_assembly/requirements.txt ./projects/square_assembly/requir
 RUN python3 -m venv /opt/venvs/torch \
     && /opt/venvs/torch/bin/pip install --no-cache-dir -r projects/square_assembly/requirements.txt
 
+# vip(scripts/cache_vip_feats.py)는 requirements.txt에 못 넣는다 — setup.py가
+# hydra-core==1.1.1/omegaconf==2.1.1을 못박아놔서 프로젝트 전체가 쓰는 1.3.2/2.3.0과
+# 충돌해 pip 전체 설치가 깨진다(2026-09-10 실측). --no-deps로 패키지 코드만 설치하고,
+# 실제로 필요한 런타임 의존성(gdown)은 requirements.txt에 정상 버전으로 이미 있다.
+RUN /opt/venvs/torch/bin/pip install --no-cache-dir --no-deps \
+        git+https://github.com/facebookresearch/vip.git
+
 # 컨테이너가 root가 아니라 host UID로 도므로(docker-compose.yml user:), 그 UID가 여기에
 # 계속 pip install 할 수 있도록 world-writable로 열어둠 — 단일 개발자용 로컬 이미지라 허용.
 RUN chmod -R o+w /opt/venvs

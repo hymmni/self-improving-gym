@@ -1,8 +1,13 @@
 # square_assembly 고정 의존성 (재현성 단일 출처). 버전 근거: docs/plan.md M0.
---extra-index-url https://download.pytorch.org/whl/cu121
+# cu128(torch 2.7.1)로 올린 이유: GPU 서버가 RTX 5090(compute capability sm_120,
+# Blackwell)인데 cu121 휠(torch 2.5.1)은 sm_90(Hopper)까지만 커널을 담고 있어
+# 가장 기본적인 텐서 연산도 "no kernel image is available"로 죽었다(2026-09-10
+# 서버에서 실측 — nvidia-smi/드라이버는 GPU를 정상 인식, 문제는 순수 pip 휠 자체).
+# torch 2.7.x부터 cu128 휠에 Blackwell(sm_120) 커널이 포함된다.
+--extra-index-url https://download.pytorch.org/whl/cu128
 
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
 
 # 시뮬레이션 벤치마크
 # robomimic은 PyPI(0.3.0)가 아닌 git v0.4.0 태그 고정.
@@ -56,3 +61,13 @@ transformers==4.40.1
 peft==0.11.1
 timm==0.9.16
 accelerate
+
+# VIP(policy=STG용 대체 인코더, scripts/cache_vip_feats.py) — 선택 설치.
+# vip 패키지 자체는 여기(requirements.txt)에 넣지 않는다: vip의 setup.py가
+# hydra-core==1.1.1/omegaconf==2.1.1을 못박아놔서 우리 프로젝트 전체가 쓰는
+# hydra-core==1.3.2와 충돌해 pip 전체 설치가 깨진다(2026-09-10 서버 빌드에서 실측).
+# vip/models/model_vip.py는 torch/torchvision만, vip/__init__.py(load_vip())는
+# hydra/omegaconf/gdown만 쓰고 둘 다 안정된 API라 우리 버전으로도 동작한다 —
+# 그래서 vip 자체는 docker/Dockerfile에서 --no-deps로 따로 설치하고, 여기서는
+# 그게 실제로 필요로 하는 런타임 의존성(체크포인트 다운로드용)만 명시한다.
+gdown
