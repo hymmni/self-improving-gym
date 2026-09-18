@@ -171,35 +171,24 @@ xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XC
 tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
 뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
 
-### 렌더가 노이즈로 나온다: 도커 컨테이너 고유 문제 — 렌더·GUI 작업은 호스트 네이티브로 (2026-09-18 확정)
+### 렌더가 노이즈로 나온다: numpy 2.4 + mujoco 3.2.3 조합이 원인 (2026-09-18 확정)
 
 **증상**: 에러 없이 화면이 지지직거리고 정책이 갑자기 아무것도 못 한다. MuJoCo 오프스크린
 렌더가 초기화되지 않은 메모리(노이즈) 또는 검은 화면을 돌려주며, 화면뿐 아니라 **정책이 보는
-obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다.
+obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다. `env.reset()` 직후 첫 프레임은
+정상이고 step 프레임부터 깨지는 게 서명이라, "reset 후 한 장" 점검으로는 못 잡는다.
 
-**정확한 서명**(2026-09-18 pororo·rupy 실측): `env.reset()` 직후 첫 프레임은 정상이고 **그 뒤
-step 프레임부터 노이즈**다. 그래서 "reset 후 한 장" 점검은 고장을 통과시킨다 — 반드시 step
-몇 번 뒤의 프레임을 봐야 한다. 대부분은 **env 생성 후 첫 에피소드**에서 나고 두 번째 reset부터
-정상이지만(rupy 컨테이너 24/24 재현), 사람이 개입 중인 긴 에피소드 도중에도 간헐적으로 난다.
+**원인**: numpy **2.4.6**과 mujoco 3.2.3의 조합. 같은 코드·GPU·드라이버에서 numpy만 2.2.6으로
+바꾸면 호스트 네이티브(pororo `sig`)와 컨테이너 모두 즉시 정상이 된다(각 3/3, 2.4.6은 각각
+재현). 이틀간 의심했던 것들은 전부 무관하다: GPU 부하, DISPLAY, TTY, 마운트 디렉터리, cv2 창,
+X11 MIT-SHM, NVIDIA ICD, glFinish, EGL device id, 그리고 **도커 자체**(rupy 네이티브가 멀쩡했던
+이유는 그 env의 numpy가 2.2.6이었기 때문). `projects/square_assembly/requirements.txt`에
+`numpy==2.2.6`으로 고정했다 — 이미지를 다시 빌드해야 컨테이너에 반영된다.
 
-**도커 고유 문제다**: 같은 시각에 호스트 네이티브 환경(rupy `mani_sim`, 같은 mujoco 3.2.3·
-robosuite 1.5.1·드라이버 595.84)과 컨테이너를 3분 간격으로 짝지어 돌리면 네이티브는 0/9,
-컨테이너는 6/9 노이즈(`outputs/paired_probe.log`). 실험으로 배제한 것: GPU 부하(사용률 0%에
-만든 컨테이너도 고장, 100%에서도 네이티브는 정상), DISPLAY 유무, TTY, 마운트 디렉터리/코드,
-cv2 창 유무, X11 MIT-SHM. 컨테이너 안 완화책도 전부 무효: NVIDIA ICD만 사용
-(`__EGL_VENDOR_LIBRARY_FILENAMES`), `mjr_readPixels` 앞 `glFinish`, `MUJOCO_EGL_DEVICE_ID=0`
-(`outputs/probe_variants.log`, 각 6회). 남은 차이는 컨테이너의 glvnd 1.6.0(Debian) + 주입된
-드라이버 라이브러리 조합뿐인데 원인까지는 못 잡았다.
-
-**규칙(ADR-008)**: 렌더 품질이 데이터가 되는 작업(텔레옵/개입 수집, 화면 보며 하는 평가)은
-**호스트 네이티브 환경**에서 한다. 도커는 학습(hdf5 입력)과 헤드리스 배치 작업용이다. 도커
-안에서 어쩔 수 없이 env를 만들 때(학습 중 eval)는 `make_eval_env`가 첫 에피소드를 자동으로
-버린다(`_burn_first_episode`).
-
-**코드 쪽 방어**(collect_square_scripted_intervention.py): 시작 시 reset+5 step 프레임으로 점검하고
-고장이면 env를 다시 만들며 최대 2분 대기(`wait_for_renderer`), 에피소드 도중 연속 3프레임 노이즈면
-그 에피소드를 버리고 렌더가 돌아올 때까지 기다렸다 같은 번호로 재수집, 저장 시 프레임 거칠기를
-다시 재서 `render_ok` 속성을 남기고 노이즈면 실패로 기록(병합에서 제외).
+**코드 쪽 방어**(collect_square_scripted_intervention.py, 원인과 무관하게 유지): 시작 시 reset+5 step
+프레임으로 점검하고 고장이면 env를 다시 만들며 최대 2분 대기(`wait_for_renderer`), 에피소드 도중
+연속 3프레임 노이즈면 그 에피소드를 버리고 렌더가 돌아올 때까지 기다렸다 같은 번호로 재수집,
+저장 시 프레임 거칠기를 다시 재서 `render_ok` 속성을 남기고 노이즈면 실패로 기록(병합에서 제외).
 
 **직접 확인**(어디서든): reset 뒤 step을 20번 돌린 프레임의 이웃 픽셀 차이 평균 —
 정상 84px 장면은 4~10, 노이즈는 30~130, 검은 화면은 ~0.
@@ -207,6 +196,7 @@ cv2 창 유무, X11 MIT-SHM. 컨테이너 안 완화책도 전부 무효: NVIDIA
 ```bash
 MUJOCO_GL=egl python -c "
 import numpy as np, robosuite as suite
+print('numpy', np.__version__)
 env = suite.make('NutAssemblySquare', robots='Panda', has_renderer=False, has_offscreen_renderer=True,
                  use_camera_obs=True, camera_names='agentview', camera_heights=84, camera_widths=84, control_freq=20)
 for k in range(2):
