@@ -174,7 +174,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             data_grp = f.create_group("data")
             total = 0
             ep = 0
-            while ep < episodes:
+            # episodes = 저장할 *성공* 에피소드 수. 실패도 저장은 되지만(is_success=False, 병합에서 제외)
+            # 개수에는 안 센다 — 라운드마다 "성공 N개"를 맞추려는 것이지 시도 횟수가 아니다.
+            while outcomes["success"] < episodes:
                 interv.reset()
                 obs_ep = []
                 noise_streak = [0]
@@ -248,7 +250,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         if hasattr(env, "close"):
             env.close()
 
-    print(f"\n수집 완료: {episodes}에피소드 (성공 {outcomes['success']}, 실패 {outcomes['fail']})  saved {out}")
+    print(f"\n수집 완료: 성공 {outcomes['success']} / 실패 {outcomes['fail']} (총 {outcomes['success'] + outcomes['fail']}에피소드)  saved {out}")
 
 
 def main():
@@ -257,7 +259,7 @@ def main():
         "--base-ckpt",
         default="projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt",
     )
-    ap.add_argument("--episodes", type=int, default=20)
+    ap.add_argument("--episodes", type=int, default=20, help="저장할 성공 에피소드 수(실패는 저장되지만 안 셈)")
     ap.add_argument("--max-steps", type=int, default=700)
     ap.add_argument("--out", default="data/square_scripted_intv.hdf5")
     ap.add_argument("--camera", default="agentview_image")
