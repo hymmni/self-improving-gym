@@ -173,17 +173,24 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         with h5py.File(out, "w") as f:
             data_grp = f.create_group("data")
             total = 0
-            for ep in range(episodes):
+            ep = 0
+            while ep < episodes:
                 interv.reset()
                 obs_ep = []
+                noise_streak = [0]
 
-                def track(obs_raw, _store=obs_ep):
+                def track(obs_raw, _store=obs_ep, _streak=noise_streak):
                     _store.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
+                    # 렌더가 도중에 고장나면(연속 3프레임 노이즈) 에피소드를 즉시 끊는다 —
+                    # 사람이 지켜보다 q를 누를 필요 없이 아래서 버리고 복구를 기다린다.
+                    r = frame_roughness(np.transpose(obs_raw[camera], (1, 2, 0)) * 255.0)
+                    _streak[0] = 0 if 2.0 < r < 15.0 else _streak[0] + 1
                     # 저장/학습은 obs의 84픽셀 그대로, 화면만 따로 고해상도로 렌더한다.
-                    return interv.render(env.render(
+                    keep = interv.render(env.render(
                         mode="rgb_array", height=display_size, width=display_size,
                         camera_name=display_camera,
                     ))
+                    return keep and _streak[0] < 3
 
                 result = collect_episode(
                     env, policy, normalizer, obs_keys,
@@ -192,6 +199,16 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     should_end_fn=interv.should_end, control_fps=control_fps,
                     predict_fn=predict_fn, print_diagnostics=False,
                 )
+                if noise_streak[0] >= 3:
+                    print(f"  !! 렌더 노이즈로 에피소드 중단(step {len(obs_ep)}) — 버리고 렌더 복구를 기다린다", flush=True)
+                    t0 = time.time()
+                    while renderer_is_noisy(env, camera, display_size):
+                        if time.time() - t0 > 600:
+                            raise RuntimeError("10분 동안 렌더가 복구되지 않았다 — 컨테이너를 새로 만들어 다시 시도한다(DOCKER.md §4).")
+                        time.sleep(5)
+                    print("  렌더 복구됨 — 같은 에피소드 번호로 다시 수집", flush=True)
+                    continue
+
                 actions = np.asarray(result["actions"], dtype=np.float64)
                 T = len(actions)
                 assert T == len(obs_ep), f"obs/action 스텝 수 불일치: {len(obs_ep)} vs {T}"
@@ -223,6 +240,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     f"누적 성공 {outcomes['success']}/{ep + 1} ({outcomes['success'] / (ep + 1):.1%})",
                     flush=True,
                 )
+                ep += 1
 
             data_grp.attrs["total"] = total
     finally:
