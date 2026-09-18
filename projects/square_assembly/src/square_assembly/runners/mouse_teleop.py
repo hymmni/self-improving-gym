@@ -57,8 +57,11 @@ class MouseTeleopController:
         self.target_xy = None      # None이면 xy는 제자리 유지(잡은 뒤 커서가 아직 안 움직임)
         self.target_yaw = None     # None이면 현재 야우 유지
         self.grip_cmd = -1.0
-        self.z_up = self.z_down = False
-        self.z_up_until = 0.0       # cv2 키 경로(space=32)로 들어온 z-up이 유효한 시각(time.time())
+        # z 키는 "누름 이벤트가 계속 들어오는 동안"만 유효하다(키 반복이 _HOLD초 안에 갱신). 뗌 이벤트에
+        # 의존하지 않는 이유: 원격 데스크톱(RustDesk)이 Space 뗌을 다른 키 형태로 보내서 플래그가 켜진 채
+        # 남아 로봇이 혼자 계속 올라갔고, 그때 Shift를 눌러도 위+아래가 상쇄돼 안 내려왔다(2026-09-18 실측).
+        self.z_up_until = 0.0
+        self.z_down_until = 0.0
         self.grip_pressed = False
         self._prev_xy = None
 
@@ -68,6 +71,22 @@ class MouseTeleopController:
         self.target_yaw = yaw_of(state["R"])
         self._prev_xy = state["grip"][:2].copy()
         self.grip_cmd = 1.0 if (finger_gap is not None and finger_gap < _GAP_CLOSED) else -1.0
+
+    _HOLD = 0.6  # 키 반복 시작 지연(보통 0.5초)보다 길어야 첫 반복 전에 끊기지 않는다
+
+    def hold_z(self, up=False, down=False):
+        """z 키 누름 이벤트 한 번 — _HOLD초 동안 유효. 뗌은 처리하지 않아도 저절로 만료된다."""
+        until = time.time() + self._HOLD
+        if up:
+            self.z_up_until = until
+        if down:
+            self.z_down_until = until
+
+    def release_z(self, up=False, down=False):
+        if up:
+            self.z_up_until = 0.0
+        if down:
+            self.z_down_until = 0.0
 
     def set_cursor(self, world_xy):
         self.target_xy = np.asarray(world_xy, dtype=float)[:2].copy()
@@ -87,7 +106,8 @@ class MouseTeleopController:
             delta = self.kp * (self.target_xy - xy) - self.kd * v
             a[:2] = np.clip(delta / _POS_SCALE, -self.pos_cap, self.pos_cap)
 
-        dz = float(self.z_up or time.time() < self.z_up_until) - float(self.z_down)
+        now = time.time()
+        dz = float(now < self.z_up_until) - float(now < self.z_down_until)
         if (dz > 0 and grip[2] >= self.z_max) or (dz < 0 and grip[2] <= self.z_min):
             dz = 0.0
         a[2] = self.z_speed * dz
@@ -188,7 +208,7 @@ class MouseTeleopIntervention:
         # 아래 셋은 pynput이 못 받는 환경(원격 데스크톱이 문자로 주입)을 위한 cv2 경로.
         # space는 키 반복이 오는 동안 z-up이 유지되게 짧은 유효시간을 준다.
         elif what == "z_up":
-            self.controller.z_up_until = time.time() + 0.25
+            self.controller.hold_z(up=True)
         elif what == "yaw_left":   # a: 화면에서 봤을 때 반시계로 도는 쪽(2026-09-18 사용자 요청으로 방향 결정)
             self.controller.wheel(+1)
         elif what == "yaw_right":  # d
@@ -230,15 +250,16 @@ class MouseTeleopIntervention:
             if debug:
                 print(f"[teleop] key press: {key!r} char={getattr(key, 'char', None)!r} vk={getattr(key, 'vk', None)!r}", flush=True)
             if is_up(key):
-                self.controller.z_up = True
+                self.controller.hold_z(up=True)
             elif key in down:
-                self.controller.z_down = True
+                self.controller.hold_z(down=True)
 
         def on_release(key):
+            # 뗌이 제대로 오면 즉시 멈추고, 안 오면 hold_z의 만료가 멈춘다.
             if is_up(key):
-                self.controller.z_up = False
+                self.controller.release_z(up=True)
             elif key in down:
-                self.controller.z_down = False
+                self.controller.release_z(down=True)
 
         self._listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
         self._listener.start()

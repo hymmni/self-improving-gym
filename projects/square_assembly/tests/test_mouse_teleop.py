@@ -55,13 +55,15 @@ def test_take_over_holds_position_until_cursor_moves():
 def test_z_keys_and_limits():
     c = MouseTeleopController(z_speed=0.2, z_min=0.83, z_max=1.10)
     c.take_over(_state())
-    c.z_up = True
+    c.hold_z(up=True)
     assert c.action(_state(z=1.0))[2] == pytest.approx(0.2)
     assert c.action(_state(z=1.10))[2] == 0.0  # 상한에서 멈춤
-    c.z_up, c.z_down = False, True
+    c.release_z(up=True); c.hold_z(down=True)
     assert c.action(_state(z=1.0))[2] == pytest.approx(-0.2)
     assert c.action(_state(z=0.83))[2] == 0.0
-    c.z_up = True  # 둘 다 누르면 정지
+    c.hold_z(up=True)  # 둘 다 누르면 정지
+    assert c.action(_state(z=1.0))[2] == 0.0
+    c.z_up_until = c.z_down_until = 0.0  # 뗌 이벤트가 안 와도 만료되면 멈춘다
     assert c.action(_state(z=1.0))[2] == 0.0
 
 
