@@ -47,6 +47,7 @@ import torch
 # 여기서 임포트해도 안전하다. robosuite/robomimic을 끌어오는 나머지 임포트는 run() 안에서
 # open_window() 뒤에 한다(이유는 open_window docstring, DOCKER.md §4).
 from square_assembly.runners.scripted_intervention import ScriptedFailureIntervention, open_window
+from square_assembly.runners.mouse_teleop import MouseTeleopController, MouseTeleopIntervention
 from square_assembly.runners.square_oracle import SquareAssemblyOracle
 
 
@@ -96,7 +97,7 @@ def _to_storage(key, val, rgb_keys):
 
 
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
-        control_fps, display_size, window_name="rollout"):
+        control_fps, display_size, window_name="rollout", mode="oracle", teleop=None):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다.
     open_window(window_name)
@@ -133,9 +134,15 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     display_camera = camera[: -len("_image")]
     check_render(env, display_camera, display_size)
 
-    interv = ScriptedFailureIntervention(
-        SquareAssemblyOracle(env), trigger_key=trigger_key, quit_key=quit_key, window_name=window_name,
-    )
+    if mode == "mouse":
+        interv = MouseTeleopIntervention(
+            env, controller=MouseTeleopController(**(teleop or {})), map_size=display_size,
+            window_name=window_name, quit_key=quit_key,
+        )
+    else:
+        interv = ScriptedFailureIntervention(
+            SquareAssemblyOracle(env), trigger_key=trigger_key, quit_key=quit_key, window_name=window_name,
+        )
 
     def predict_fn(history):
         return _predict_chunk(policy, normalizer, history, obs_keys, device, rgb_keys=rgb_keys)
@@ -208,14 +215,25 @@ def main():
     ap.add_argument("--max-steps", type=int, default=700)
     ap.add_argument("--out", default="data/square_scripted_intv.hdf5")
     ap.add_argument("--camera", default="agentview_image")
-    ap.add_argument("--trigger-key", default="s", help="실패 판단 시 오라클에 넘기는 키")
+    ap.add_argument("--mode", choices=["oracle", "mouse"], default="oracle",
+                    help="oracle: 트리거 키로 스크립트 오라클에 넘김 / mouse: 사람이 2D 맵 위에서 직접 조종"
+                         "(h=잡기 p=돌려주기 s=일시정지, runners/mouse_teleop.py 참고)")
+    ap.add_argument("--trigger-key", default="s", help="[oracle] 실패 판단 시 오라클에 넘기는 키")
+    ap.add_argument("--kp", type=float, default=1.0, help="[mouse] xy P 게인")
+    ap.add_argument("--kd", type=float, default=0.0, help="[mouse] xy D 게인")
+    ap.add_argument("--pos-cap", type=float, default=0.3, help="[mouse] xy delta 상한(1.0=5cm/step)")
+    ap.add_argument("--z-speed", type=float, default=0.2, help="[mouse] Space/Shift z 속도(0.2=1cm/step)")
+    ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
+    ap.add_argument("--grip-rate", type=float, default=0.1, help="[mouse] 스텝당 그리퍼 명령 변화")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
                     help=f"화면 표시용 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY})")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
-        args.trigger_key, args.quit_key, args.control_fps, args.display_size)
+        args.trigger_key, args.quit_key, args.control_fps, args.display_size,
+        mode=args.mode, teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, z_speed=args.z_speed,
+                                    yaw_step=np.deg2rad(args.yaw_step), grip_rate=args.grip_rate))
 
 
 if __name__ == "__main__":

@@ -43,6 +43,48 @@ def _wrap_axis(angle):
     return (angle + _HALF_PI) % np.pi - _HALF_PI
 
 
+def yaw_of(R):
+    """그리퍼 회전행렬의 손가락 축(x열)이 월드 xy 평면에서 향하는 각."""
+    return float(np.arctan2(R[1, 0], R[0, 0]))
+
+
+def rot_delta_toward(cur, yaw, rot_cap):
+    """그리퍼를 수직 아래로 + 손가락 축을 yaw로 향하게 만드는 OSC delta 회전(axis-angle).
+
+    Returns:
+        (delta(3,), angle): rot_cap으로 클립된 액션과 남은 회전각(rad).
+    """
+    x = np.array([np.cos(yaw), np.sin(yaw), 0.0])
+    z = np.array([0.0, 0.0, -1.0])
+    target = np.column_stack([x, np.cross(z, x), z])
+
+    dR = target @ cur.T
+    angle = float(np.arccos(np.clip((np.trace(dR) - 1) / 2, -1.0, 1.0)))
+    if angle < 1e-6:
+        return np.zeros(3), 0.0
+    axis = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]]) / (2 * np.sin(angle))
+    return np.clip(axis * angle / _ROT_SCALE, -rot_cap, rot_cap), angle
+
+
+def read_privileged_state(raw):
+    """sim에서 그리퍼/너트/핸들/peg 상태를 한 번에 읽는다(오라클·텔레옵 맵 공용).
+
+    인덱스는 robosuite가 env 생성 시 잡아둔 것 그대로 쓴다. 매 호출마다 새로 읽으므로
+    env.reset() 뒤에도 안전하다.
+    """
+    sim = raw.sim
+    nut = raw.nuts[getattr(raw, "nut_id", 0)]
+    grip_id = raw.robots[0].eef_site_id[raw.robots[0].arms[0]]
+    return {
+        "grip": sim.data.site_xpos[grip_id].copy(),
+        # 열: [손가락이 벌어지는 축, y, 접근 축] — x축이 손가락 축인 건 finger body 위치로 확인(2026-09-17)
+        "R": sim.data.site_xmat[grip_id].reshape(3, 3).copy(),
+        "nut": sim.data.body_xpos[raw.obj_body_id[nut.name]].copy(),
+        "handle": sim.data.site_xpos[sim.model.site_name2id(nut.important_sites["handle"])].copy(),
+        "peg": sim.data.body_xpos[raw.peg1_body_id].copy(),
+    }
+
+
 class SquareAssemblyOracle:
     """intervention_fn 계약(`(step, obs_raw) -> action | None`)을 그대로 따르는 오라클.
 
@@ -79,18 +121,7 @@ class SquareAssemblyOracle:
         self._t = 0
 
     def _state(self):
-        """특권 정보 한 번에 읽기. 인덱스는 robosuite가 env 생성 시 잡아둔 것 그대로 쓴다."""
-        raw, sim = self.raw, self.raw.sim
-        nut = raw.nuts[getattr(raw, "nut_id", 0)]
-        grip_id = raw.robots[0].eef_site_id[raw.robots[0].arms[0]]
-        return {
-            "grip": sim.data.site_xpos[grip_id].copy(),
-            # 열: [손가락이 벌어지는 축, y, 접근 축] — x축이 손가락 축인 건 finger body 위치로 확인(2026-09-17)
-            "R": sim.data.site_xmat[grip_id].reshape(3, 3).copy(),
-            "nut": sim.data.body_xpos[raw.obj_body_id[nut.name]].copy(),
-            "handle": sim.data.site_xpos[sim.model.site_name2id(nut.important_sites["handle"])].copy(),
-            "peg": sim.data.body_xpos[raw.peg1_body_id].copy(),
-        }
+        return read_privileged_state(self.raw)
 
     def _move(self, cur, target):
         return np.clip((np.asarray(target) - cur) / _POS_SCALE, -self.pos_cap, self.pos_cap)
@@ -103,20 +134,10 @@ class SquareAssemblyOracle:
         무작위 액션 60스텝으로 흐트러뜨린 20개 시드: yaw만 제어 7/20 -> 자세 전체 제어 20/20).
         """
         handle_dir = np.arctan2(*(s["handle"] - s["nut"])[[1, 0]])
-        cur = s["R"]
-        cur_angle = np.arctan2(cur[1, 0], cur[0, 0])
+        cur_angle = yaw_of(s["R"])
         # 손가락 축은 180° 대칭이라 뒤집힌 해 중 가까운 쪽을 목표로 잡는다.
         yaw = cur_angle + _wrap_axis(handle_dir + _HALF_PI - cur_angle)
-        x = np.array([np.cos(yaw), np.sin(yaw), 0.0])
-        z = np.array([0.0, 0.0, -1.0])
-        target = np.column_stack([x, np.cross(z, x), z])
-
-        dR = target @ cur.T
-        angle = float(np.arccos(np.clip((np.trace(dR) - 1) / 2, -1.0, 1.0)))
-        if angle < 1e-6:
-            return np.zeros(3), 0.0
-        axis = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]]) / (2 * np.sin(angle))
-        return np.clip(axis * angle / _ROT_SCALE, -self.rot_cap, self.rot_cap), angle
+        return rot_delta_toward(s["R"], yaw, self.rot_cap)
 
     def _drop_target_xy(self, s):
         """지금 쥔 자세를 유지한 채 너트 중심이 peg 위로 가는 그리퍼 xy."""
