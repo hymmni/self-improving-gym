@@ -37,6 +37,8 @@ def open_window(window_name="rollout"):
     """
     import cv2
 
+    # GUI_NORMAL: Qt 툴바/상태바 없는 창. expanded 모드는 휠을 창 확대에 써버려서 텔레옵 휠이 먹혔다.
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
     cv2.imshow(window_name, np.zeros((10, 10, 3), dtype=np.uint8))
     cv2.waitKey(1)
 

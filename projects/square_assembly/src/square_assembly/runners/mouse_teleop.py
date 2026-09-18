@@ -16,7 +16,7 @@
 맞췄다: 화면 오른쪽 = 월드 +y, 화면 위 = 월드 −x(로봇 쪽이 위).
 
 키 입력 경로가 둘인 이유: cv2.waitKey는 창에 포커스가 있을 때만 오고 Shift 단독 입력과
-키 떼기를 못 본다. 그래서 단발 키(h/p/s/q)는 cv2, "누르고 있는 동안"(Space/Shift)은
+키 떼기를 못 본다. 그래서 단발 키(h/p/s/q)는 cv2, "누르고 있는 동안"(Space/Shift)과 휠은
 pynput 리스너로 받는다(pynput은 전역 리스너라 다른 창에 타이핑해도 잡힌다 — 사람 제어
 중에만 z에 반영되므로 실사용에선 문제가 안 됐다).
 """
@@ -191,12 +191,13 @@ class MouseTeleopIntervention:
             self.controller.grip_pressed = True
         elif event == cv2.EVENT_LBUTTONUP:
             self.controller.grip_pressed = False
-        elif event == cv2.EVENT_MOUSEWHEEL:
-            self.controller.wheel(cv2.getMouseWheelDelta(flags) / 120.0)
+        # 휠은 여기로 안 온다 — cv2 Qt 창은 EVENT_MOUSEWHEEL을 콜백에 넘기지 않고 창 확대에 써버린다
+        # (2026-09-18 rupy 주입 테스트: expanded/GUI_NORMAL 둘 다 콜백 0건). 휠은 pynput 마우스 리스너로 받는다.
 
     def _start_inputs(self):
         import cv2
         from pynput import keyboard as pynput_keyboard
+        from pynput import mouse as pynput_mouse
 
         from square_assembly.runners.intervention_rollout import KeyboardIntervention
 
@@ -224,6 +225,9 @@ class MouseTeleopIntervention:
 
         self._listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
         self._listener.start()
+        # 전역 리스너라 어느 창 위에서 굴려도 야우가 돈다 — 사람 제어 중(_active)에만 반영된다.
+        self._wheel_listener = pynput_mouse.Listener(on_scroll=lambda x, y, dx, dy: self.controller.wheel(dy))
+        self._wheel_listener.start()
 
     # ---- render_fn 계약 -----------------------------------------------------------
     def render(self, frame):
@@ -310,6 +314,7 @@ class MouseTeleopIntervention:
     def close(self):
         import cv2
 
-        if self._listener is not None:
-            self._listener.stop()
+        for l in (self._listener, getattr(self, "_wheel_listener", None)):
+            if l is not None:
+                l.stop()
         cv2.destroyWindow(self.window_name)
