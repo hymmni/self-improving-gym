@@ -139,6 +139,18 @@ def derive_task_meta(task_cfg):
     return derive_task_meta_from_hdf5(task_cfg)
 
 
+def _burn_first_episode(env, n_steps=30):
+    """도커 컨테이너의 MuJoCo EGL 렌더는 env 생성 후 **첫 에피소드의 step 프레임**이 노이즈다
+    (2026-09-18 rupy 실측: 컨테이너 24/24 재현, 두 번째 reset부터는 항상 정상. 호스트 네이티브는
+    0/9. NVIDIA ICD 고정·glFinish·EGL device 고정 모두 효과 없음 — DOCKER.md §4). 그래서 image
+    env는 만들자마자 reset+n_steps를 한 번 버려서 호출부가 받는 첫 에피소드부터 정상이게 한다.
+    네이티브에선 불필요하지만 0.1초라 항상 한다. eval_seed는 호출부가 이 뒤에 잡으므로 영향 없다."""
+    env.reset()
+    zero = np.zeros(env.action_dimension, dtype=np.float32)
+    for _ in range(n_steps):
+        env.step(zero)
+
+
 def make_eval_env(task_cfg, render=False, renderer="mjviewer", image_size_override=None, env_kwargs_override=None):
     """train/eval/collect 3곳에서 각자 env를 만들던 걸 통합(2026-07-25) — task_cfg 필드를
     풀어쓰는 로직이 세 군데 복사돼 있었고, 그중 하나(collect.py)는 env_kwargs를 통째로
@@ -181,12 +193,14 @@ def make_eval_env(task_cfg, render=False, renderer="mjviewer", image_size_overri
         env_kwargs = OmegaConf.to_container(task_cfg.env_kwargs, resolve=True) if task_cfg.get("env_kwargs", None) else None
     if is_image_task(task_cfg):
         from square_assembly.envs.robomimic.factory import make_image_env
-        return make_image_env(
+        env = make_image_env(
             task_cfg.env_name, task_cfg.robots,
             list(task_cfg.lowdim_keys), list(task_cfg.rgb_keys),
             list(task_cfg.camera_names), image_size=image_size_override or task_cfg.image_size,
             gripper_types=gripper_types, env_kwargs=env_kwargs,
         )
+        _burn_first_episode(env)
+        return env
     from square_assembly.envs.robomimic.factory import make_lowdim_env
     return make_lowdim_env(task_cfg.env_name, task_cfg.robots, list(task_cfg.obs_keys),
                             render=render, renderer=renderer, gripper_types=gripper_types, env_kwargs=env_kwargs)

@@ -171,43 +171,51 @@ xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XC
 tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
 뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
 
-### 렌더가 노이즈로 나올 때: 컨테이너를 바꿔라 (2026-09-17 실측, 원인 미해결)
+### 렌더가 노이즈로 나온다: 도커 컨테이너 고유 문제 — 렌더·GUI 작업은 호스트 네이티브로 (2026-09-18 확정)
 
-**증상**: 에러 없이 화면이 지지직거리고, 정책이 갑자기 아무것도 못 한다. MuJoCo 오프스크린
-렌더가 **조용히 아무 일도 안 하고**(프레임당 0.0ms) 초기화되지 않은 메모리를 돌려준다 —
-화면뿐 아니라 **정책이 보는 obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다.
+**증상**: 에러 없이 화면이 지지직거리고 정책이 갑자기 아무것도 못 한다. MuJoCo 오프스크린
+렌더가 초기화되지 않은 메모리(노이즈) 또는 검은 화면을 돌려주며, 화면뿐 아니라 **정책이 보는
+obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다.
 
-같은 이미지·같은 드라이버(595.84)·같은 GPU·같은 compose 설정인데도 **그 시간대에 먼저 떠
-있던 컨테이너는 정상, 그 뒤에 새로 만든 컨테이너는 전부 깨졌다**(compose up/run, DISPLAY,
-cv2 창 유무, NVIDIA_DRIVER_CAPABILITIES와 무관하게 재현). EGL 컨텍스트 자체는 정상으로
-만들어지고(`GL_RENDERER: NVIDIA GeForce RTX 5090`) 에러도 안 난다.
+**정확한 서명**(2026-09-18 pororo·rupy 실측): `env.reset()` 직후 첫 프레임은 정상이고 **그 뒤
+step 프레임부터 노이즈**다. 그래서 "reset 후 한 장" 점검은 고장을 통과시킨다 — 반드시 step
+몇 번 뒤의 프레임을 봐야 한다. 대부분은 **env 생성 후 첫 에피소드**에서 나고 두 번째 reset부터
+정상이지만(rupy 컨테이너 24/24 재현), 사람이 개입 중인 긴 에피소드 도중에도 간헐적으로 난다.
 
-**일시적이다 — GPU 부하와 같이 움직였다**: 깨지던 동안 이 공용 서버의 GPU는 다른 사용자
-때문에 사용률 96%였고, 사용률이 0%로 떨어지자 **새로 만든 컨테이너도 곧바로 정상**으로
-돌아왔다(연속 2회 확인). 인과까지 증명한 건 아니지만, 깨졌을 때 기다렸다 다시 해보는 게
-첫 번째 대처다. 먼저 떠 있던 컨테이너가 그 와중에도 멀쩡했던 이유는 아직 설명 못 한다.
+**도커 고유 문제다**: 같은 시각에 호스트 네이티브 환경(rupy `mani_sim`, 같은 mujoco 3.2.3·
+robosuite 1.5.1·드라이버 595.84)과 컨테이너를 3분 간격으로 짝지어 돌리면 네이티브는 0/9,
+컨테이너는 6/9 노이즈(`outputs/paired_probe.log`). 실험으로 배제한 것: GPU 부하(사용률 0%에
+만든 컨테이너도 고장, 100%에서도 네이티브는 정상), DISPLAY 유무, TTY, 마운트 디렉터리/코드,
+cv2 창 유무, X11 MIT-SHM. 컨테이너 안 완화책도 전부 무효: NVIDIA ICD만 사용
+(`__EGL_VENDOR_LIBRARY_FILENAMES`), `mjr_readPixels` 앞 `glFinish`, `MUJOCO_EGL_DEVICE_ID=0`
+(`outputs/probe_variants.log`, 각 6회). 남은 차이는 컨테이너의 glvnd 1.6.0(Debian) + 주입된
+드라이버 라이브러리 조합뿐인데 원인까지는 못 잡았다.
 
-**확인**: collect_square_scripted_intervention.py가 시작할 때 `check_render()`로 자동 점검하고
-깨졌으면 수집 전에 멈춘다. 직접 확인하려면 컨테이너 안에서:
+**규칙(ADR-008)**: 렌더 품질이 데이터가 되는 작업(텔레옵/개입 수집, 화면 보며 하는 평가)은
+**호스트 네이티브 환경**에서 한다. 도커는 학습(hdf5 입력)과 헤드리스 배치 작업용이다. 도커
+안에서 어쩔 수 없이 env를 만들 때(학습 중 eval)는 `make_eval_env`가 첫 에피소드를 자동으로
+버린다(`_burn_first_episode`).
+
+**코드 쪽 방어**(collect_square_scripted_intervention.py): 시작 시 reset+5 step 프레임으로 점검하고
+고장이면 env를 다시 만들며 최대 2분 대기(`wait_for_renderer`), 에피소드 도중 연속 3프레임 노이즈면
+그 에피소드를 버리고 렌더가 돌아올 때까지 기다렸다 같은 번호로 재수집, 저장 시 프레임 거칠기를
+다시 재서 `render_ok` 속성을 남기고 노이즈면 실패로 기록(병합에서 제외).
+
+**직접 확인**(어디서든): reset 뒤 step을 20번 돌린 프레임의 이웃 픽셀 차이 평균 —
+정상 84px 장면은 4~10, 노이즈는 30~130, 검은 화면은 ~0.
 
 ```bash
-source /opt/venvs/torch/bin/activate
-MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache python -c "
-import numpy as np
-from square_assembly.envs.robomimic.factory import make_image_env
-env = make_image_env('NutAssemblySquare', 'Panda', ['robot0_eef_pos'], ['agentview_image'], ['agentview'], image_size=84)
-env.reset()
-im = env.render(mode='rgb_array', height=84, width=84, camera_name='agentview')
-r = np.abs(np.diff(im.astype(int), axis=1)).mean()
-print('이웃 픽셀 차이', round(float(r), 1), '->', '정상' if r < 15 else '노이즈(이 컨테이너에선 수집하지 마라)')
+MUJOCO_GL=egl python -c "
+import numpy as np, robosuite as suite
+env = suite.make('NutAssemblySquare', robots='Panda', has_renderer=False, has_offscreen_renderer=True,
+                 use_camera_obs=True, camera_names='agentview', camera_heights=84, camera_widths=84, control_freq=20)
+for k in range(2):
+    o = env.reset(); rs = []
+    for _ in range(20):
+        o, *_ = env.step(np.zeros(env.action_dim)); rs.append(np.abs(np.diff(o['agentview_image'].astype(int), axis=1)).mean())
+    print(f'episode {k}: step frames max roughness {max(rs):.1f} ->', '정상' if max(rs) < 15 else '노이즈')
 "
 ```
-
-정상 장면은 ~4, 깨진 컨테이너는 30~76이 나온다.
-
-**대처**: (1) 점검이 통과할 때까지 기다렸다 다시 실행하거나, (2) 렌더가 정상인 다른
-컨테이너에서 실행한다(`docker exec -it <그 컨테이너> bash`). 어느 쪽이든 수집 전에 위
-점검이 통과하는지부터 확인한다.
 
 ### cv2 창을 띄운 채 오프스크린 렌더 해상도를 키우면 죽는다 (2026-09-17 실측)
 
