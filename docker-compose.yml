@@ -23,5 +23,9 @@ services:
       - WANDB_API_KEY=${WANDB_API_KEY}
       - MUJOCO_GL=egl
       - HOME=${HOME}
+    # PyTorch DataLoader 워커는 배치를 공유 메모리로 넘긴다. 도커 기본 /dev/shm은 64MB라
+    # num_workers>0로 이미지 배치를 실어나르면 "DataLoader worker is killed by signal:
+    # Bus error"로 죽는다(2026-09-18 pororo에서 square DP 학습 실측 — 첫 epoch 진입도 못 함).
+    shm_size: "8gb"
     stdin_open: true
     tty: true
