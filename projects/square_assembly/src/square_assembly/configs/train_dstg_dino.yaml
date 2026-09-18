@@ -1,0 +1,27 @@
+# DINO 특징 캐시 위의 STG 예측기 학습 — scripts/train_dstg_dino.py.
+# 하이퍼파라미터는 ResNet 기준선(train_dstg.yaml + outputs/dstg/hydra/*/.hydra/config.yaml
+# 실측값)과 동일하게 고정한다. 인코더 말고 다른 변인이 끼면 val_mae 비교가 성립하지 않는다.
+
+cache_path: ???   # scripts/cache_dino_feats.py 산출물
+out: outputs/dstg_dino/predictor.pt
+num_bins_override: 501   # 기준선과 같은 bin 공간이어야 mae/nll을 그대로 비교할 수 있다
+fail_bin: null           # 실패 롤아웃 데이터를 쓸 때만 설정(이번 실험은 PH 성공 데모만)
+
+obs_horizon: 2           # configs/policy/diffusion_unet.yaml과 동일
+seed: 1
+device: cuda
+num_workers: 0           # 특징이 이미 메모리에 있어 워커가 이득이 없다
+
+batch_size: 64
+lr: 1.0e-4
+weight_decay: 1.0e-6
+num_epochs: 30
+log_every: 5
+head_hidden: [256, 256]
+
+val_fraction: 0.2
+split_seed: 0
+
+hydra:
+  run:
+    dir: outputs/dstg_dino/hydra/${now:%Y%m%d-%H%M%S}
