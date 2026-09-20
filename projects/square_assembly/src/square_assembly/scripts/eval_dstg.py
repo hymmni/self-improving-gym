@@ -72,19 +72,27 @@ def best_f1(score, label):
     return best
 
 
-def reward_metrics(d, label, demo, t):
-    """에피소드 안에서 시간순으로 이어붙여 r_t = d_t - d_{t+1}의 품질을 잰다."""
+_STRIDES = (1, 2, 5, 10, 20)
+
+
+def reward_metrics(d, label, demo, t, stride=1):
+    """에피소드 안에서 시간순으로 이어붙여 r_t = d_t - d_{t+stride}의 품질을 잰다.
+
+    stride>1은 인접 프레임이 거의 같아 보이는 문제를 피한다 — 신호(참 감소량)는 stride에
+    비례해 커지는데 d의 추정 잡음은 그대로라, 잡음에 묻힌 보상이 stride를 키우면 살아나는지
+    여기서 바로 보인다.
+    """
     signs, errs, snrs, rhos = [], [], [], []
     for name in np.unique(demo):
         m = demo == name
         order = np.argsort(t[m], kind="mergesort")
         d_ep, label_ep = d[m][order], label[m][order]
-        if len(d_ep) < _MIN_EPISODE_LEN:
+        if len(d_ep) < max(_MIN_EPISODE_LEN, stride + 1):
             continue
         # 이상적인 스텝당 보상은 참 라벨의 차분 그 자체다 — 라벨이 남은 스텝 수면 항상 +1,
         # 남은 비율 x H로 정규화했으면 H/(L-1)이다. 하드코딩하면 정규화 라벨에서 틀린 값을 잰다.
-        r = d_ep[:-1] - d_ep[1:]
-        ideal = label_ep[:-1] - label_ep[1:]
+        r = d_ep[:-stride] - d_ep[stride:]
+        ideal = label_ep[:-stride] - label_ep[stride:]
         signs.append(r > 0)
         errs.append(np.abs(r - ideal))
         snrs.append(r.mean() / r.std() if r.std() > 1e-9 else np.inf)
@@ -106,6 +114,13 @@ def evaluate(d, nll, label, demo, t, mode):
            "mae": float(np.abs(d - label).mean()),
            "nll": float(np.mean(nll))}
     out.update(reward_metrics(d, label, demo, t))
+    # 보상을 몇 스텝 간격으로 읽느냐에 따라 품질이 어떻게 변하는지 — stride 1이 잡음이어도
+    # stride가 커지며 살아나면 예측기가 아니라 "1스텝 차분"이 문제라는 뜻이다.
+    out["by_stride"] = {
+        str(k): {n: v for n, v in reward_metrics(d, label, demo, t, stride=k).items()
+                 if n in ("reward_sign_acc", "reward_snr")}
+        for k in _STRIDES
+    }
     out.update(best_f1(d, label == 0))
     if mode is not None:
         from square_assembly.datasets.labels import LABEL_PREINTV, LABEL_ROLLOUT
