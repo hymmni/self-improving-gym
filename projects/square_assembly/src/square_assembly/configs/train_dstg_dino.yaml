@@ -6,6 +6,9 @@ cache_path: ???   # scripts/cache_dino_feats.py 산출물
 out: outputs/dstg_dino/predictor.pt
 num_bins_override: 501   # 기준선과 같은 bin 공간이어야 mae/nll을 그대로 비교할 수 있다
 fail_bin: null           # 실패 롤아웃 데이터를 쓸 때만 설정(이번 실험은 PH 성공 데모만)
+label_horizon: null      # 설정하면 라벨이 '남은 스텝 수' 대신 '남은 비율 x 이 값' —
+                         # 에피소드 길이 편차가 큰 텔레옵 데이터용. num_bins도 같이 줄여야 한다.
+train_demos_limit: null  # train 데모 수 상한(규모 곡선용). val 데모는 영향받지 않는다.
 
 obs_horizon: 2           # configs/policy/diffusion_unet.yaml과 동일
 seed: 1
