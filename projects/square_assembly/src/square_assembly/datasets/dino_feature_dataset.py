@@ -43,9 +43,10 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         fail_bin (int | None): 실패 데모에 붙일 별도 클래스. 실패 데모가 있는데 None이면 죽는다.
     """
 
-    def __init__(self, cache_path, obs_horizon, fail_bin=None):
+    def __init__(self, cache_path, obs_horizon, fail_bin=None, label_horizon=None):
         self.obs_horizon = obs_horizon
         self.fail_bin = fail_bin
+        self.label_horizon = label_horizon
         self.frames, self.lengths, self.success = {}, {}, {}
         self.samples = []
 
@@ -75,15 +76,25 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _label(self, name, t):
+        """이 데이터셋의 유일한 라벨 정의 — labels()와 __getitem__이 갈라지면 학습과 평가가
+        조용히 어긋난다.
+
+        label_horizon(H)을 주면 '남은 스텝 수' 대신 '남은 비율 x H'를 라벨로 쓴다. 사람이
+        얼마나 빨리 몰았는지에 불변이라, 에피소드 길이가 들쭉날쭉한 텔레옵 데이터에서
+        "관측 -> 남은 스텝"이 ill-posed가 되는 걸 막는다(experiments 2026-09-18 §7).
+        """
+        if not self.success[name]:
+            return self.fail_bin
+        remaining = self.lengths[name] - 1 - t
+        if self.label_horizon is None:
+            return remaining
+        span = max(self.lengths[name] - 1, 1)
+        return int(round(remaining / span * self.label_horizon))
+
     def labels(self):
         """(N,) int64 — num_bins 결정과 로깅용. __getitem__을 N번 부르지 않고 한 번에 계산한다."""
-        return np.array(
-            [
-                (self.lengths[n] - 1 - t) if self.success[n] else self.fail_bin
-                for n, t in self.samples
-            ],
-            dtype=np.int64,
-        )
+        return np.array([self._label(n, t) for n, t in self.samples], dtype=np.int64)
 
     def split_indices(self, val_fraction, seed):
         val_demos = episode_split_by_name(list(self.frames), val_fraction, seed)
@@ -109,5 +120,4 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         length = self.lengths[name]
         idx = np.clip(np.arange(t - self.obs_horizon + 1, t + 1), 0, length - 1)
         x = self.frames[name][idx].reshape(-1)
-        label = (length - 1 - t) if self.success[name] else self.fail_bin
-        return torch.from_numpy(x.copy()), int(label)
+        return torch.from_numpy(x.copy()), int(self._label(name, t))

@@ -14,7 +14,7 @@ REINFORCE를 돌리면 정책이 망가진다 — MAE는 이 실패 모드를 �
 |---|---|---|
 | `mae` / `nll` | 학습 때와 같은 적합도(참고용) | 0 |
 | `reward_sign_acc` | r_t > 0인 transition 비율 — 부호가 맞는가 | 1.0 |
-| `reward_mae` | \|r_t − 1\|의 평균 — 스텝당 보상이 얼마나 어긋나는가 | 0 |
+| `reward_mae` | \|r_t − (이상적 스텝당 감소)\|의 평균 | 0 |
 | `reward_snr` | 에피소드 내 mean(r)/std(r) 중앙값 — 신호 대 잡음 | 클수록 좋음 |
 | `spearman` | 에피소드 내 d와 참 라벨의 순위상관 중앙값 | 1.0 |
 | `preintv_auroc` | 사람이 곧 개입한 상태(PREINTV)를 평범한 ROLLOUT보다 나쁘게 보는가 | 참라벨 AUROC에 근접 |
@@ -81,9 +81,12 @@ def reward_metrics(d, label, demo, t):
         d_ep, label_ep = d[m][order], label[m][order]
         if len(d_ep) < _MIN_EPISODE_LEN:
             continue
-        r = d_ep[:-1] - d_ep[1:]          # 이상값: 매 스텝 +1
+        # 이상적인 스텝당 보상은 참 라벨의 차분 그 자체다 — 라벨이 남은 스텝 수면 항상 +1,
+        # 남은 비율 x H로 정규화했으면 H/(L-1)이다. 하드코딩하면 정규화 라벨에서 틀린 값을 잰다.
+        r = d_ep[:-1] - d_ep[1:]
+        ideal = label_ep[:-1] - label_ep[1:]
         signs.append(r > 0)
-        errs.append(np.abs(r - 1.0))
+        errs.append(np.abs(r - ideal))
         snrs.append(r.mean() / r.std() if r.std() > 1e-9 else np.inf)
         rhos.append(spearmanr(d_ep, label_ep).statistic)
     if not signs:
@@ -169,7 +172,8 @@ def _collect_cached(predictor_path, cache_path, source_hdf5, device, batch_size,
     from torch.utils.data import DataLoader, Subset
 
     head, ckpt = load_checkpoint(predictor_path, device)
-    dataset = DinoFeatureWindows(cache_path, int(ckpt["obs_horizon"]), fail_bin=ckpt.get("fail_bin"))
+    dataset = DinoFeatureWindows(cache_path, int(ckpt["obs_horizon"]), fail_bin=ckpt.get("fail_bin"),
+                                 label_horizon=ckpt.get("label_horizon"))
     dataset.apply_frame_stats(np.asarray(ckpt["frame_mean"], np.float32),
                               np.asarray(ckpt["frame_std"], np.float32))
     train_idx, val_idx, val_demos = dataset.split_indices(val_fraction, split_seed)
