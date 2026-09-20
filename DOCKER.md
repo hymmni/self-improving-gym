@@ -244,6 +244,20 @@ collect_square_scripted_intervention.py의 `--display-size`가 이 상한을 강
 
 이 순서를 안 지키면, 지금 `pymunk`/`cmake`가 빠져있던 것과 같은 "숨은 의존성" 문제가 또 생깁니다.
 
+## 6-1. 사전학습 가중치를 내려받는 스크립트는 HOME을 옮겨야 한다 (2026-09-20 실측)
+
+컨테이너의 `$HOME`(=`/home/moai`)은 compose가 `.claude`만 마운트해서 쓰기가 막혀 있다. timm/
+HuggingFace(`~/.cache/huggingface`), `torch.hub`(`~/.cache/torch`), VIP(`~/.vip`)처럼 가중치를
+받아 캐시하는 코드는 전부 `PermissionError: [Errno 13] Permission denied: '/home/moai/.cache'`로
+죽는다(DINO/VIP 특징 캐시 스크립트가 여기 걸렸다). 실행할 때 HOME을 마운트된 곳으로 돌린다:
+
+```bash
+export HOME=/workspace/outputs/.model_cache && mkdir -p $HOME   # outputs/는 gitignore
+python -m square_assembly.scripts.cache_dino_feats --hdf5 ... --out ...
+```
+
+`outputs/` 아래에 두면 다음 컨테이너에서도 그대로 재사용된다(컨테이너는 `--rm`이라 휘발성).
+
 ## 7. 자주 쓰는 팁
 
 - 컨테이너가 이미 떠 있는 상태에서 셸을 하나 더 열고 싶으면: `docker compose exec dev bash`
