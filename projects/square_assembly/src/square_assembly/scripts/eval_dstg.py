@@ -142,12 +142,16 @@ def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fractio
     print(f"val {n_val_demos} demos / {len(val_idx)} samples", flush=True)
 
     d_all, nll_all = [], []
+    # RobomimicSequenceDataset은 time_to_success를 안 실어준다(train_dstg.py의 _LabeledWindow가
+    # 얹는 것) — shuffle=False라 배치 순서가 val_idx 순서와 같으므로 위에서 뽑아둔 labels를 잘라 쓴다.
+    label_t, offset = torch.from_numpy(np.asarray(labels)).long(), 0
     loader = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False)
     with torch.no_grad():
         for b_i, batch in enumerate(loader):
             obs = {k: v.to(device) for k, v in batch["obs"].items()}
             logits = reward.predictor(obs)
-            y = batch["time_to_success"].to(device).long()
+            y = label_t[offset:offset + logits.shape[0]].to(device)
+            offset += logits.shape[0]
             d_all.append((F.softmax(logits, -1) * reward.bin_vals).sum(-1).cpu().numpy())
             nll_all.append(F.cross_entropy(logits, y, reduction="none").cpu().numpy())
             if b_i % 20 == 0:
