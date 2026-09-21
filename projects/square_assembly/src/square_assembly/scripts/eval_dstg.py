@@ -185,9 +185,13 @@ def segment_metrics(d, label, demo, t, mode):
         if not rs:
             continue
         rs, ideals, lens = np.array(rs), np.array(ideals), np.array(lens)
+        # 구간 길이가 14~178프레임으로 제각각이라, 크기를 비교하려면 프레임당으로 나눠야 한다.
         out[name] = {"n_segments": len(rs), "median_len": float(np.median(lens)),
                      "sign_acc": float((rs > 0).mean()), "mean_reward": float(rs.mean()),
-                     "mean_ideal": float(ideals.mean())}
+                     "mean_ideal": float(ideals.mean()),
+                     "reward_per_frame": float((rs / lens).mean()),
+                     "ideal_per_frame": float((ideals / lens).mean()),
+                     "reward_per_frame_std": float((rs / lens).std())}
     return out
 
 
