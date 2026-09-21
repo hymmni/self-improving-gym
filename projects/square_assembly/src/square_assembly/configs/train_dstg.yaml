@@ -5,6 +5,8 @@ policy_ckpt: ???
 hdf5_path: ???
 out: outputs/dstg/predictor.pt
 num_bins_override: null  # 설정하면 데이터에서 자동으로 정하는 대신 이 값을 강제로 쓴다
+label_horizon: null      # 남은 비율 x 이 값으로 라벨링(사람 속도에 불변). null이면 남은 스텝 수
+preintv: none            # PREINTV 프레임 처리: none | drop | flat | rise
 
 seed: 0
 device: cuda

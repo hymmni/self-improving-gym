@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
 from square_assembly.datasets.robomimic_dataset import RobomimicSequenceDataset
+from square_assembly.datasets.stg_labels import build_labels
 from square_assembly.factory import registry
 from square_assembly.policies.diffusion.dstg_predictor import DstgPredictor
 from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_config
@@ -55,6 +56,34 @@ class _LabeledWindow(Dataset):
         item = self.base[idx]
         item["time_to_success"] = int(self.labels[idx])
         return item
+
+
+def _stg_labels(dataset, cfg):
+    """RobomimicSequenceDataset 샘플에 stg_labels.build_labels를 적용한다.
+
+    데모 이름·프레임 인덱스는 get_time_to_success와 같은 경로(_demo_id_and_index_in_demo)로,
+    길이와 action_mode는 hdf5에서 직접 읽는다(robomimic_dataset.py는 안 건드림, ADR-005).
+    """
+    seq = dataset._seq_dataset
+    pairs = [dataset._demo_id_and_index_in_demo(i) for i in range(len(dataset))]
+    names = [n for n, _ in pairs]
+    ts = [t for _, t in pairs]
+    demos = sorted(set(names))
+    lengths = {n: seq.hdf5_file[f"data/{n}/actions"].shape[0] for n in demos}
+    success = {n: True for n in demos}   # get_time_to_success와 같은 전제(에피소드=성공 경로)
+    modes = {}
+    if cfg.get("preintv", "none") != "none":
+        for n in demos:
+            g = seq.hdf5_file[f"data/{n}"]
+            if "action_mode" in g:
+                m = np.asarray(g["action_mode"])
+                if len(m) < lengths[n]:
+                    m = np.concatenate([m, np.repeat(m[-1:], lengths[n] - len(m))])
+                modes[n] = m[: lengths[n]]
+    return build_labels(names, ts, lengths, success, modes=modes,
+                        fail_bin=cfg.get("fail_bin"),
+                        label_horizon=cfg.get("label_horizon"),
+                        preintv=cfg.get("preintv", "none"))
 
 
 def _episode_split(dataset, val_fraction, seed):
@@ -136,7 +165,9 @@ def main(cfg: DictConfig):
         pred_horizon=1,  # STG는 이 시점 관측 하나에 대한 라벨이지 행동 청크가 아니다
         normalizer=normalizer, rgb_keys=task_cfg.rgb_keys, hdf5_cache_mode=cache_mode,
     )
-    labels = dataset.get_time_to_success()
+    # 라벨 규칙은 DINO/VIP 경로와 같은 곳(stg_labels.build_labels)을 쓴다 — 인코더를
+    # 비교한다면서 라벨 처리를 비교하게 되는 걸 막는다.
+    labels, preintv_mask = _stg_labels(dataset, cfg)
     # 기본은 데이터에서 관측된 최대 time-to-success로 정한다(고정 상수 금지, 원래 방침).
     # cfg.num_bins_override(기본 None)가 있으면 그 값을 강제로 쓴다 — 2026-08-11: 데이터
     # 스케일링 비교 실험처럼 "여러 체크포인트가 같은 bin 공간을 써야 mu/sigma를 그대로
@@ -151,6 +182,10 @@ def main(cfg: DictConfig):
     logger.info(f"dataset len={len(dataset)} num_bins={num_bins} (max observed time-to-success={int(labels.max())})")
 
     train_idx, val_idx, n_train_demos, n_val_demos = _episode_split(dataset, cfg.val_fraction, cfg.split_seed)
+    if cfg.get("preintv") == "drop":   # val은 건드리지 않는다 — held-out 비교가 깨진다
+        before = len(train_idx)
+        train_idx = [i for i in train_idx if not preintv_mask[i]]
+        logger.info(f"preintv=drop: train 샘플 {before} -> {len(train_idx)}")
     logger.info(
         f"episode split: train={n_train_demos} demos/{len(train_idx)} samples, "
         f"val={n_val_demos} demos/{len(val_idx)} samples"
@@ -188,6 +223,8 @@ def main(cfg: DictConfig):
         "model": predictor.head.state_dict(),  # frozen_policy는 policy_ckpt에서 다시 로드하는 게 정책
         "epoch": cfg.num_epochs,
         "num_bins": num_bins,
+        "label_horizon": cfg.get("label_horizon"),
+        "preintv": cfg.get("preintv", "none"),
         "policy_ckpt": os.path.abspath(cfg.policy_ckpt),
         "obs_keys": obs_keys,
         "head_hidden": list(cfg.head_hidden),

@@ -18,6 +18,8 @@ import h5py
 import numpy as np
 import torch
 
+from square_assembly.datasets.stg_labels import build_labels
+
 
 def episode_split_by_name(demo_names, val_fraction, seed):
     """train_dstg._episode_split과 동일한 val 데모 집합을, 데모 이름만으로 재현한다.
@@ -63,8 +65,6 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         self.obs_horizon = obs_horizon
         self.fail_bin = fail_bin
         self.label_horizon = label_horizon
-        self.preintv = preintv
-        self.preintv_base = {}   # (demo, t) -> 이 PREINTV 구간에 쓸 대체 라벨
         self.frames, self.lengths, self.success = {}, {}, {}
         self.samples = []
 
@@ -84,73 +84,21 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
 
         if not self.samples:
             raise ValueError(f"{cache_path}에 데모가 없다")
-        if fail_bin is None and not all(self.success.values()):
-            raise ValueError(
-                "실패 데모가 섞여 있는데 fail_bin이 없다 — 실패 transition에 성공 기준 "
-                "steps-to-go 라벨을 붙이는 건 범주 오류다(train_dstg_failaware.py 참고)"
-            )
         self.frame_dim = next(iter(self.frames.values())).shape[1]
         self.modes = _load_modes(mode_hdf5, self.frames, self.lengths) if mode_hdf5 else {}
-        if preintv not in ("none", "drop", "flat", "rise"):
-            raise ValueError(f"preintv={preintv!r}는 none/drop/flat/rise 중 하나여야 한다")
-        if preintv != "none":
-            if not self.modes:
-                raise ValueError("preintv 처리를 쓰려면 action_mode를 읽을 mode_hdf5가 필요하다")
-            self._build_preintv_labels()
+        names = [n for n, _ in self.samples]
+        ts = [t for _, t in self.samples]
+        self._labels, self._preintv_mask = build_labels(
+            names, ts, self.lengths, self.success, modes=self.modes, fail_bin=fail_bin,
+            label_horizon=label_horizon, preintv=preintv)
 
-    def _build_preintv_labels(self):
-        """PREINTV 연속 구간마다 라벨을 다시 매긴다.
-
-        카운트다운 라벨은 정책이 망가지는 중인 이 구간에서도 매 스텝 1씩 줄어 "좋아지고
-        있다"고 말한다 — 사람이 곧 개입한다는 사실과 정면으로 어긋난다. flat은 구간 내내
-        같은 값(= 진전 0), rise는 스텝마다 1씩 올린다(= 후퇴). 어느 쪽도 라벨의 수준은
-        구간 시작점의 참값으로 유지하고 기울기만 바꾼다.
-        """
-        from square_assembly.datasets.labels import LABEL_PREINTV
-        for name, mode in self.modes.items():
-            if not self.success.get(name, False):
-                continue
-            idx = np.flatnonzero(mode == LABEL_PREINTV)
-            if len(idx) == 0:
-                continue
-            brk = np.flatnonzero(np.diff(idx) > 1)
-            starts = np.concatenate([[idx[0]], idx[brk + 1]])
-            ends = np.concatenate([idx[brk], [idx[-1]]])
-            for a, b in zip(starts, ends):
-                base = self.lengths[name] - 1 - a
-                for t in range(a, b + 1):
-                    self.preintv_base[(name, t)] = base + (t - a if self.preintv == "rise" else 0)
+    def labels(self):
+        """(N,) int64 — num_bins 결정과 로깅용."""
+        return self._labels
 
     def preintv_indices(self):
         """PREINTV 프레임의 샘플 인덱스 — preintv='drop'일 때 train에서만 빼기 위함."""
-        from square_assembly.datasets.labels import LABEL_PREINTV
-        if not self.modes:
-            return []
-        return [i for i, (n, t) in enumerate(self.samples)
-                if n in self.modes and self.modes[n][t] == LABEL_PREINTV]
-
-    def __len__(self):
-        return len(self.samples)
-
-    def _label(self, name, t):
-        """이 데이터셋의 유일한 라벨 정의 — labels()와 __getitem__이 갈라지면 학습과 평가가
-        조용히 어긋난다.
-
-        label_horizon(H)을 주면 '남은 스텝 수' 대신 '남은 비율 x H'를 라벨로 쓴다. 사람이
-        얼마나 빨리 몰았는지에 불변이라, 에피소드 길이가 들쭉날쭉한 텔레옵 데이터에서
-        "관측 -> 남은 스텝"이 ill-posed가 되는 걸 막는다(experiments 2026-09-18 §7).
-        """
-        if not self.success[name]:
-            return self.fail_bin
-        remaining = self.preintv_base.get((name, t), self.lengths[name] - 1 - t)
-        if self.label_horizon is None:
-            return remaining
-        span = max(self.lengths[name] - 1, 1)
-        return int(round(remaining / span * self.label_horizon))
-
-    def labels(self):
-        """(N,) int64 — num_bins 결정과 로깅용. __getitem__을 N번 부르지 않고 한 번에 계산한다."""
-        return np.array([self._label(n, t) for n, t in self.samples], dtype=np.int64)
+        return np.flatnonzero(self._preintv_mask).tolist()
 
     def split_indices(self, val_fraction, seed):
         val_demos = episode_split_by_name(list(self.frames), val_fraction, seed)
@@ -176,4 +124,4 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         length = self.lengths[name]
         idx = np.clip(np.arange(t - self.obs_horizon + 1, t + 1), 0, length - 1)
         x = self.frames[name][idx].reshape(-1)
-        return torch.from_numpy(x.copy()), int(self._label(name, t))
+        return torch.from_numpy(x.copy()), int(self._labels[i])
