@@ -272,6 +272,26 @@ def residual_structure(d, label, demo, t, lags=(1, 5, 10, 20, 50)):
     }
 
 
+def time_only_baseline(label, demo, t):
+    """관측을 전혀 안 보고 프레임 인덱스만으로 내는 예측 — 귀무가설.
+
+    이게 필요한 이유: `reward_sign_acc`는 "d가 줄었는가"를 묻는데, 참 라벨은 정의상 항상
+    줄어든다. 그래서 t에 대해 단조감소하기만 하면 관측을 아예 안 봐도 점수가 1.0에 가깝게
+    나온다 — 창을 넓히면 잡음이 지워져 그 자명한 해에 수렴할 뿐이다. 예측기의 점수는
+    이 귀무가설을 얼마나 넘느냐로만 읽어야 한다.
+
+    구현: val 에피소드들에서 프레임 인덱스 t별 라벨 평균. 관측 정보는 전혀 안 들어간다.
+    """
+    out = np.empty(len(t), dtype=np.float64)
+    by_t = {}
+    for ti, li in zip(t, label):
+        by_t.setdefault(int(ti), []).append(float(li))
+    means = {k: float(np.mean(v)) for k, v in by_t.items()}
+    for i, ti in enumerate(t):
+        out[i] = means[int(ti)]
+    return out
+
+
 def evaluate(d, nll, label, demo, t, mode):
     """수집된 배열 -> 지표 dict. 순수 numpy라 시뮬레이터·GPU 없이 테스트할 수 있다."""
     out = {"n_samples": int(len(d)),
@@ -295,6 +315,15 @@ def evaluate(d, nll, label, demo, t, mode):
                                if n in ("reward_sign_acc", "reward_snr")}
                       for k in (1, 20)}}
         for a in _ALPHAS
+    }
+    # 귀무가설: 관측을 안 보고 프레임 인덱스만 쓴 예측. 같은 격자로 같이 낸다.
+    d_null = time_only_baseline(label, demo, t)
+    out["null_time_only"] = {
+        "mae": float(np.abs(d_null - label).mean()),
+        "by_smooth": {str(w): {str(k): reward_metrics(d_null, label, demo, t, stride=k,
+                                                      smooth=w).get("reward_sign_acc")
+                               for k in (1, 20)}
+                      for w in _SMOOTHS},
     }
     out["by_smooth"] = {
         str(w): {str(k): {n: v for n, v in
