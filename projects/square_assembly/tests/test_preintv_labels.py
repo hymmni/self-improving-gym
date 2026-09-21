@@ -54,7 +54,7 @@ def test_rise_makes_the_label_grow_so_the_reward_goes_negative(paths):
 
 
 def test_drop_reports_exactly_the_preintv_frames(paths):
-    ds = DinoFeatureWindows(*paths, preintv="drop")
+    ds = DinoFeatureWindows(paths[0], 2, mode_hdf5=paths[1], preintv="drop")
     assert ds.preintv_indices() == list(PREINTV_RANGE)
 
 
