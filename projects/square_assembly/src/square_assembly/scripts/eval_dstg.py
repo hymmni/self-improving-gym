@@ -73,7 +73,7 @@ def best_f1(score, label):
 
 
 _STRIDES = (1, 2, 5, 10, 20)
-_SMOOTHS = (1, 5, 10, 20, 40)
+_SMOOTHS = (1, 5, 10, 20, 40, 80, 160)
 
 
 def trailing_mean(x, window):
