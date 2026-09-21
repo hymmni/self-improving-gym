@@ -33,6 +33,21 @@ def episode_split_by_name(demo_names, val_fraction, seed):
     return {unique[i] for i in perm[:n_val]}
 
 
+def _load_modes(mode_hdf5, frames, lengths):
+    """원본 hdf5에서 데모별 action_mode를 읽는다 — 캐시엔 없는 정보다."""
+    out = {}
+    with h5py.File(mode_hdf5, "r") as f:
+        for name in frames:
+            g = f["data"].get(name)
+            if g is None or "action_mode" not in g:
+                continue
+            m = np.asarray(g["action_mode"])
+            if len(m) < lengths[name]:  # 마지막 프레임 복제로 길이를 맞춘다
+                m = np.concatenate([m, np.repeat(m[-1:], lengths[name] - len(m))])
+            out[name] = m[: lengths[name]]
+    return out
+
+
 class DinoFeatureWindows(torch.utils.data.Dataset):
     """캐시를 통째로 메모리에 올려 (obs 윈도우, steps-to-go 라벨) 샘플을 낸다.
 
@@ -43,10 +58,13 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         fail_bin (int | None): 실패 데모에 붙일 별도 클래스. 실패 데모가 있는데 None이면 죽는다.
     """
 
-    def __init__(self, cache_path, obs_horizon, fail_bin=None, label_horizon=None):
+    def __init__(self, cache_path, obs_horizon, fail_bin=None, label_horizon=None,
+                 mode_hdf5=None, preintv="none"):
         self.obs_horizon = obs_horizon
         self.fail_bin = fail_bin
         self.label_horizon = label_horizon
+        self.preintv = preintv
+        self.preintv_base = {}   # (demo, t) -> 이 PREINTV 구간에 쓸 대체 라벨
         self.frames, self.lengths, self.success = {}, {}, {}
         self.samples = []
 
@@ -72,6 +90,44 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
                 "steps-to-go 라벨을 붙이는 건 범주 오류다(train_dstg_failaware.py 참고)"
             )
         self.frame_dim = next(iter(self.frames.values())).shape[1]
+        self.modes = _load_modes(mode_hdf5, self.frames, self.lengths) if mode_hdf5 else {}
+        if preintv not in ("none", "drop", "flat", "rise"):
+            raise ValueError(f"preintv={preintv!r}는 none/drop/flat/rise 중 하나여야 한다")
+        if preintv != "none":
+            if not self.modes:
+                raise ValueError("preintv 처리를 쓰려면 action_mode를 읽을 mode_hdf5가 필요하다")
+            self._build_preintv_labels()
+
+    def _build_preintv_labels(self):
+        """PREINTV 연속 구간마다 라벨을 다시 매긴다.
+
+        카운트다운 라벨은 정책이 망가지는 중인 이 구간에서도 매 스텝 1씩 줄어 "좋아지고
+        있다"고 말한다 — 사람이 곧 개입한다는 사실과 정면으로 어긋난다. flat은 구간 내내
+        같은 값(= 진전 0), rise는 스텝마다 1씩 올린다(= 후퇴). 어느 쪽도 라벨의 수준은
+        구간 시작점의 참값으로 유지하고 기울기만 바꾼다.
+        """
+        from square_assembly.datasets.labels import LABEL_PREINTV
+        for name, mode in self.modes.items():
+            if not self.success.get(name, False):
+                continue
+            idx = np.flatnonzero(mode == LABEL_PREINTV)
+            if len(idx) == 0:
+                continue
+            brk = np.flatnonzero(np.diff(idx) > 1)
+            starts = np.concatenate([[idx[0]], idx[brk + 1]])
+            ends = np.concatenate([idx[brk], [idx[-1]]])
+            for a, b in zip(starts, ends):
+                base = self.lengths[name] - 1 - a
+                for t in range(a, b + 1):
+                    self.preintv_base[(name, t)] = base + (t - a if self.preintv == "rise" else 0)
+
+    def preintv_indices(self):
+        """PREINTV 프레임의 샘플 인덱스 — preintv='drop'일 때 train에서만 빼기 위함."""
+        from square_assembly.datasets.labels import LABEL_PREINTV
+        if not self.modes:
+            return []
+        return [i for i, (n, t) in enumerate(self.samples)
+                if n in self.modes and self.modes[n][t] == LABEL_PREINTV]
 
     def __len__(self):
         return len(self.samples)
@@ -86,7 +142,7 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         """
         if not self.success[name]:
             return self.fail_bin
-        remaining = self.lengths[name] - 1 - t
+        remaining = self.preintv_base.get((name, t), self.lengths[name] - 1 - t)
         if self.label_horizon is None:
             return remaining
         span = max(self.lengths[name] - 1, 1)

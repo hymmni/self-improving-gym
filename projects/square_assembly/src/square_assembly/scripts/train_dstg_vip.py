@@ -63,7 +63,9 @@ def main(cfg: DictConfig):
     torch.manual_seed(cfg.seed)
 
     dataset = DinoFeatureWindows(cfg.cache_path, cfg.obs_horizon, fail_bin=cfg.get("fail_bin"),
-                             label_horizon=cfg.get("label_horizon"))
+                             label_horizon=cfg.get("label_horizon"),
+                             mode_hdf5=cfg.get("mode_hdf5"),
+                             preintv=cfg.get("preintv", "none"))
     with h5py.File(cfg.cache_path, "r") as f:
         cache_meta = json.loads(f.attrs["meta"])
     logger.info(f"cache={cfg.cache_path} meta={cache_meta}")
@@ -71,6 +73,12 @@ def main(cfg: DictConfig):
     train_idx, val_idx, val_demos = dataset.split_indices(cfg.val_fraction, cfg.split_seed)
     n_val_demos = len(val_demos)
     n_train_demos = len(dataset.frames) - n_val_demos
+
+    if cfg.get("preintv") == "drop":
+        drop = set(dataset.preintv_indices())
+        before = len(train_idx)
+        train_idx = [i for i in train_idx if i not in drop]
+        logger.info(f"preintv=drop: train 샘플 {before} -> {len(train_idx)}")
 
     # train_demos_limit: val 데모는 그대로 두고 train 데모만 줄인다 — 같은 held-out 위에서
     # "데이터가 더 있으면 나아지는가"를 재는 규모 곡선용.
@@ -140,6 +148,7 @@ def main(cfg: DictConfig):
         "obs_horizon": cfg.obs_horizon,
         "fail_bin": cfg.get("fail_bin"),
         "label_horizon": cfg.get("label_horizon"),
+        "preintv": cfg.get("preintv", "none"),
         "frame_mean": frame_mean,
         "frame_std": frame_std,
         "cache_path": os.path.abspath(cfg.cache_path),
