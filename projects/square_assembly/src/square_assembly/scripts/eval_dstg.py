@@ -191,6 +191,45 @@ def segment_metrics(d, label, demo, t, mode):
     return out
 
 
+def residual_structure(d, label, demo, t, lags=(1, 5, 10, 20, 50)):
+    """예측 오차 e_t = d_t - label_t가 프레임마다 독립으로 떠는 잡음인지, 느리게 끌려가는
+    편향인지 가른다.
+
+    RL의 리턴은 보상을 합치므로 **독립인** 떨림은 상쇄된다(gamma=1이면 망원경처럼 접혀
+    d_0 - d_T만 남는다). 하지만 인접 프레임은 거의 같아 보여 오차도 같이 움직일 수 있고,
+    그렇게 상관된 오차는 아무리 합쳐도 안 사라진다. 어느 쪽인지가 "떨림은 리턴에서 상쇄되니
+    괜찮다"가 성립하는지를 정한다.
+
+    - step_noise_std: 이웃 차분에서 뽑은 독립 성분의 크기, std(e_t - e_{t+1})/sqrt(2)
+    - residual_std: 에피소드 평균을 뺀 전체 오차 크기
+    - independent_fraction: 분산 기준 독립 성분의 비중. 1에 가까우면 상쇄되고, 0에
+      가까우면 오차가 통째로 끌려다녀 리턴에도 그대로 남는다.
+    """
+    es, diffs, acf = [], [], {k: [] for k in lags}
+    for name in np.unique(demo):
+        m = demo == name
+        order = np.argsort(t[m], kind="mergesort")
+        e = d[m][order] - label[m][order]
+        if len(e) < max(lags) + 2:
+            continue
+        e = e - e.mean()                      # 에피소드 단위 상수 오프셋은 보상에 안 나타난다
+        es.append(e)
+        diffs.append(np.diff(e))
+        denom = float(np.dot(e, e))
+        for k in lags:
+            acf[k].append(float(np.dot(e[:-k], e[k:]) / denom) if denom > 1e-12 else np.nan)
+    if not es:
+        return {}
+    resid_var = float(np.concatenate(es).var())
+    step_var = float(np.concatenate(diffs).var()) / 2.0   # 독립이면 diff 분산은 2배가 된다
+    return {
+        "residual_std": float(np.sqrt(resid_var)),
+        "step_noise_std": float(np.sqrt(step_var)),
+        "independent_fraction": float(step_var / resid_var) if resid_var > 1e-12 else float("nan"),
+        "autocorr": {str(k): float(np.nanmedian(acf[k])) for k in lags},
+    }
+
+
 def evaluate(d, nll, label, demo, t, mode):
     """수집된 배열 -> 지표 dict. 순수 numpy라 시뮬레이터·GPU 없이 테스트할 수 있다."""
     out = {"n_samples": int(len(d)),
@@ -205,6 +244,7 @@ def evaluate(d, nll, label, demo, t, mode):
         for k in _STRIDES
     }
     out.update(best_f1(d, label == 0))
+    out["residual"] = residual_structure(d, label, demo, t)
     if mode is not None:
         from square_assembly.datasets.labels import LABEL_PREINTV, LABEL_ROLLOUT
         pre, roll = mode == LABEL_PREINTV, mode == LABEL_ROLLOUT
