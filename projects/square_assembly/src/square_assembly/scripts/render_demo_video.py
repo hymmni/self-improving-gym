@@ -74,9 +74,8 @@ def _panel(mode, d, label, probs, vals, width, height, mass, tag=None, dpi=100):
         ax.plot(x, d, color="#d95f02", lw=1.5, label="predicted d(o)")
     if probs is not None:
         # 불확실성도 스텝 단위라 같은 축에 그대로 얹는다.
-        total, trunc = spread(probs, vals, mass)
-        ax.plot(x, total, color="#8c564b", lw=1.1, label="std (total)")
-        ax.plot(x, trunc, color="#17becf", lw=1.1, label=f"std (top {mass:.0%} mass)")
+        total, _ = spread(probs, vals, mass)   # 절단 쪽은 전체와 거의 붙어 다녀 안 그린다
+        ax.plot(x, total, color="#8c564b", lw=1.1, label="std")
     ax.set_xlim(0, max(n - 1, 1))
     ax.set_ylim(0, ymax)
     ax.set_ylabel("steps to go")
