@@ -98,6 +98,9 @@ def test_smoothing_recovers_the_reward_when_the_error_is_independent_jitter():
     assert m["by_smooth"]["1"]["1"]["reward_sign_acc"] < 0.7
     assert m["by_smooth"]["20"]["1"]["reward_sign_acc"] > 0.9
 
-    drift = label + np.cumsum(rng.normal(0, 1.0, len(label)))   # 느리게 끌려가는 오차
+    # 대조군: 창보다 훨씬 느린 오차(주기 200)는 창 안에서 거의 변하지 않으므로 평균내도
+    # 그대로 남는다 — 실측 예측기의 오차가 바로 이 종류다(자기상관 lag1 0.96).
+    drift = label + 100.0 * np.sin(2 * np.pi * t / 200.0)
     md = evaluate(drift, np.zeros(len(label)), label, demo, t, None)
-    assert md["by_smooth"]["20"]["1"]["reward_sign_acc"] < 0.9
+    assert md["by_smooth"]["1"]["1"]["reward_sign_acc"] < 0.7
+    assert md["by_smooth"]["40"]["1"]["reward_sign_acc"] < 0.7
