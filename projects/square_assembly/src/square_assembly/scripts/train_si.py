@@ -54,6 +54,7 @@ from square_assembly.factory import registry
 from square_assembly.policies.diffusion import ddpo as ddpo_module
 from square_assembly.policies.diffusion.dstg_reward import DstgReward, calibrate_threshold
 from square_assembly.runners.rollout import _build_obs_batch
+from square_assembly.policies.diffusion import dppo as dppo_module
 from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_config, save_run_config
 from square_assembly.utils.task_utils import is_image_task, make_eval_env, task_obs_keys
 
@@ -189,8 +190,9 @@ def collect_episode_si(env, policy, ddpo_fns, dstg_reward, normalizer, obs_keys,
         if stop:
             break
 
-    returns = compute_returns(np.asarray(rewards, dtype=np.float32), gamma)
-    decisions = list(zip(global_conds, xs_list, returns))
+    rewards = np.asarray(rewards, dtype=np.float32)
+    returns = compute_returns(rewards, gamma)
+    decisions = list(zip(global_conds, xs_list, returns, rewards))
     return decisions, env_success, n_env_steps
 
 
@@ -245,6 +247,91 @@ def _save_checkpoint(policy, cfg, out_path, epoch, task_cfg, policy_cfg, policy_
 
 
 # ------------------------------------------------------------------------ main
+
+def _pair_logp_nograd(policy, ddpo_module, global_cond_all, xs_all, timesteps_all,
+                      j_idx, p_idx, batch_size, device):
+    """수집 시점 정책(=행동 정책)의 (결정, 디노이징-단계)별 로그확률. PPO 비율의 분모다.
+
+    업데이트 전에 한 번만 재므로 첫 epoch의 비율은 정확히 1이 된다 — 그게 맞는지는
+    clip_frac과 approx_kl이 첫 epoch에서 0인지로 바로 보인다.
+    """
+    out = torch.empty(len(j_idx), dtype=torch.float32)
+    with torch.no_grad():
+        for start in range(0, len(j_idx), batch_size):
+            sl = slice(start, start + batch_size)
+            bj, bp = j_idx[sl], p_idx[sl]
+            lp = ddpo_module.step_logp(
+                policy.unet, policy.inference_scheduler, global_cond_all[bj].to(device),
+                xs_all[bj, bp].to(device), xs_all[bj, bp + 1].to(device),
+                timesteps_all[bp].to(device))
+            out[sl] = lp.detach().cpu()
+    return out
+
+
+def _dppo_update(policy, ddpo_module, optimizer, critic, critic_optimizer, global_cond_all,
+                 xs_all, rewards_all, ep_decision_counts, timesteps_all, n_pairs_per_decision,
+                 cfg, device, it):
+    """DPPO 업데이트 — 한 배치를 cfg.update_epochs번 재사용한다.
+
+    어드밴티지는 결정(=청크) 단위 GAE로 만들고, 한 결정의 디노이징 단계들은 그 값을
+    그대로 공유한다(dppo.py 참고). 크리틱은 정책과 별도 옵티마이저로 같은 배치에서 학습한다.
+    """
+    steps = dppo_module.denoising_step_filter(n_pairs_per_decision, cfg.get("ft_denoising_steps"))
+    n_decisions = global_cond_all.shape[0]
+    j_idx = np.repeat(np.arange(n_decisions), len(steps))
+    p_idx = np.tile(steps, n_decisions)
+
+    logp_old = _pair_logp_nograd(policy, ddpo_module, global_cond_all, xs_all, timesteps_all,
+                                 j_idx, p_idx, cfg.logp_batch, device)
+
+    # 결정별 V(o) -> 에피소드마다 끊어 GAE. 에피소드 경계를 무시하면 다음 에피소드의
+    # 보상이 이번 에피소드 마지막 결정으로 새어든다.
+    with torch.no_grad():
+        values = critic(global_cond_all.to(device)).cpu().numpy()
+    adv_all, ret_all, off = [], [], 0
+    for n in ep_decision_counts:
+        a, r = dppo_module.gae(rewards_all[off:off + n], values[off:off + n],
+                               cfg.gamma, cfg.gae_lambda)
+        adv_all.append(a); ret_all.append(r); off += n
+    adv_all = np.concatenate(adv_all)
+    ret_all = torch.as_tensor(np.concatenate(ret_all), dtype=torch.float32, device=device)
+    if cfg.advantage_norm:
+        adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
+
+    rng = np.random.default_rng(cfg.seed0 + it)
+    losses, infos = [], []
+    for epoch in range(cfg.update_epochs):
+        perm = rng.permutation(len(j_idx))
+        for b_i, start in enumerate(range(0, len(perm), cfg.logp_batch)):
+            sl = perm[start:start + cfg.logp_batch]
+            bj, bp = j_idx[sl], p_idx[sl]
+            lp = ddpo_module.step_logp(
+                policy.unet, policy.inference_scheduler, global_cond_all[bj].to(device),
+                xs_all[bj, bp].to(device), xs_all[bj, bp + 1].to(device),
+                timesteps_all[bp].to(device))
+            adv_b = torch.as_tensor(adv_all[bj], dtype=torch.float32, device=device)
+            loss, info = dppo_module.clipped_surrogate(lp, logp_old[sl].to(device), adv_b,
+                                                       cfg.clip_ratio)
+            optimizer.zero_grad()
+            loss.backward()
+            if cfg.get("max_grad_norm"):
+                torch.nn.utils.clip_grad_norm_(policy.unet.parameters(), cfg.max_grad_norm)
+            optimizer.step()
+            losses.append(loss.item()); infos.append(info)
+
+        # 크리틱은 결정 단위라 쌍 단위보다 훨씬 작다 — epoch마다 전부 한 번에 돌린다.
+        v = critic(global_cond_all.to(device))
+        v_loss = torch.nn.functional.mse_loss(v, ret_all)
+        critic_optimizer.zero_grad()
+        (cfg.value_coef * v_loss).backward()
+        critic_optimizer.step()
+        infos[-1]["value_loss"] = float(v_loss)
+
+    agg = {k: float(np.mean([i[k] for i in infos if k in i])) for k in
+           ("ratio_mean", "clip_frac", "approx_kl", "value_loss")}
+    agg["adv_std"] = float(adv_all.std())
+    return losses, agg
+
 
 @hydra.main(config_path="../configs", config_name="train_si", version_base=None)
 def main(cfg: DictConfig):
@@ -317,6 +404,16 @@ def main(cfg: DictConfig):
     env = make_eval_env(task_cfg)
 
     optimizer = torch.optim.Adam(policy.unet.parameters(), lr=cfg.lr)
+    critic = critic_optimizer = None
+    if cfg.algo == "dppo":
+        # cond_dim은 정책이 실제로 내놓는 global_cond에서 재는 게 확실하다 — 설정값을
+        # 베끼면 인코더가 바뀌었을 때 조용히 어긋난다.
+        cond_dim = int(drift_global_cond.shape[-1])   # 위에서 이미 잰 값 재사용
+        critic = dppo_module.Critic(cond_dim, hidden=tuple(cfg.critic_hidden)).to(device)
+        critic_optimizer = torch.optim.Adam(critic.parameters(), lr=cfg.value_lr)
+        logger.info(f"DPPO: critic cond_dim={cond_dim} update_epochs={cfg.update_epochs} "
+                    f"clip={cfg.clip_ratio} gae_lambda={cfg.gae_lambda} "
+                    f"ft_denoising_steps={cfg.get('ft_denoising_steps')}")
     generator = torch.Generator(device=device).manual_seed(cfg.seed0 + 1_000_000)
     env_seed_counter = cfg.seed0
 
@@ -337,7 +434,7 @@ def main(cfg: DictConfig):
     for it in range(1, cfg.iterations + 1):
         t_iter_start = time.time()
 
-        all_global_cond, all_xs, all_R = [], [], []
+        all_global_cond, all_xs, all_R, all_r = [], [], [], []
         ep_lens, ep_decision_counts, ep_env_succ = [], [], []
 
         with torch.no_grad():
@@ -349,10 +446,11 @@ def main(cfg: DictConfig):
                     policy_cfg.obs_horizon, policy_cfg.action_horizon, policy_cfg.pred_horizon,
                     task_cfg.action_dim, cfg.max_steps, device, cfg.gamma, generator, cfg.termination,
                 )
-                for gc, xs, r in decisions:
+                for gc, xs, ret, rew in decisions:
                     all_global_cond.append(gc)
                     all_xs.append(xs)
-                    all_R.append(r)
+                    all_R.append(ret)
+                    all_r.append(rew)
                 ep_lens.append(n_env_steps)
                 ep_decision_counts.append(len(decisions))
                 ep_env_succ.append(env_success)
@@ -371,43 +469,52 @@ def main(cfg: DictConfig):
         else:
             R_train = R_all
 
-        # ---- (결정, 역확산-단계) 쌍 나열 → 셔플 → 미니배치 순회 (이 배치로 딱 한 번) ----
-        j_idx, p_idx = _tile_pair_indices(n_decisions, n_pairs_per_decision)
-        perm = np.random.default_rng(cfg.seed0 + it).permutation(len(j_idx))
-        j_idx, p_idx = j_idx[perm], p_idx[perm]
-
         timesteps_all = policy.inference_scheduler.timesteps[:-1]  # (n_steps-1,), t=0 제외
+        ppo_info = {}
 
-        losses = []
-        n_total_pairs = len(j_idx)
-        n_batches = (n_total_pairs + cfg.logp_batch - 1) // cfg.logp_batch
-        for b_i, start in enumerate(range(0, n_total_pairs, cfg.logp_batch)):
-            sl = slice(start, start + cfg.logp_batch)
-            bj, bp = j_idx[sl], p_idx[sl]
-            if n_batches > 4 and (b_i % max(1, n_batches // 10) == 0 or b_i == n_batches - 1):
-                print(f"  it={it} REINFORCE 배치 {b_i + 1}/{n_batches}", flush=True)
-
-            global_cond_b = global_cond_all[bj].to(device)
-            x_in_b = xs_all[bj, bp].to(device)
-            x_out_b = xs_all[bj, bp + 1].to(device)
-            t_b = timesteps_all[bp].to(device)
-            R_b = torch.as_tensor(R_train[bj], dtype=torch.float32, device=device)
-
+        if cfg.algo == "dppo":
+            losses, ppo_info = _dppo_update(
+                policy, ddpo_module, optimizer, critic, critic_optimizer, global_cond_all,
+                xs_all, np.asarray(all_r, dtype=np.float32), ep_decision_counts,
+                timesteps_all, n_pairs_per_decision, cfg, device, it)
             if not first_update_checked:
-                encoders_before = {k: v.clone() for k, v in policy.encoders.state_dict().items()}
-
-            lp = ddpo_module.step_logp(policy.unet, policy.inference_scheduler, global_cond_b, x_in_b, x_out_b, t_b)
-            loss = -cfg.reinforce_scale * (R_b * lp).mean()
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            losses.append(loss.item())
-
-            if not first_update_checked:
-                _assert_encoders_frozen(encoders_before, policy.encoders.state_dict())
                 first_update_checked = True
-                logger.info("[check] 첫 업데이트 후 비전 인코더 파라미터 불변 확인됨.")
+        else:
+            # ---- (결정, 역확산-단계) 쌍 나열 → 셔플 → 미니배치 순회 (이 배치로 딱 한 번) ----
+            j_idx, p_idx = _tile_pair_indices(n_decisions, n_pairs_per_decision)
+            perm = np.random.default_rng(cfg.seed0 + it).permutation(len(j_idx))
+            j_idx, p_idx = j_idx[perm], p_idx[perm]
+
+            losses = []
+            n_total_pairs = len(j_idx)
+            n_batches = (n_total_pairs + cfg.logp_batch - 1) // cfg.logp_batch
+            for b_i, start in enumerate(range(0, n_total_pairs, cfg.logp_batch)):
+                sl = slice(start, start + cfg.logp_batch)
+                bj, bp = j_idx[sl], p_idx[sl]
+                if n_batches > 4 and (b_i % max(1, n_batches // 10) == 0 or b_i == n_batches - 1):
+                    print(f"  it={it} REINFORCE 배치 {b_i + 1}/{n_batches}", flush=True)
+
+                global_cond_b = global_cond_all[bj].to(device)
+                x_in_b = xs_all[bj, bp].to(device)
+                x_out_b = xs_all[bj, bp + 1].to(device)
+                t_b = timesteps_all[bp].to(device)
+                R_b = torch.as_tensor(R_train[bj], dtype=torch.float32, device=device)
+
+                if not first_update_checked:
+                    encoders_before = {k: v.clone() for k, v in policy.encoders.state_dict().items()}
+
+                lp = ddpo_module.step_logp(policy.unet, policy.inference_scheduler, global_cond_b, x_in_b, x_out_b, t_b)
+                loss = -cfg.reinforce_scale * (R_b * lp).mean()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                losses.append(loss.item())
+
+                if not first_update_checked:
+                    _assert_encoders_frozen(encoders_before, policy.encoders.state_dict())
+                    first_update_checked = True
+                    logger.info("[check] 첫 업데이트 후 비전 인코더 파라미터 불변 확인됨.")
 
         # ---- 로그 -----------------------------------------------------------
         drift = _drift_metric(base_unet, policy.unet, drift_global_cond, drift_x, drift_t)
@@ -419,12 +526,14 @@ def main(cfg: DictConfig):
             f"env_succ_rate={n_env_succ / cfg.episodes_per_iter:5.1%}  "
             f"decisions_per_ep={np.mean(ep_decision_counts):5.1f}  ep_len_mean={np.mean(ep_lens):6.1f}  "
             f"drift_L2={drift:7.4f}  loss={np.mean(losses):+9.5f}  time={iter_time:5.1f}s"
+            + ("".join(f"  {k}={v:+.4f}" for k, v in ppo_info.items()) if ppo_info else "")
         )
         print(msg, flush=True)
         logger.info(msg)
 
         succ_lens = [n for n, s in zip(ep_lens, ep_env_succ) if s]
         stats_row = {
+            **{f"ppo_{k}": v for k, v in ppo_info.items()},
             "it": it,
             "R_mean": float(R_all.mean()), "R_abs_mean": float(np.abs(R_all).mean()),
             "env_succ_rate": n_env_succ / cfg.episodes_per_iter,

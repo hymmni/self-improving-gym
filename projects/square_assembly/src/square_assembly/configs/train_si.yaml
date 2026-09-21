@@ -8,6 +8,21 @@ defaults:
 # (구) 체크포인트용 fallback일 뿐이다.
 policy_ckpt: /home/moai/hymm_ws/square_ckpt/policy_epoch1060.pt
 dstg_ckpt: outputs/dstg/square_demo50_succ/predictor.pt   # step 1이 실제로 저장한 경로(index.json 참고)
+algo: ddpo_sf              # ddpo_sf | dppo. ddpo_sf가 논문(SI-EFM Algorithm 1) 경로다 —
+                           # 배치를 한 번 쓰고 버려 deadly triad를 피한다. dppo는 그 배치를
+                           # 여러 번 재사용해 표본 효율을 얻는 대신 off-policy 재사용과
+                           # 부트스트랩을 들여온다(policies/diffusion/dppo.py 참고).
+
+# --- algo=dppo 전용 ---
+clip_ratio: 0.2            # PPO 클립 폭
+update_epochs: 4           # 한 배치를 몇 번 재사용하는가. 이게 DDPO-SF 대비 유일한 이득원이다
+gae_lambda: 0.95
+value_coef: 0.5
+value_lr: 1.0e-4           # 크리틱은 처음부터 배우므로 정책 lr(1e-6)보다 훨씬 크게
+critic_hidden: [256, 256]
+ft_denoising_steps: null   # 마지막 몇 디노이징 단계만 파인튜닝(null=전부). DPPO 논문의 효율 트릭
+max_grad_norm: 1.0         # 재사용 때문에 비율이 튈 수 있어 DDPO-SF 경로보다 보호가 필요하다
+
 statistic: mean            # mean | cvar (DstgReward에 그대로 전달)
 cvar_alpha: 0.8
 gamma: 0.9                 # 논문 기본값
