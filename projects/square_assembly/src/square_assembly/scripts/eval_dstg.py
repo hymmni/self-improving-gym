@@ -421,8 +421,10 @@ def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fractio
 
 
 def _collect_cached(predictor_path, cache_path, source_hdf5, device, batch_size,
-                    val_fraction, split_seed):
-    """DINO/VIP 예측기 — 미리 구운 특징 캐시 경로(DinoFeatureWindows)."""
+                    val_fraction, split_seed, probs_out=None):
+    """DINO/VIP 예측기 — 미리 구운 특징 캐시 경로(DinoFeatureWindows).
+
+    probs_out은 _collect_baseline과 같다 — 리스트를 주면 분포를 배치 단위로 담아준다."""
     import h5py
     from square_assembly.datasets.dino_feature_dataset import DinoFeatureWindows
     from square_assembly.policies.diffusion.dino_stg_predictor import load_checkpoint
@@ -455,7 +457,10 @@ def _collect_cached(predictor_path, cache_path, source_hdf5, device, batch_size,
         for x, y in loader:
             logits = head(x.to(device))
             y = y.to(device).long()
-            d_all.append((F.softmax(logits, -1) * bins).sum(-1).cpu().numpy())
+            probs = F.softmax(logits, -1)
+            if probs_out is not None:
+                probs_out.append(probs.cpu().numpy().astype(np.float16))
+            d_all.append((probs * bins).sum(-1).cpu().numpy())
             nll_all.append(F.cross_entropy(logits, y, reduction="none").cpu().numpy())
     return np.concatenate(d_all), np.concatenate(nll_all), labels, demo, t, modes
 

@@ -57,7 +57,7 @@ def spread(probs, vals, mass):
     return total, trunc
 
 
-def _panel(mode, d, label, probs, vals, width, height, mass, dpi=100):
+def _panel(mode, d, label, probs, vals, width, height, mass, tag=None, dpi=100):
     """곡선·분포·불확실성을 한 번만 그려 RGB 배열로 돌려준다(프레임마다 커서만 덧그린다)."""
     n = len(mode)
     x = np.arange(n)
@@ -77,6 +77,8 @@ def _panel(mode, d, label, probs, vals, width, height, mass, dpi=100):
     ax.set_ylim(0, ymax)
     ax.set_ylabel("steps to go")
     ax.set_xticklabels([])
+    if tag:
+        ax.set_title(tag, fontsize=10, pad=4)
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.25)
 
@@ -107,7 +109,7 @@ def _panel(mode, d, label, probs, vals, width, height, mass, dpi=100):
     return rgb, px
 
 
-def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass):
+def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass, tag, suffix):
     os.makedirs(out_dir, exist_ok=True)
     with h5py.File(hdf5, "r") as f:
         for name in demos:
@@ -128,8 +130,8 @@ def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass):
                 vals = np.arange(probs.shape[1], dtype=np.float64) * scale
 
             panel, px = _panel(mode, d, label, probs, vals,
-                               width=int(size * 1.8) // 2 * 2, height=size, mass=mass)
-            out = os.path.join(out_dir, f"{name}.mp4")
+                               width=int(size * 1.8) // 2 * 2, height=size, mass=mass, tag=tag)
+            out = os.path.join(out_dir, f"{name}{suffix}.mp4")
             with imageio.get_writer(out, fps=fps, macro_block_size=1) as w:
                 for t in range(n):
                     frame = cv2.resize(imgs[t], (size, size), interpolation=cv2.INTER_LANCZOS4)
@@ -159,6 +161,8 @@ def main():
     ap.add_argument("--wrist-cam", default="robot0_eye_in_hand_image")
     ap.add_argument("--size", type=int, default=512, help="카메라 화면 한 변(보간 확대)")
     ap.add_argument("--mass", type=float, default=0.9, help="절단 분산이 남길 확률 질량")
+    ap.add_argument("--tag", default=None, help="패널 제목(예측기 이름 등)")
+    ap.add_argument("--suffix", default="", help="출력 파일명 꼬리표")
     render(**vars(ap.parse_args()))
 
 
