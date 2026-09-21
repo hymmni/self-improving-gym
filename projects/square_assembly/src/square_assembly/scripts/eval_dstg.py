@@ -93,10 +93,16 @@ def reward_metrics(d, label, demo, t, stride=1):
         # 남은 비율 x H로 정규화했으면 H/(L-1)이다. 하드코딩하면 정규화 라벨에서 틀린 값을 잰다.
         r = d_ep[:-stride] - d_ep[stride:]
         ideal = label_ep[:-stride] - label_ep[stride:]
-        signs.append(r > 0)
+        # 참 변화량이 0인 transition(라벨 해상도가 낮아 인접 프레임이 같은 칸에 떨어질 때)은
+        # 부호를 물을 대상이 아니다 — 연속값인 d가 정확히 0 차분을 낼 수는 없으므로, 세면
+        # 맞히는 게 불가능한 문제를 정확도에 섞는 꼴이 된다. 라벨이 '남은 스텝 수'면 ideal은
+        # 항상 1이라 이 마스크는 전부 True이고 예전 계산과 같은 값이 나온다.
+        nz = ideal != 0
+        signs.append((r[nz] > 0) == (ideal[nz] > 0))
         errs.append(np.abs(r - ideal))
         snrs.append(r.mean() / r.std() if r.std() > 1e-9 else np.inf)
         rhos.append(spearmanr(d_ep, label_ep).statistic)
+    signs = [x for x in signs if len(x)]
     if not signs:
         return {}
     return {
