@@ -280,15 +280,19 @@ def time_only_baseline(label, demo, t):
     나온다 — 창을 넓히면 잡음이 지워져 그 자명한 해에 수렴할 뿐이다. 예측기의 점수는
     이 귀무가설을 얼마나 넘느냐로만 읽어야 한다.
 
-    구현: val 에피소드들에서 프레임 인덱스 t별 라벨 평균. 관측 정보는 전혀 안 들어간다.
+    구현: 프레임 인덱스 t별 라벨 평균을, 그 에피소드 자신은 빼고(leave-one-episode-out)
+    낸다. 자기 라벨을 써서 만들면 귀무가설이 오라클이 되어 불공정하게 세진다.
     """
-    out = np.empty(len(t), dtype=np.float64)
-    by_t = {}
+    sums, counts = {}, {}
     for ti, li in zip(t, label):
-        by_t.setdefault(int(ti), []).append(float(li))
-    means = {k: float(np.mean(v)) for k, v in by_t.items()}
-    for i, ti in enumerate(t):
-        out[i] = means[int(ti)]
+        k = int(ti)
+        sums[k] = sums.get(k, 0.0) + float(li)
+        counts[k] = counts.get(k, 0) + 1
+    out = np.empty(len(t), dtype=np.float64)
+    for i, (ti, li, ep) in enumerate(zip(t, label, demo)):
+        k = int(ti)
+        n = counts[k] - 1
+        out[i] = (sums[k] - float(li)) / n if n > 0 else float(li)
     return out
 
 
@@ -324,6 +328,8 @@ def evaluate(d, nll, label, demo, t, mode):
                                                       smooth=w).get("reward_sign_acc")
                                for k in (1, 20)}
                       for w in _SMOOTHS},
+        "by_segment": (segment_metrics(d_null, label, demo, t, mode) if mode is not None else {}),
+        "spearman": reward_metrics(d_null, label, demo, t).get("spearman"),
     }
     out["by_smooth"] = {
         str(w): {str(k): {n: v for n, v in
