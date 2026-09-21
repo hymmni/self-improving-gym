@@ -92,6 +92,9 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
             names, ts, self.lengths, self.success, modes=self.modes, fail_bin=fail_bin,
             label_horizon=label_horizon, preintv=preintv)
 
+    def __len__(self):
+        return len(self.samples)
+
     def labels(self):
         """(N,) int64 — num_bins 결정과 로깅용."""
         return self._labels

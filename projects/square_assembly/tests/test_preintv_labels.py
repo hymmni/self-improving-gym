@@ -59,5 +59,5 @@ def test_drop_reports_exactly_the_preintv_frames(paths):
 
 
 def test_preintv_handling_needs_the_action_mode_source(paths):
-    with pytest.raises(ValueError, match="mode_hdf5"):
+    with pytest.raises(ValueError, match="action_mode"):
         DinoFeatureWindows(paths[0], 2, preintv="flat")
