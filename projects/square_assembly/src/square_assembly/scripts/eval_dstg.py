@@ -264,6 +264,12 @@ def evaluate(d, nll, label, demo, t, mode):
     return out
 
 
+def _ckpt_meta(path):
+    """예측기 체크포인트에서 라벨 관련 메타만 꺼낸다(state_dict는 안 건드림)."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    return {k: v for k, v in ckpt.items() if k != "state_dict"}
+
+
 def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fraction, split_seed):
     """기준선(정책 ResNet 특징) 예측기 — RobomimicSequenceDataset 경로."""
     import os
@@ -271,6 +277,7 @@ def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fractio
     from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
     from square_assembly.datasets.robomimic_dataset import RobomimicSequenceDataset
     from square_assembly.policies.diffusion.dstg_reward import DstgReward
+    from square_assembly.datasets.stg_labels import build_labels
     from square_assembly.scripts.train_dstg import _episode_split
     from square_assembly.utils.checkpoints import load_run_config
     from square_assembly.utils.task_utils import is_image_task
@@ -287,9 +294,17 @@ def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fractio
         hdf5_cache_mode="low_dim",
     )
     _, val_idx, _, n_val_demos = _episode_split(dataset, val_fraction, split_seed)
-    labels = dataset.get_time_to_success()[val_idx]
     modes = dataset.get_action_mode_first_frame()[val_idx]
     pairs = [dataset._demo_id_and_index_in_demo(i) for i in val_idx]
+    # 라벨은 예측기가 학습된 단위로 만들어야 한다 — 퍼센트로 학습한 예측기를 스텝 라벨에
+    # 대고 재면 mae도 보상 크기도 전부 단위 비율만큼 부풀어 오른다(2026-09-21에 실제로 그랬다).
+    # preintv 재작성은 학습 때만 쓰는 것이므로 여기선 참 라벨 그대로 둔다(캐시 경로와 동일).
+    seq = dataset._seq_dataset
+    demos = sorted({n for n, _ in pairs})
+    lengths = {n: seq.hdf5_file[f"data/{n}/actions"].shape[0] for n in demos}
+    labels, _ = build_labels([n for n, _ in pairs], [t for _, t in pairs], lengths,
+                             {n: True for n in demos},
+                             label_horizon=_ckpt_meta(predictor_path).get("label_horizon"))
     print(f"val {n_val_demos} demos / {len(val_idx)} samples", flush=True)
 
     d_all, nll_all = [], []
