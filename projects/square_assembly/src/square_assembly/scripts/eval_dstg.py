@@ -74,6 +74,7 @@ def best_f1(score, label):
 
 _STRIDES = (1, 2, 5, 10, 20)
 _SMOOTHS = (1, 5, 10, 20, 40, 80, 160)
+_ALPHAS = (1.0, 0.5, 0.3, 0.2, 0.1, 0.05)
 
 
 def trailing_mean(x, window):
@@ -90,7 +91,24 @@ def trailing_mean(x, window):
     return ((c[idx + 1] - c[lo]) / (idx + 1 - lo)).astype(x.dtype)
 
 
-def reward_metrics(d, label, demo, t, stride=1, smooth=1):
+def ema(x, alpha):
+    """1차 저역통과(지수이동평균). alpha=1이면 원본 그대로.
+
+    박스카 이동평균과 달리 오래된 표본이 갑자기 빠지지 않고 가중치가 지수로 줄어든다.
+    같은 잡음 감소를 더 짧은 군지연으로 얻을 수 있는지가 관심사다 —
+    박스카 W의 군지연은 (W-1)/2, 이쪽은 (1-alpha)/alpha다.
+    """
+    if alpha >= 1.0:
+        return x
+    out = np.empty_like(x, dtype=np.float64)
+    acc = x[0]
+    for i, v in enumerate(x):
+        acc = alpha * v + (1.0 - alpha) * acc
+        out[i] = acc
+    return out.astype(x.dtype)
+
+
+def reward_metrics(d, label, demo, t, stride=1, smooth=1, alpha=1.0):
     """에피소드 안에서 시간순으로 이어붙여 r_t = d_t - d_{t+stride}의 품질을 잰다.
 
     stride>1은 인접 프레임이 거의 같아 보이는 문제를 피한다 — 신호(참 감소량)는 stride에
@@ -104,7 +122,7 @@ def reward_metrics(d, label, demo, t, stride=1, smooth=1):
         d_ep, label_ep = d[m][order], label[m][order]
         if len(d_ep) < max(_MIN_EPISODE_LEN, stride + 1):
             continue
-        d_ep = trailing_mean(d_ep, smooth)
+        d_ep = ema(trailing_mean(d_ep, smooth), alpha)
         # 이상적인 스텝당 보상은 참 라벨의 차분 그 자체다 — 라벨이 남은 스텝 수면 항상 +1,
         # 남은 비율 x H로 정규화했으면 H/(L-1)이다. 하드코딩하면 정규화 라벨에서 틀린 값을 잰다.
         r = d_ep[:-stride] - d_ep[stride:]
@@ -269,6 +287,15 @@ def evaluate(d, nll, label, demo, t, mode):
     }
     # 이동평균(W) x 보상 간격(k) 격자. 둘 다 "창을 넓히는" 수단이지만 방식이 다르다 —
     # k는 신호를 키우고 W는 잡음을 줄인다. 어느 쪽이 실제로 효율적인지는 재봐야 안다.
+    # LPF(지수이동평균). 군지연을 같이 적어야 박스카와 공정하게 비교된다.
+    out["by_ema"] = {
+        f"{a:g}": {"group_delay": (1.0 - a) / a if a < 1 else 0.0,
+                   **{str(k): {n: v for n, v in
+                               reward_metrics(d, label, demo, t, stride=k, alpha=a).items()
+                               if n in ("reward_sign_acc", "reward_snr")}
+                      for k in (1, 20)}}
+        for a in _ALPHAS
+    }
     out["by_smooth"] = {
         str(w): {str(k): {n: v for n, v in
                           reward_metrics(d, label, demo, t, stride=k, smooth=w).items()

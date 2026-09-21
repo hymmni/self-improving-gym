@@ -186,6 +186,14 @@ def main(cfg: DictConfig):
         before = len(train_idx)
         train_idx = [i for i in train_idx if not preintv_mask[i]]
         logger.info(f"preintv=drop: train 샘플 {before} -> {len(train_idx)}")
+
+    # PREINTV 오버샘플링 — 학습 프레임의 2.7%뿐이라 그래디언트에 거의 안 잡힌다. 인덱스를
+    # 그대로 복제해 더 자주 보게 한다(val은 건드리지 않으므로 held-out은 그대로다).
+    w = int(cfg.get("preintv_weight") or 1)
+    if w > 1:
+        extra = [i for i in train_idx if preintv_mask[i]] * (w - 1)
+        train_idx = train_idx + extra
+        logger.info(f"preintv_weight={w}: train 샘플 +{len(extra)} -> {len(train_idx)}")
     logger.info(
         f"episode split: train={n_train_demos} demos/{len(train_idx)} samples, "
         f"val={n_val_demos} demos/{len(val_idx)} samples"
@@ -225,6 +233,7 @@ def main(cfg: DictConfig):
         "num_bins": num_bins,
         "label_horizon": cfg.get("label_horizon"),
         "preintv": cfg.get("preintv", "none"),
+        "preintv_weight": cfg.get("preintv_weight"),
         "policy_ckpt": os.path.abspath(cfg.policy_ckpt),
         "obs_keys": obs_keys,
         "head_hidden": list(cfg.head_hidden),
