@@ -139,8 +139,8 @@ def _overlay_hist(frame, probs_t, vals, geom, mean_val=None, nbars=110, frac=0.4
     if mean_val is not None and y_bot <= mean_val <= y_top:
         r = int(round((y_top - mean_val) / (y_top - y_bot) * (len(rows) - 1)))
         r = int(np.clip(r, 1, len(rows) - 2))
-        width = int(span * frac)
-        cols = geom["x0"] + np.arange(width)[(np.arange(width) // 7) % 2 == 0]
+        # 축 오른쪽 끝까지 긋는다 — 그래야 참값 곡선과 같은 높이인지 바로 눈에 들어온다.
+        cols = geom["x0"] + np.arange(span)[(np.arange(span) // 7) % 2 == 0]
         frame[np.ix_(rows[r - 1:r + 1], cols)] = mean_color   # 막대 위에도 보이게 덮어 그린다
     return frame
 
