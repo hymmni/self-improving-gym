@@ -3,7 +3,7 @@ r"""저장된 hdf5 데모를 mp4로 재생한다 — 오른쪽에 STG 분포·�
 롤아웃을 새로 돌리는 record_si_video.py와 달리 이건 **이미 수집된 에피소드**를 되감아
 보는 용도다(텔레옵 데이터에서 예측기가 이상하게 군 구간을 눈으로 확인하려고 만들었다).
 
-화면 구성: [카메라 | 카테고리컬 분포 배경 + 참값/예측 곡선 | 불확실성 | action_mode 띠].
+화면 구성: [카메라 | 현재 프레임 분포 히스토그램 배경 + 참값/예측 곡선(+-1 std 띠) | action_mode 띠].
 세로축은 **남은 스텝 수**다 — 예측기는 진행률x1000(label_horizon)으로 학습했지만
 표시할 때 (L-1)/1000을 곱해 스텝으로 되돌린다.
 
@@ -27,7 +27,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # 서버 컨테이너엔 한글 폰트가 없다 — 패널 글자는 영어로 둔다.
-from matplotlib.colors import PowerNorm
 
 from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
 
@@ -58,42 +57,38 @@ def spread(probs, vals, mass):
 
 
 def _panel(mode, d, label, probs, vals, width, height, mass, tag=None, dpi=100):
-    """곡선·분포·불확실성을 한 번만 그려 RGB 배열로 돌려준다(프레임마다 커서만 덧그린다)."""
+    """정적인 부분(곡선·불확실성 띠·모드 띠)을 한 번만 그린다.
+
+    프레임마다 바뀌는 건 커서와 히스토그램뿐이라, 나머지는 여기서 픽셀로 구워두고
+    _overlay_hist가 그 위에 덧그린다(프레임마다 matplotlib을 다시 돌리면 느리다).
+    반환하는 geom은 그 덧그리기에 필요한 축의 픽셀 위치와 y 눈금이다.
+    """
     n = len(mode)
     x = np.arange(n)
     fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
-    ax = fig.add_axes([0.09, 0.42, 0.88, 0.50])
+    ax = fig.add_axes([0.09, 0.14, 0.88, 0.78])
     ymax = float(max(label.max(), np.nanmax(d) if d is not None else 0)) * 1.08
 
-    if probs is not None:
-        # 프레임마다 최대값으로 정규화 — 분포의 '모양'이 보이게. 색이 곧 상대 확률.
-        col = probs.T / np.maximum(probs.max(1), 1e-8)
-        ax.imshow(col, origin="lower", aspect="auto", cmap="Blues",
-                  norm=PowerNorm(0.45), extent=(0, max(n - 1, 1), vals[0], vals[-1]))
+    if d is not None and probs is not None:
+        # 불확실성은 따로 그리지 않고 예측선 위에 +-1 표준편차 띠로 겹친다.
+        total, trunc = spread(probs, vals, mass)
+        ax.fill_between(x, d - total, d + total, color="#ff7f0e", alpha=0.16,
+                        lw=0, label="+-1 std (total)")
+        ax.fill_between(x, d - trunc, d + trunc, color="#ff7f0e", alpha=0.28,
+                        lw=0, label=f"+-1 std (top {mass:.0%} mass)")
     ax.plot(x, label, color="#000000", lw=1.4, label="truth (steps to go)")
     if d is not None:
-        ax.plot(x, d, color="#ff7f0e", lw=1.4, label="predicted d(o)")
+        ax.plot(x, d, color="#d95f02", lw=1.5, label="predicted d(o)")
     ax.set_xlim(0, max(n - 1, 1))
     ax.set_ylim(0, ymax)
     ax.set_ylabel("steps to go")
-    ax.set_xticklabels([])
+    ax.set_xlabel("frame")
     if tag:
         ax.set_title(tag, fontsize=10, pad=4)
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.25)
 
-    av = fig.add_axes([0.09, 0.17, 0.88, 0.22])
-    if probs is not None:
-        total, trunc = spread(probs, vals, mass)
-        av.plot(x, total, color="#8c564b", lw=1.2, label="total")
-        av.plot(x, trunc, color="#17becf", lw=1.2, label=f"truncated (top {mass:.0%} mass)")
-        av.legend(loc="upper right", fontsize=7, ncol=2)
-    av.set_xlim(0, max(n - 1, 1))
-    av.set_ylabel("std (steps)")
-    av.set_xlabel("frame")
-    av.grid(alpha=0.25)
-
-    band = fig.add_axes([0.09, 0.06, 0.88, 0.06])
+    band = fig.add_axes([0.09, 0.04, 0.88, 0.055])
     for v in (LABEL_DEMO, LABEL_ROLLOUT, LABEL_INTV, LABEL_PREINTV):
         m = mode == v
         if m.any():
@@ -105,8 +100,42 @@ def _panel(mode, d, label, probs, vals, width, height, mass, tag=None, dpi=100):
     rgb = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
     px = np.clip(ax.transData.transform(np.c_[x, np.zeros(n)])[:, 0].astype(int),
                  0, rgb.shape[1] - 1)
+    bb = ax.get_window_extent()
+    h = rgb.shape[0]
+    rows = np.arange(int(h - bb.y1) + 1, int(h - bb.y0))          # 축 안쪽 이미지 행
+    y_of_row = ax.transData.inverted().transform(
+        np.c_[np.full(len(rows), bb.x0), h - rows])[:, 1]          # 각 행이 가리키는 스텝 값
+    geom = {"x0": int(bb.x0) + 1, "x1": int(bb.x1), "rows": rows, "y": y_of_row,
+            # 빈 배경(흰색)에만 칠한다 — 곡선과 눈금선은 히스토그램에 안 덮이게.
+            "blank": (rgb > 242).all(-1)}
     plt.close(fig)
-    return rgb, px
+    return rgb, px, geom
+
+
+def _overlay_hist(frame, probs_t, vals, geom, nbars=110, frac=0.40, color=(70, 120, 190)):
+    """그 프레임의 카테고리컬을 가로 막대(=히스토그램)로 배경에 깔아준다.
+
+    bin 1000여 개를 화면 막대 nbars개로 모아 담는다 — bin 단위로 그대로 그리면 이웃
+    bin끼리 들쭉날쭉해 줄무늬만 보인다. 길이는 그 프레임 안에서만 정규화하므로,
+    확신이 셀수록 좁고 뾰족한 덩어리, 헷갈릴수록 넓고 퍼진 덩어리로 매 프레임 달라진다.
+    """
+    rows = geom["rows"]
+    y_top, y_bot = geom["y"][0], geom["y"][-1]
+    if y_top == y_bot:
+        return frame
+    u = (y_top - vals) / (y_top - y_bot)                      # 0(위) ~ 1(아래)
+    ok = (u >= 0) & (u < 1)
+    acc = np.bincount((u[ok] * nbars).astype(int), weights=probs_t[ok], minlength=nbars)
+    if acc.max() <= 0:
+        return frame
+    span = geom["x1"] - geom["x0"]
+    ln = (acc / acc.max() * span * frac).astype(int)
+    per_row = ln[np.minimum((np.arange(len(rows)) / len(rows) * nbars).astype(int), nbars - 1)]
+    bar = np.arange(span)[None, :] < per_row[:, None]
+    sub = frame[rows, geom["x0"]:geom["x1"]]
+    sub[bar & geom["blank"][rows, geom["x0"]:geom["x1"]]] = color
+    frame[rows, geom["x0"]:geom["x1"]] = sub
+    return frame
 
 
 def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass, tag, suffix):
@@ -129,8 +158,9 @@ def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass, ta
                 probs = np.asarray(z["probs"], dtype=np.float32)[:n]
                 vals = np.arange(probs.shape[1], dtype=np.float64) * scale
 
-            panel, px = _panel(mode, d, label, probs, vals,
-                               width=int(size * 1.8) // 2 * 2, height=size, mass=mass, tag=tag)
+            panel, px, geom = _panel(mode, d, label, probs, vals,
+                                      width=int(size * 1.8) // 2 * 2, height=size,
+                                      mass=mass, tag=tag)
             out = os.path.join(out_dir, f"{name}{suffix}.mp4")
             with imageio.get_writer(out, fps=fps, macro_block_size=1) as w:
                 for t in range(n):
@@ -145,6 +175,8 @@ def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass, ta
                     cv2.putText(frame, f"{MODE_NAME.get(int(mode[t]), '?')}  t={t}/{n - 1}",
                                 (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
                     p = panel.copy()
+                    if probs is not None:
+                        _overlay_hist(p, probs[t].astype(np.float64), vals, geom)
                     p[:, max(px[t] - 1, 0):px[t] + 2] = (214, 39, 40)
                     w.append_data(np.concatenate([frame, p], axis=1))
             print(f"{out}  ({n} frames)")
