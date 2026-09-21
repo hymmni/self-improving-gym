@@ -189,6 +189,10 @@ def segment_metrics(d, label, demo, t, mode):
         out[name] = {"n_segments": len(rs), "median_len": float(np.median(lens)),
                      "sign_acc": float((rs > 0).mean()), "mean_reward": float(rs.mean()),
                      "mean_ideal": float(ideals.mean()),
+                     # 라벨이 퍼센트면 보상 단위도 퍼센트다. 참값으로 나누면 다시 STG 스텝
+                     # 단위가 된다 — 원본 라벨에선 참값이 프레임당 정확히 1스텝이므로,
+                     # 이 값이 곧 "프레임당 몇 스텝 나아갔다고 보는가"다.
+                     "reward_steps_per_frame": float((rs / ideals).mean()),
                      "reward_per_frame": float((rs / lens).mean()),
                      "ideal_per_frame": float((ideals / lens).mean()),
                      "reward_per_frame_std": float((rs / lens).std())}
