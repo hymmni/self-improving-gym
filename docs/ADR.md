@@ -94,3 +94,22 @@ v0.4.0)는 아직 하지 않았다 — 무거운 설치라 별도로 진행 여�
 영향 없음). 근본 원인은 열린 문제로 남는다 — 드라이버/glvnd/컨테이너 런타임을 바꿀 때 DOCKER.md
 §4의 2-에피소드 점검으로 재확인한다. **교훈**: 렌더/드라이버처럼 시간에 따라 오락가락하는 현상은
 조건을 번갈아 여러 번 찍기 전엔 결론내지 않는다.
+
+### ADR-009: 자기개선 RL은 DPPO를 쓰되 DDPO-SF를 기본값으로 남긴다
+**결정**: `train_si.py`에 `algo: ddpo_sf | dppo` 스위치를 두고, 라운드 1부터의 자기개선은
+`algo=dppo`로 돌린다. 기본값은 `ddpo_sf`를 유지한다. DPPO 부품은
+`policies/diffusion/dppo.py`(크리틱, GAE, 클립 대리 손실)이고, 로그확률 계산은
+`ddpo.py`(`sample_with_trace`/`step_logp`)를 그대로 공유한다. 어드밴티지는 환경 MDP
+쪽에서만(결정=청크 단위 GAE) 만들고, 한 결정의 디노이징 단계들은 그 값을 공유한다.
+
+**이유**: `phases/4-diffusion-si/step4.md`는 DDPO-SF를 고른 근거로 SI-EFM Algorithm 1이
+deadly triad의 두 꼭짓점(off-policy 재사용, 부트스트랩)을 의도적으로 배제한다는 점을 들었고,
+그 판단 자체는 지금도 유효하다. 바꾸는 이유는 이론이 아니라 실측 비용이다 — square 에피소드
+하나가 시뮬레이션 50초라, 배치를 한 번 쓰고 버리는 DDPO-SF는 iteration당 20에피소드 기준
+20분 중 대부분을 롤아웃에 쓴다. DPPO의 `update_epochs`만큼의 재사용이 그 비용을 직접 줄인다.
+
+**트레이드오프**: 논문 재현이 아니라 확장이 된다. 크리틱 오차가 어드밴티지에 실리고(부트스트랩),
+비율이 튈 수 있다(재사용) — 그래서 `clip_frac`/`approx_kl`/`value_loss`/`adv_std`를 매 iteration
+로그에 남기고, `max_grad_norm=1.0`을 기본으로 둔다. `advantage_norm`은 DDPO-SF 경로에선 논문대로
+off가 기본이지만 DPPO 런에선 켠다(스모크 실측 adv_std=32). 두 알고리즘을 같은 스크립트·같은 지표
+아래 두었으므로, 어느 쪽이 실제로 나은지는 같은 예측기·같은 시작 정책으로 대조하면 된다.
