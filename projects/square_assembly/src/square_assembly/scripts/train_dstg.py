@@ -72,7 +72,7 @@ def _stg_labels(dataset, cfg):
     lengths = {n: seq.hdf5_file[f"data/{n}/actions"].shape[0] for n in demos}
     success = {n: True for n in demos}   # get_time_to_success와 같은 전제(에피소드=성공 경로)
     modes = {}
-    if cfg.get("preintv", "none") != "none":
+    if cfg.get("preintv", "none") != "none" or int(cfg.get("preintv_weight") or 1) > 1:
         for n in demos:
             g = seq.hdf5_file[f"data/{n}"]
             if "action_mode" in g:
