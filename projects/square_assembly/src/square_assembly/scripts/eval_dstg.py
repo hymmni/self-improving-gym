@@ -357,8 +357,12 @@ def _ckpt_meta(path):
     return {k: v for k, v in ckpt.items() if k != "state_dict"}
 
 
-def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fraction, split_seed):
-    """기준선(정책 ResNet 특징) 예측기 — RobomimicSequenceDataset 경로."""
+def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fraction, split_seed,
+                      probs_out=None):
+    """기준선(정책 ResNet 특징) 예측기 — RobomimicSequenceDataset 경로.
+
+    probs_out에 리스트를 주면 프레임별 카테고리컬 분포도 배치 단위로 담아준다
+    (영상 렌더처럼 기댓값 말고 분포 전체가 필요한 쪽에서 쓴다)."""
     import os
 
     from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
@@ -405,7 +409,10 @@ def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fractio
             logits = reward.predictor(obs)
             y = label_t[offset:offset + logits.shape[0]].to(device)
             offset += logits.shape[0]
-            d_all.append((F.softmax(logits, -1) * reward.bin_vals).sum(-1).cpu().numpy())
+            probs = F.softmax(logits, -1)
+            if probs_out is not None:
+                probs_out.append(probs.cpu().numpy().astype(np.float16))
+            d_all.append((probs * reward.bin_vals).sum(-1).cpu().numpy())
             nll_all.append(F.cross_entropy(logits, y, reduction="none").cpu().numpy())
             if b_i % 20 == 0:
                 print(f"  배치 {b_i + 1}/{len(loader)}", flush=True)

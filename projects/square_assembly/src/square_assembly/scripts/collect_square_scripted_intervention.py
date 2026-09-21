@@ -184,10 +184,17 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             while outcomes["success"] < episodes:
                 interv.reset()
                 obs_ep = []
+                # 시뮬레이터 상태 — 저장해 두면 나중에 아무 해상도로나 되감아 렌더할 수 있다.
+                # (84x84 obs만 남기던 시절 수집분은 재현이 불가능했다.) 프레임당 45 float뿐이다.
+                sim_env = getattr(env, "env", None)
+                states_ep = [] if sim_env is not None and hasattr(sim_env, "sim") else None
+                model_xml = sim_env.sim.model.get_xml() if states_ep is not None else None
                 noise_streak = [0]
 
-                def track(obs_raw, _store=obs_ep, _streak=noise_streak):
+                def track(obs_raw, _store=obs_ep, _streak=noise_streak, _states=states_ep):
                     _store.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
+                    if _states is not None:   # 이 obs가 나온 시점의 상태 = actions[t]를 넣기 직전
+                        _states.append(np.asarray(sim_env.sim.get_state().flatten()))
                     # 렌더가 도중에 고장나면(연속 3프레임 노이즈) 에피소드를 즉시 끊는다 —
                     # 사람이 지켜보다 q를 누를 필요 없이 아래서 버리고 복구를 기다린다.
                     r = frame_roughness(np.transpose(obs_raw[camera], (1, 2, 0)) * 255.0)
@@ -227,6 +234,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 demo_grp.attrs["num_samples"] = T
                 demo_grp.create_dataset("actions", data=actions)
                 demo_grp.create_dataset("action_mode", data=result["action_modes"])
+                if states_ep is not None and len(states_ep) >= T:
+                    demo_grp.create_dataset("states", data=np.stack(states_ep[:T]))
+                    demo_grp.attrs["model_file"] = model_xml
                 obs_grp = demo_grp.create_group("obs")
                 for k in obs_keys:
                     stacked = np.stack([o[k] for o in obs_ep], axis=0)
