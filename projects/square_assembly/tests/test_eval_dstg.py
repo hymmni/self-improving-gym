@@ -73,3 +73,31 @@ def test_preintv_metrics_report_predicted_and_oracle():
     assert m["n_preintv"] == 4
     assert m["preintv_auroc"] == pytest.approx(m["preintv_auroc_oracle"])  # 완벽한 예측기
     assert m["preintv_auroc_oracle"] == 1.0
+
+
+def test_trailing_mean_only_looks_backwards():
+    """미래를 보면 RL에서 재현이 안 된다 — 앞쪽은 있는 만큼만 평균낸다."""
+    from square_assembly.scripts.eval_dstg import trailing_mean
+
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    assert np.allclose(trailing_mean(x, 1), x)
+    assert np.allclose(trailing_mean(x, 3), [1.0, 1.5, 2.0, 3.0, 4.0])
+
+
+def test_smoothing_recovers_the_reward_when_the_error_is_independent_jitter():
+    """떨림만 있으면 이동평균이 살려낸다 — 상관된 드리프트에는 안 통한다는 대조군과 짝."""
+    from square_assembly.scripts.eval_dstg import evaluate
+
+    rng = np.random.default_rng(0)
+    label = np.arange(300, 0, -1).astype(float)
+    demo = np.array(["demo_0"] * len(label))
+    t = np.arange(len(label))
+
+    jitter = label + rng.normal(0, 8.0, len(label))
+    m = evaluate(jitter, np.zeros(len(label)), label, demo, t, None)
+    assert m["by_smooth"]["1"]["1"]["reward_sign_acc"] < 0.7
+    assert m["by_smooth"]["20"]["1"]["reward_sign_acc"] > 0.9
+
+    drift = label + np.cumsum(rng.normal(0, 1.0, len(label)))   # 느리게 끌려가는 오차
+    md = evaluate(drift, np.zeros(len(label)), label, demo, t, None)
+    assert md["by_smooth"]["20"]["1"]["reward_sign_acc"] < 0.9

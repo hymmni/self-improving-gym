@@ -73,9 +73,24 @@ def best_f1(score, label):
 
 
 _STRIDES = (1, 2, 5, 10, 20)
+_SMOOTHS = (1, 5, 10, 20, 40)
 
 
-def reward_metrics(d, label, demo, t, stride=1):
+def trailing_mean(x, window):
+    """인과적 이동평균 — 시점 t의 값은 t까지의 최근 window개 평균이다.
+
+    중심 이동평균을 쓰지 않는 이유: 롤아웃 중 결정 t의 보상은 그 청크가 끝난 직후에
+    계산되므로 미래 d를 볼 수 없다. 평가에서만 되는 방식으로 재면 RL에서 재현이 안 된다.
+    """
+    if window <= 1:
+        return x
+    c = np.concatenate([[0.0], np.cumsum(x, dtype=np.float64)])
+    idx = np.arange(len(x))
+    lo = np.maximum(0, idx - window + 1)
+    return ((c[idx + 1] - c[lo]) / (idx + 1 - lo)).astype(x.dtype)
+
+
+def reward_metrics(d, label, demo, t, stride=1, smooth=1):
     """에피소드 안에서 시간순으로 이어붙여 r_t = d_t - d_{t+stride}의 품질을 잰다.
 
     stride>1은 인접 프레임이 거의 같아 보이는 문제를 피한다 — 신호(참 감소량)는 stride에
@@ -89,6 +104,7 @@ def reward_metrics(d, label, demo, t, stride=1):
         d_ep, label_ep = d[m][order], label[m][order]
         if len(d_ep) < max(_MIN_EPISODE_LEN, stride + 1):
             continue
+        d_ep = trailing_mean(d_ep, smooth)
         # 이상적인 스텝당 보상은 참 라벨의 차분 그 자체다 — 라벨이 남은 스텝 수면 항상 +1,
         # 남은 비율 x H로 정규화했으면 H/(L-1)이다. 하드코딩하면 정규화 라벨에서 틀린 값을 잰다.
         r = d_ep[:-stride] - d_ep[stride:]
@@ -250,6 +266,15 @@ def evaluate(d, nll, label, demo, t, mode):
         str(k): {n: v for n, v in reward_metrics(d, label, demo, t, stride=k).items()
                  if n in ("reward_sign_acc", "reward_snr")}
         for k in _STRIDES
+    }
+    # 이동평균(W) x 보상 간격(k) 격자. 둘 다 "창을 넓히는" 수단이지만 방식이 다르다 —
+    # k는 신호를 키우고 W는 잡음을 줄인다. 어느 쪽이 실제로 효율적인지는 재봐야 안다.
+    out["by_smooth"] = {
+        str(w): {str(k): {n: v for n, v in
+                          reward_metrics(d, label, demo, t, stride=k, smooth=w).items()
+                          if n in ("reward_sign_acc", "reward_snr")}
+                 for k in (1, 5, 20)}
+        for w in _SMOOTHS
     }
     out.update(best_f1(d, label == 0))
     out["residual"] = residual_structure(d, label, demo, t)
