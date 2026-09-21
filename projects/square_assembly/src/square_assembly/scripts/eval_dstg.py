@@ -151,6 +151,46 @@ def reward_by_mode(d, label, demo, t, mode, stride):
     return out
 
 
+def segment_metrics(d, label, demo, t, mode):
+    """연속된 action_mode 구간을 통째로 놓고 (시작 - 끝) 보상을 잰다.
+
+    구간 안의 개별 스텝은 비최적일 수 있어도, 사람이 개입해 수정을 마친 구간이라면 시작에서
+    끝으로 갈 때는 순 진전이 있어야 한다 — 즉 구간 단위 보상은 양수가 정답이다. 스텝 단위
+    부호 정확도가 이 구간에서 낮은 게 예측기 탓인지, 애초에 스텝 단위로 물을 게 아니어서인지
+    가르는 지표다.
+    """
+    from square_assembly.datasets.labels import (LABEL_DEMO, LABEL_INTV, LABEL_PREINTV,
+                                                 LABEL_ROLLOUT)
+    names = {LABEL_DEMO: "demo", LABEL_ROLLOUT: "rollout", LABEL_INTV: "intv",
+             LABEL_PREINTV: "preintv"}
+    out = {}
+    for v, name in names.items():
+        rs, ideals, lens = [], [], []
+        for ep in np.unique(demo):
+            m = demo == ep
+            order = np.argsort(t[m], kind="mergesort")
+            d_ep, mode_ep, lab_ep = d[m][order], mode[m][order], label[m][order]
+            idx = np.flatnonzero(mode_ep == v)
+            if len(idx) < 2:
+                continue
+            brk = np.flatnonzero(np.diff(idx) > 1)          # 연속 구간 경계
+            starts = np.concatenate([[idx[0]], idx[brk + 1]])
+            ends = np.concatenate([idx[brk], [idx[-1]]])
+            for a, b in zip(starts, ends):
+                if b <= a:
+                    continue
+                rs.append(d_ep[a] - d_ep[b])
+                ideals.append(lab_ep[a] - lab_ep[b])
+                lens.append(b - a)
+        if not rs:
+            continue
+        rs, ideals, lens = np.array(rs), np.array(ideals), np.array(lens)
+        out[name] = {"n_segments": len(rs), "median_len": float(np.median(lens)),
+                     "sign_acc": float((rs > 0).mean()), "mean_reward": float(rs.mean()),
+                     "mean_ideal": float(ideals.mean())}
+    return out
+
+
 def evaluate(d, nll, label, demo, t, mode):
     """수집된 배열 -> 지표 dict. 순수 numpy라 시뮬레이터·GPU 없이 테스트할 수 있다."""
     out = {"n_samples": int(len(d)),
@@ -172,6 +212,7 @@ def evaluate(d, nll, label, demo, t, mode):
         out["preintv_auroc_oracle"] = auroc(label[pre], label[roll])
         out["n_preintv"] = int(pre.sum())
         out["reward_by_mode"] = {str(k): reward_by_mode(d, label, demo, t, mode, k) for k in (1, 20)}
+        out["by_segment"] = segment_metrics(d, label, demo, t, mode)
     return out
 
 
