@@ -114,7 +114,7 @@ def reward_metrics(d, label, demo, t, stride=1):
     }
 
 
-def reward_by_mode(d, demo, t, mode, stride):
+def reward_by_mode(d, label, demo, t, mode, stride):
     """transition이 시작하는 프레임의 action_mode별 평균 보상.
 
     "성공 데모면 참 steps-to-go가 매 스텝 1씩 준다"는 건 그 궤적을 따라간다는 뜻일 뿐,
@@ -123,25 +123,32 @@ def reward_by_mode(d, demo, t, mode, stride):
     곧 개입한 = 정책이 헛짓을 하던 구간)에서 보상이 다른 구간보다 낮게 나오는지가
     예측기가 그걸 잡아내는지에 대한 직접 증거다.
     """
-    rs, ms = [], []
+    rs, ms, ids = [], [], []
     for name in np.unique(demo):
         m = demo == name
         order = np.argsort(t[m], kind="mergesort")
-        d_ep, mode_ep = d[m][order], mode[m][order]
+        d_ep, mode_ep, lab_ep = d[m][order], mode[m][order], label[m][order]
         if len(d_ep) < stride + 1:
             continue
         rs.append(d_ep[:-stride] - d_ep[stride:])
         ms.append(mode_ep[:-stride])
+        ids.append(lab_ep[:-stride] - lab_ep[stride:])
     if not rs:
         return {}
-    r, mo = np.concatenate(rs), np.concatenate(ms)
+    r, mo, ideal = np.concatenate(rs), np.concatenate(ms), np.concatenate(ids)
     from square_assembly.datasets.labels import (LABEL_DEMO, LABEL_INTV, LABEL_PREINTV,
                                                  LABEL_ROLLOUT)
     names = {LABEL_DEMO: "demo", LABEL_ROLLOUT: "rollout", LABEL_INTV: "intv",
              LABEL_PREINTV: "preintv"}
-    return {names.get(int(v), str(int(v))): {"mean_reward": float(r[mo == v].mean()),
-                                             "n": int((mo == v).sum())}
-            for v in np.unique(mo)}
+    out = {}
+    for v in np.unique(mo):
+        sel = (mo == v) & (ideal != 0)
+        out[names.get(int(v), str(int(v)))] = {
+            "mean_reward": float(r[mo == v].mean()),
+            "sign_acc": float(((r[sel] > 0) == (ideal[sel] > 0)).mean()) if sel.any() else None,
+            "n": int((mo == v).sum()),
+        }
+    return out
 
 
 def evaluate(d, nll, label, demo, t, mode):
@@ -164,7 +171,7 @@ def evaluate(d, nll, label, demo, t, mode):
         out["preintv_auroc"] = auroc(d[pre], d[roll])
         out["preintv_auroc_oracle"] = auroc(label[pre], label[roll])
         out["n_preintv"] = int(pre.sum())
-        out["reward_by_mode"] = {str(k): reward_by_mode(d, demo, t, mode, k) for k in (1, 20)}
+        out["reward_by_mode"] = {str(k): reward_by_mode(d, label, demo, t, mode, k) for k in (1, 20)}
     return out
 
 
