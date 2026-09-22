@@ -477,6 +477,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default=None, help="지표를 JSON으로 저장할 경로")
+    ap.add_argument("--by-source", action="store_true",
+                    help="[--hdf5일 때] held-out을 병합 출처(demo attrs['source'])별로도 나눠 잰다 — 망각/적응 구분")
     args = ap.parse_args()
 
     if bool(args.hdf5) == bool(args.cache):
@@ -491,6 +493,16 @@ def main():
                                  args.batch_size, args.val_fraction, args.split_seed)
 
     metrics = evaluate(*arrays)
+    if args.by_source and args.hdf5:
+        import os
+
+        import h5py
+        demo = arrays[3]
+        with h5py.File(args.hdf5, "r") as f:
+            src_of = {n: os.path.basename(str(f["data"][n].attrs.get("source", "?"))) for n in set(demo.tolist())}
+        src = np.array([src_of[n] for n in demo])
+        metrics["by_source"] = {s: evaluate(*(a[src == s] if a is not None else None for a in arrays))
+                                for s in np.unique(src)}
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
     if args.out:
         with open(args.out, "w") as f:

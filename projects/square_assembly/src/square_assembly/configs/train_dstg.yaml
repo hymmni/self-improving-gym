@@ -9,6 +9,9 @@ label_horizon: null      # 남은 비율 x 이 값으로 라벨링(사람 속도
 preintv: none            # PREINTV 프레임 처리: none | drop | flat | rise | anchor(stg_labels.py)
 preintv_weight: 1        # PREINTV 프레임을 train에서 몇 배로 복제할지(1=그대로)
 preintv_len: null        # PREINTV 구간을 개입 시작점부터 몇 프레임으로 다시 잴지(null=저장된 15)
+init_ckpt: null          # 파인튜닝: 이 predictor.pt의 헤드에서 시작(num_bins가 같아야 한다)
+train_sources: null      # 병합본 demo attrs["source"]에 이 문자열 중 하나가 든 데모만 train(val은 그대로)
+save_epochs: null        # 이 epoch들이 끝날 때 <out>_ep{N}.pt로 중간 저장(학습 곡선용)
 
 seed: 0
 device: cuda

@@ -183,6 +183,16 @@ def main(cfg: DictConfig):
     logger.info(f"dataset len={len(dataset)} num_bins={num_bins} (max observed time-to-success={int(labels.max())})")
 
     train_idx, val_idx, n_train_demos, n_val_demos = _episode_split(dataset, cfg.val_fraction, cfg.split_seed)
+    if cfg.get("train_sources"):
+        # 병합본의 demo attrs["source"](merge_demo_hdf5)로 train만 거른다 — val은 그대로 둬야
+        # 서로 다른 데이터로 학습한 arm들이 같은 held-out에서 비교된다.
+        seq = dataset._seq_dataset
+        src = {d: str(seq.hdf5_file[f"data/{d}"].attrs.get("source", "")) for d in set(seq._index_to_demo_id.values())}
+        keep = lambda i: any(k in src[seq._index_to_demo_id[i]] for k in cfg.train_sources)
+        before = len(train_idx)
+        train_idx = [i for i in train_idx if keep(i)]
+        n_train_demos = len({seq._index_to_demo_id[i] for i in train_idx})
+        logger.info(f"train_sources={list(cfg.train_sources)}: train 샘플 {before} -> {len(train_idx)}")
     if cfg.get("preintv") == "drop":   # val은 건드리지 않는다 — held-out 비교가 깨진다
         before = len(train_idx)
         train_idx = [i for i in train_idx if not preintv_mask[i]]
@@ -210,10 +220,38 @@ def main(cfg: DictConfig):
     )
 
     predictor = DstgPredictor(frozen_policy, num_bins, head_hidden=tuple(cfg.head_hidden)).to(device)
+    if cfg.get("init_ckpt"):  # 파인튜닝 — 헤드만 이어받는다(인코더는 원래 정책 것 그대로)
+        init = torch.load(cfg.init_ckpt, map_location=device, weights_only=False)
+        if int(init["num_bins"]) != num_bins:
+            raise ValueError(f"init_ckpt num_bins {init['num_bins']} != {num_bins} — num_bins_override를 맞춰라")
+        predictor.head.load_state_dict(init["model"])
+        logger.info(f"init_ckpt에서 헤드를 이어받음: {cfg.init_ckpt}")
     # 이중 안전판: requires_grad_(False)(DstgPredictor 생성자) + 옵티마이저 파라미터 그룹을
     # head로만 좁힘(frozen_policy 전체를 넘기지 않음).
     optimizer = torch.optim.AdamW(predictor.head.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
+    os.makedirs(os.path.dirname(cfg.out), exist_ok=True)
+
+    def save(path, epochs_done, **extra):
+        torch.save({
+            "model": predictor.head.state_dict(),  # frozen_policy는 policy_ckpt에서 다시 로드하는 게 정책
+            "epoch": epochs_done,
+            "num_bins": num_bins,
+            "label_horizon": cfg.get("label_horizon"),
+            "preintv": cfg.get("preintv", "none"),
+            "preintv_weight": cfg.get("preintv_weight"),
+            "preintv_len": cfg.get("preintv_len"),
+            "init_ckpt": cfg.get("init_ckpt"),
+            "train_sources": list(cfg.train_sources) if cfg.get("train_sources") else None,
+            "policy_ckpt": os.path.abspath(cfg.policy_ckpt),
+            "obs_keys": obs_keys,
+            "head_hidden": list(cfg.head_hidden),
+            **extra,
+        }, path)
+        logger.info(f"saved: {path}")
+
+    # 중간 저장(학습 곡선) — "몇 epoch 파인튜닝이 적당한가"를 값 하나 정하지 않고 곡선으로 본다.
+    save_epochs = set(cfg.get("save_epochs") or [])
     for epoch in range(cfg.num_epochs):
         train_nll, train_mae = _run_epoch(predictor, train_loader, device, num_bins, optimizer=optimizer,
                                           epoch_label=f"epoch {epoch}/{cfg.num_epochs}")
@@ -221,28 +259,14 @@ def main(cfg: DictConfig):
             msg = f"epoch {epoch} train_nll={train_nll:.4f} train_mae={train_mae:.3f}"
             logger.info(msg)
             print(msg, flush=True)
+        if epoch + 1 in save_epochs and epoch + 1 < cfg.num_epochs:
+            save(cfg.out.replace(".pt", f"_ep{epoch + 1}.pt"), epoch + 1)
 
     val_nll, val_mae = _run_epoch(predictor, val_loader, device, num_bins, optimizer=None, epoch_label="[val]")
     logger.info(f"[val] nll={val_nll:.4f} mae={val_mae:.3f} (n={len(val_idx)} samples, {n_val_demos} demos)")
     print({"val_nll": val_nll, "val_mae": val_mae, "num_bins": num_bins,
            "n_train_demos": n_train_demos, "n_val_demos": n_val_demos})
-
-    os.makedirs(os.path.dirname(cfg.out), exist_ok=True)
-    torch.save({
-        "model": predictor.head.state_dict(),  # frozen_policy는 policy_ckpt에서 다시 로드하는 게 정책
-        "epoch": cfg.num_epochs,
-        "num_bins": num_bins,
-        "label_horizon": cfg.get("label_horizon"),
-        "preintv": cfg.get("preintv", "none"),
-        "preintv_weight": cfg.get("preintv_weight"),
-        "preintv_len": cfg.get("preintv_len"),
-        "policy_ckpt": os.path.abspath(cfg.policy_ckpt),
-        "obs_keys": obs_keys,
-        "head_hidden": list(cfg.head_hidden),
-        "val_nll": val_nll,
-        "val_mae": val_mae,
-    }, cfg.out)
-    logger.info(f"saved: {cfg.out}")
+    save(cfg.out, cfg.num_epochs, val_nll=val_nll, val_mae=val_mae)
 
 
 if __name__ == "__main__":
