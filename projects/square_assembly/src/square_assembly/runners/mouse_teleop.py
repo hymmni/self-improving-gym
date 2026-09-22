@@ -17,7 +17,7 @@ pop_rewind()로 돌아갈 스텝만 꺼내 주고, 수집기가 collect_episode�
 
 사람 제어 중 매 스텝(20Hz)의 7-dim OSC_POSE delta 액션:
 - xy: 맵 위 커서 위치를 목표로 PD  (kp·err − kd·v, pos_cap으로 클립)
-- z: Space/Shift 누른 동안 일정 속도로 ↑/↓ (z_min~z_max에서 멈춤)
+- z: Ctrl(또는 Space)/Shift 누른 동안 일정 속도로 ↑/↓ (z_min~z_max에서 멈춤)
 - 회전: 휠 한 칸 = 야우 목표 ±yaw_step. 손목은 항상 수직 아래(오라클과 같은 자세 제어)
 - 그리퍼: 좌클릭 누른 동안 +1(닫힘), 뗀 동안 −1(열림). 일정 속도로 여닫는 램프는 robosuite
   PandaGripper가 이미 한다(부호만 보고 내부 명령을 옮긴다). 예전엔 여기서도 스텝당 0.1씩 램프를
@@ -44,6 +44,11 @@ Tk 창은 Shift 단독과 떼기를 그대로 받으므로 "누름~뗌 사이 = 
 `Hangul,Shift+space,Alt_R`이라, Tk가 기본값대로 XIM을 거치면 Shift(내리기)를 누른 채 Space(올리기)를
 누르는 순간 입력기가 한/영 전환으로 가져가 Space가 안 먹었다(2026-09-22 사용자 보고, :1에서
 `tk useinputmethods` = 1, XIM_SERVERS = @server=ibus 확인). 한글 모드가 되면 글자 키도 조합에 먹힌다.
+
+올리기는 Ctrl이 기본이다. RustDesk(클라이언트 PC가 Wayland)는 Space를 "누르고 있음"으로 못 보낸다 —
+꾹 누르면 누름+뗌이 같은 밀리초에 붙은 쌍을 키 반복 주기(33Hz)로 보낸다(2026-09-22 :1 XRecord 실측).
+그래서 창에선 Space가 한 순간도 눌린 상태가 아니다. 수식키(Shift·Ctrl)는 누름·뗌이 제대로 온다.
+Space도 남겨둔다(로컬 키보드나 X11 클라이언트에선 된다).
 """
 
 import time
@@ -83,7 +88,7 @@ class MouseTeleopController:
         self.target_xy = None      # None이면 xy는 제자리 유지(잡은 뒤 커서가 아직 안 움직임)
         self.target_yaw = None     # None이면 현재 야우 유지
         self.grip_cmd = -1.0
-        self.z_up = self.z_down = False  # Space/Shift를 누르고 있는 동안 True(창의 누름·뗌 이벤트)
+        self.z_up = self.z_down = False  # 올리기/내리기 키를 누르고 있는 동안 True(창의 누름·뗌 이벤트)
         self.grip_pressed = False
         self._prev_xy = None
 
@@ -161,7 +166,7 @@ class MouseTeleopIntervention:
     """
 
     _HELP = ("[Tab]=human/policy [<-]=last switch [b]=back 1s [r]=restart [s]=pause [q]=give up  "
-             "Space/Shift=z  wheel=yaw  LMB=grip")
+             "Ctrl/Shift=up/down  wheel=yaw  LMB=grip")
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
                  toggle_key="Tab", switch_key="Left", pause_key="s", quit_key="q",
@@ -265,8 +270,8 @@ class MouseTeleopIntervention:
             self._paused = True
 
     def _on_key(self, keysym, down):
-        """Tk 누름/뗌 이벤트. Space/Shift는 누르고 있는 동안만 z를 움직이고, 나머지는 누를 때 한 번."""
-        if keysym == "space":
+        """Tk 누름/뗌 이벤트. 올리기/내리기 키는 누르고 있는 동안만 z를 움직이고, 나머지는 누를 때 한 번."""
+        if keysym in ("Control_L", "Control_R", "space"):
             self.controller.z_up = down
         elif keysym in ("Shift_L", "Shift_R"):
             self.controller.z_down = down
@@ -360,15 +365,17 @@ class MouseTeleopIntervention:
             cv2.line(img, (px, 0), (px, S), (60, 60, 60), 1)
             cv2.line(img, (0, py), (S, py), (60, 60, 60), 1)
 
-        # peg, 너트(정사각형 + 핸들 막대)
-        cv2.circle(img, m.to_px(s["peg"]), int(0.02 * m.scale), (200, 200, 60), -1)
-        yaw_nut = np.arctan2(*(s["handle"] - s["nut"])[[1, 0]])
-        half, cy_, sy_ = 0.025, np.cos(yaw_nut), np.sin(yaw_nut)
-        corners = [s["nut"][:2] + half * np.array([cy_ * i - sy_ * j, sy_ * i + cy_ * j])
-                   for i, j in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
-        cv2.polylines(img, [np.array([m.to_px(p) for p in corners], dtype=np.int32)], True,
-                      (80, 160, 255), 2)
-        cv2.line(img, m.to_px(s["nut"]), m.to_px(s["handle"]), (80, 160, 255), 4)
+        # peg, 너트: sim의 충돌 박스를 위에서 본 실제 크기로. 손잡이(마지막 박스)를 밝은 색으로 먼저 칠하고
+        # 고리로 덮는다 — 손잡이는 고리 벽 속까지 들어가 있어서, 보이는 밝은 부분이 곧 쥘 수 있는 구간이다.
+        def fill(pts, color):
+            cv2.fillConvexPoly(img, cv2.convexHull(np.array([m.to_px(p) for p in pts], dtype=np.int32)), color)
+
+        for pts in s["peg_boxes"]:
+            fill(pts, (200, 200, 60))
+        *ring, handle = s["nut_boxes"]
+        fill(handle, (0, 210, 255))
+        for pts in ring:
+            fill(pts, (60, 120, 200))
 
         # 그리퍼: 실제(굵게, 간격 = 실제 열림)와 사람 제어 중엔 명령 목표(흰 선). 목표는 커서·휠·클릭을
         # 그 자리에서 바로 따라가고 실제 그리퍼는 PD·OSC로 뒤따라온다 — 둘을 겹쳐 봐야 조종감이 맞는다.
@@ -405,7 +412,7 @@ class MouseTeleopIntervention:
         cv2.drawMarker(img, m.to_px(xy), col, cv2.MARKER_CROSS, 14, 1)
         for sign in (1, -1):
             tip = np.asarray(xy)[:2] + sign * (gap / 2) * u
-            cv2.line(img, m.to_px(tip - 0.01 * n), m.to_px(tip + 0.01 * n), col, thickness)
+            cv2.line(img, m.to_px(tip - 0.008 * n), m.to_px(tip + 0.008 * n), col, thickness)  # 패드 폭 1.6cm
 
     def close(self):
         if self._root is not None:

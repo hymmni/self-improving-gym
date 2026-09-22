@@ -24,6 +24,8 @@
   마지막에 반드시 놓고 물러나야 한다.
 """
 
+import itertools
+
 import numpy as np
 
 _POS_SCALE = 0.05
@@ -66,6 +68,17 @@ def rot_delta_toward(cur, yaw, rot_cap):
     return np.clip(axis * angle / _ROT_SCALE, -rot_cap, rot_cap), angle
 
 
+_BOX_CORNERS = np.array(list(itertools.product((-1.0, 1.0), repeat=3)))
+
+
+def box_footprints(sim, body_id):
+    """body의 충돌 박스 geom(group 0)들을 위에서 본 꼭짓점 (8,2)들로. 기울어져도 볼록 껍질을 그리면 맞다."""
+    m, d = sim.model, sim.data
+    return [(d.geom_xpos[g] + (_BOX_CORNERS * m.geom_size[g]) @ d.geom_xmat[g].reshape(3, 3).T)[:, :2]
+            for g in np.flatnonzero(m.geom_bodyid == body_id)
+            if m.geom_group[g] == 0 and m.geom_type[g] == 6]  # 6 = mjGEOM_BOX
+
+
 def read_privileged_state(raw):
     """sim에서 그리퍼/너트/핸들/peg 상태를 한 번에 읽는다(오라클·텔레옵 맵 공용).
 
@@ -75,13 +88,20 @@ def read_privileged_state(raw):
     sim = raw.sim
     nut = raw.nuts[getattr(raw, "nut_id", 0)]
     grip_id = raw.robots[0].eef_site_id[raw.robots[0].arms[0]]
+    handle = sim.data.site_xpos[sim.model.site_name2id(nut.important_sites["handle"])].copy()
+    # 너트 = 사각 고리 박스 4개 + 손잡이 박스 1개(3.2cm 폭, 고리 벽 속까지 들어가 있고 밖으로 3.6cm
+    # 나온다). 손잡이 site에 가장 가까운 박스가 손잡이 — 맨 뒤에 둔다.
+    nut_boxes = sorted(box_footprints(sim, raw.obj_body_id[nut.name]),
+                       key=lambda p: -np.linalg.norm(p.mean(axis=0) - handle[:2]))
     return {
         "grip": sim.data.site_xpos[grip_id].copy(),
         # 열: [손가락이 벌어지는 축, y, 접근 축] — x축이 손가락 축인 건 finger body 위치로 확인(2026-09-17)
         "R": sim.data.site_xmat[grip_id].reshape(3, 3).copy(),
         "nut": sim.data.body_xpos[raw.obj_body_id[nut.name]].copy(),
-        "handle": sim.data.site_xpos[sim.model.site_name2id(nut.important_sites["handle"])].copy(),
+        "handle": handle,
         "peg": sim.data.body_xpos[raw.peg1_body_id].copy(),
+        "nut_boxes": nut_boxes,
+        "peg_boxes": box_footprints(sim, raw.peg1_body_id),
     }
 
 

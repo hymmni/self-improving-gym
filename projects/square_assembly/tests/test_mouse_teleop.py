@@ -171,6 +171,18 @@ def test_space_and_shift_move_z_for_as_long_as_they_are_held():
     assert interv(62, {})[2] == 0.0
 
 
+def test_ctrl_lifts_because_rustdesk_sends_space_as_taps():
+    """RustDesk는 꾹 누른 Space를 누름+뗌 쌍으로만 보낸다 — Ctrl은 누름·뗌이 제대로 와서 누르는 동안 올라간다."""
+    interv = _make()
+    interv._on_key("Tab", True)
+    interv._on_key("Control_L", True)
+    assert all(interv(t, {})[2] > 0 for t in range(20))
+    interv._on_key("Control_L", False)
+    assert interv(20, {})[2] == 0.0
+    interv._on_key("space", True); interv._on_key("space", False)  # 같은 update()에서 처리되는 탭 쌍
+    assert interv(21, {})[2] == 0.0
+
+
 def test_shift_tab_still_toggles_and_yaw_is_wheel_only():
     interv = _make()
     interv._on_key("Tab", True)
