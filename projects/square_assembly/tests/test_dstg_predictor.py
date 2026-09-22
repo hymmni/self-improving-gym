@@ -17,7 +17,7 @@ IMAGE_HW = (32, 32)
 REAL_HDF5 = "/home/moai/hymm_ws/square_dataset/square_image_v15.hdf5"
 
 
-def _make_policy(seed=0):
+def _make_policy(seed=0, image_hw=IMAGE_HW):
     torch.manual_seed(seed)
     policy = DiffusionPolicyImage(
         rgb_keys=["cam"],
@@ -27,7 +27,7 @@ def _make_policy(seed=0):
         action_dim=3,
         pred_horizon=4,
         num_kp=4,
-        image_hw=IMAGE_HW,
+        image_hw=image_hw,
         down_dims=(32, 64),
         num_train_timesteps=10,
         num_inference_steps=10,
@@ -35,9 +35,9 @@ def _make_policy(seed=0):
     return policy.to(DEVICE)
 
 
-def _make_obs(batch_size=2, obs_horizon=2, device=DEVICE):
+def _make_obs(batch_size=2, obs_horizon=2, device=DEVICE, image_hw=IMAGE_HW):
     return {
-        "cam": torch.rand(batch_size, obs_horizon, 3, *IMAGE_HW, device=device),
+        "cam": torch.rand(batch_size, obs_horizon, 3, *image_hw, device=device),
         "state": torch.randn(batch_size, obs_horizon, 4, device=device),
     }
 
@@ -110,3 +110,13 @@ def test_get_time_to_success(small_hdf5):
         demo_labels = labels[demo_label_idxs]
         assert demo_labels.min() == 0
         assert demo_labels.max() == demo_lens[demo_id] - 1
+
+
+def test_train_encoder_lets_grads_reach_the_encoder_but_not_the_unet():
+    hw = (64, 64)  # 32x32는 ResNet 뒤 1x1이라 SpatialSoftmax가 상수 — 그래디언트가 0이 된다
+    predictor = DstgPredictor(_make_policy(image_hw=hw), num_bins=50, head_hidden=(16, 16), train_encoder=True).to(DEVICE)
+    predictor(_make_obs(image_hw=hw)).sum().backward()
+    assert any(p.grad is not None and torch.any(p.grad != 0) for p in predictor.frozen_policy.encoders.parameters())
+    assert not any(p.requires_grad for p in predictor.frozen_policy.unet.parameters())
+    with torch.no_grad():  # 보상 계산(no_grad) 경로에선 그래프를 안 만든다
+        assert not predictor(_make_obs(image_hw=hw)).requires_grad

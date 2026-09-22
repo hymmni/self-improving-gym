@@ -12,6 +12,7 @@ preintv_len: null        # PREINTV 구간을 개입 시작점부터 몇 프레�
 init_ckpt: null          # 파인튜닝: 이 predictor.pt의 헤드에서 시작(num_bins가 같아야 한다)
 train_sources: null      # 병합본 demo attrs["source"]에 이 문자열 중 하나가 든 데모만 train(val은 그대로)
 save_epochs: null        # 이 epoch들이 끝날 때 <out>_ep{N}.pt로 중간 저장(학습 곡선용)
+encoder_lr: null         # 설정하면 비전 인코더도 이 lr로 같이 학습(풀 파인튜닝). null이면 헤드만
 
 seed: 0
 device: cuda

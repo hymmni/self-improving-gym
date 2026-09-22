@@ -109,6 +109,8 @@ class DstgReward:
         predictor = DstgPredictor(frozen_policy, ckpt["num_bins"],
                                    head_hidden=tuple(ckpt["head_hidden"])).to(device)
         predictor.head.load_state_dict(ckpt["model"])
+        if "encoder" in ckpt:  # 인코더까지 파인튜닝한 예측기(train_dstg encoder_lr)
+            predictor.frozen_policy.encoders.load_state_dict(ckpt["encoder"])
 
         self.policy_ckpt_path = policy_ckpt_path
         self.obs_keys = list(ckpt["obs_keys"])

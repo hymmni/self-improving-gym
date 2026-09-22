@@ -219,7 +219,9 @@ def main(cfg: DictConfig):
         num_workers=cfg.num_workers, persistent_workers=cfg.num_workers >= 1,
     )
 
-    predictor = DstgPredictor(frozen_policy, num_bins, head_hidden=tuple(cfg.head_hidden)).to(device)
+    encoder_lr = cfg.get("encoder_lr")
+    predictor = DstgPredictor(frozen_policy, num_bins, head_hidden=tuple(cfg.head_hidden),
+                              train_encoder=bool(encoder_lr)).to(device)
     if cfg.get("init_ckpt"):  # 파인튜닝 — 헤드만 이어받는다(인코더는 원래 정책 것 그대로)
         init = torch.load(cfg.init_ckpt, map_location=device, weights_only=False)
         if int(init["num_bins"]) != num_bins:
@@ -228,7 +230,11 @@ def main(cfg: DictConfig):
         logger.info(f"init_ckpt에서 헤드를 이어받음: {cfg.init_ckpt}")
     # 이중 안전판: requires_grad_(False)(DstgPredictor 생성자) + 옵티마이저 파라미터 그룹을
     # head로만 좁힘(frozen_policy 전체를 넘기지 않음).
-    optimizer = torch.optim.AdamW(predictor.head.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    groups = [{"params": predictor.head.parameters(), "lr": cfg.lr}]
+    if encoder_lr:  # 풀 파인튜닝 — 인코더만 더하고 unet은 여전히 뺀다
+        groups.append({"params": frozen_policy.encoders.parameters(), "lr": float(encoder_lr)})
+        logger.info(f"encoder_lr={encoder_lr}: 비전 인코더도 학습")
+    optimizer = torch.optim.AdamW(groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     os.makedirs(os.path.dirname(cfg.out), exist_ok=True)
 
@@ -246,6 +252,8 @@ def main(cfg: DictConfig):
             "policy_ckpt": os.path.abspath(cfg.policy_ckpt),
             "obs_keys": obs_keys,
             "head_hidden": list(cfg.head_hidden),
+            "encoder_lr": encoder_lr,
+            **({"encoder": frozen_policy.encoders.state_dict()} if encoder_lr else {}),
             **extra,
         }, path)
         logger.info(f"saved: {path}")
