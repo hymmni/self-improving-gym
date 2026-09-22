@@ -165,19 +165,19 @@ def test_space_and_shift_move_z_for_as_long_as_they_are_held():
     assert interv(41, {})[2] == 0.0
     interv._on_key("Shift_L", True)
     assert all(interv(t, {})[2] < 0 for t in range(42, 82))  # 수식키는 반복이 없어도 계속
-    interv._on_key("D", True)                             # Shift를 누른 채 d(대문자로 온다)도 먹는다
-    assert interv(82, {})[5] < 0
+    interv._on_key("B", True)                             # Shift를 누른 채 b(대문자로 온다)도 먹는다
+    assert interv.pop_rewind(82) == 62
     interv._on_key("Shift_L", False)
-    assert interv(83, {})[2] == 0.0
+    assert interv(62, {})[2] == 0.0
 
 
-def test_a_d_turn_yaw_and_shift_tab_still_toggles():
+def test_shift_tab_still_toggles_and_yaw_is_wheel_only():
     interv = _make()
     interv._on_key("Tab", True)
-    interv._on_key("a", True)
-    assert interv(0, {})[5] > 0            # a: +5도 목표 -> z축 양의 회전
-    interv._on_key("d", True); interv._on_key("d", True)
-    assert interv(1, {})[5] < 0
+    interv._on_key("a", True); interv._on_key("d", True)  # a/d는 없앴다(2026-09-22) — 휠로만 돈다
+    assert interv(0, {})[5] == 0.0
+    interv.controller.wheel(+1)
+    assert interv(1, {})[5] > 0            # 휠 위 한 칸: +5도 목표 -> z축 양의 회전
     assert interv._on_key("ISO_Left_Tab", True) == "break"  # Shift+Tab도 전환, Tk 포커스 이동은 막는다
     assert interv(2, {}) is None
 

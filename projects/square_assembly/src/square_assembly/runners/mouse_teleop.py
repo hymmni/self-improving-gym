@@ -18,7 +18,7 @@ pop_rewind()로 돌아갈 스텝만 꺼내 주고, 수집기가 collect_episode�
 사람 제어 중 매 스텝(20Hz)의 7-dim OSC_POSE delta 액션:
 - xy: 맵 위 커서 위치를 목표로 PD  (kp·err − kd·v, pos_cap으로 클립)
 - z: Space/Shift 누른 동안 일정 속도로 ↑/↓ (z_min~z_max에서 멈춤)
-- 회전: 휠 한 칸 또는 a/d = 야우 목표 ±yaw_step. 손목은 항상 수직 아래(오라클과 같은 자세 제어)
+- 회전: 휠 한 칸 = 야우 목표 ±yaw_step. 손목은 항상 수직 아래(오라클과 같은 자세 제어)
 - 그리퍼: 좌클릭 누른 동안 +1(닫힘), 뗀 동안 −1(열림). 일정 속도로 여닫는 램프는 robosuite
   PandaGripper가 이미 한다(부호만 보고 내부 명령을 옮긴다). 예전엔 여기서도 스텝당 0.1씩 램프를
   걸었는데, 부호가 뒤집히는 10스텝(0.5초) 동안 손가락이 전혀 안 움직여 반응만 늦었다(2026-09-22
@@ -39,6 +39,11 @@ pop_rewind()로 돌아갈 스텝만 꺼내 주고, 수집기가 collect_episode�
 Tk 창은 Shift 단독과 떼기를 그대로 받으므로 "누름~뗌 사이 = 누르고 있음"으로 충분하다. 키 반복의
 뗌+누름 쌍은 한 번의 update()에서 연달아 처리돼 스텝 사이에 끊기지 않는다. 창 포커스를 잃으면
 (FocusOut) 떼기가 안 올 수 있으니 z를 멈춘다.
+
+입력기(XIM)는 끈다. pororo 세션엔 ibus-hangul이 XIM 서버로 떠 있고 한/영 전환 키가
+`Hangul,Shift+space,Alt_R`이라, Tk가 기본값대로 XIM을 거치면 Shift(내리기)를 누른 채 Space(올리기)를
+누르는 순간 입력기가 한/영 전환으로 가져가 Space가 안 먹었다(2026-09-22 사용자 보고, :1에서
+`tk useinputmethods` = 1, XIM_SERVERS = @server=ibus 확인). 한글 모드가 되면 글자 키도 조합에 먹힌다.
 """
 
 import time
@@ -153,7 +158,7 @@ class MouseTeleopIntervention:
     """
 
     _HELP = ("[Tab]=human/policy [<-]=last switch [b]=back 1s [r]=restart [s]=pause [q]=give up  "
-             "Space/Shift=z  wheel or a/d=yaw  LMB=grip")
+             "Space/Shift=z  wheel=yaw  LMB=grip")
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
                  toggle_key="Tab", switch_key="Left", pause_key="s", quit_key="q",
@@ -166,8 +171,7 @@ class MouseTeleopIntervention:
         self.back_steps = back_steps
         self.keys = {toggle_key: "toggle", switch_key: "last_switch",
                      pause_key: "pause", quit_key: "quit",
-                     back_key: "back", restart_key: "restart",
-                     "a": "yaw_left", "d": "yaw_right"}
+                     back_key: "back", restart_key: "restart"}
         self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
         self._root = None          # Tk 창, render()에서 지연 생성(테스트는 창 없이 돈다)
         self._last_obs = None
@@ -256,10 +260,6 @@ class MouseTeleopIntervention:
         elif what == "restart":
             self._restart = True
             self._paused = True
-        elif what == "yaw_left":   # a: 화면에서 봤을 때 반시계로 도는 쪽(2026-09-18 사용자 요청으로 방향 결정)
-            self.controller.wheel(+1)
-        elif what == "yaw_right":  # d
-            self.controller.wheel(-1)
 
     def _on_key(self, keysym, down):
         """Tk 누름/뗌 이벤트. Space/Shift는 누르고 있는 동안만 z를 움직이고, 나머지는 누를 때 한 번."""
@@ -277,6 +277,7 @@ class MouseTeleopIntervention:
         import tkinter as tk
 
         root = tk.Tk()
+        root.tk.call("tk", "useinputmethods", False)  # ibus-hangul이 Shift+Space를 가져가지 않게(모듈 docstring)
         root.title(self.window_name)
         view = tk.Label(root, bd=0, highlightthickness=0)
         view.pack()
