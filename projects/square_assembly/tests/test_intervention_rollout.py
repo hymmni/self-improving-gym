@@ -84,3 +84,59 @@ def test_rewind_stops_when_the_redraw_says_stop():
 
     result = _run(env, max_steps=10, pre_step_fn=pre_step, render_fn=lambda obs: not rewound)
     assert len(result["actions"]) == 1  # 되감은 뒤 다시 그리다 창이 닫히면(q) 거기서 끝
+
+
+class _HardResetEnv:
+    """robosuite hard_reset처럼 reset마다 sim 객체를 새로 만든다 — 수집기가 옛 sim을 붙잡으면
+    기록되는 상태가 전부 그 옛 sim의 멈춘 값이 된다(2026-09-22 r0v2 수집에서 실제로 났던 사고)."""
+
+    class _Sim:
+        def __init__(self, t):
+            self.t = t
+
+        def get_state(self):
+            return np.array([float(self.t)])
+
+    def __init__(self):
+        self.env = type("Raw", (), {})()
+        self.env.sim = self._Sim(-99)
+
+    def _obs(self):
+        return {"x": np.array([float(self.env.sim.t)])}
+
+    def reset(self):
+        self.env.sim = self._Sim(0)
+        return self._obs()
+
+    def reset_to(self, state):
+        self.env.sim.t = int(state["states"][0])
+        return self._obs()
+
+    def step(self, action):
+        self.env.sim.t += 1
+        return self._obs(), 0.0, False, {}
+
+    def is_success(self):
+        return {"task": False}
+
+
+class _RewindAt:
+    def __init__(self, at, to):
+        self.at, self.to = at, to
+
+    def pop_rewind(self, step):
+        if step == self.at:
+            self.at = None
+            return self.to
+        return None
+
+
+def test_recorder_follows_the_sim_across_hard_resets_and_rewinds_to_it():
+    from square_assembly.scripts.collect_square_scripted_intervention import make_recorder
+
+    env = _HardResetEnv()
+    pre_step, obs_ep, states_ep = make_recorder(env, _RewindAt(at=6, to=2), ["x"], [])
+    result = _run(env, max_steps=8, pre_step_fn=pre_step)
+    assert [s[0] for s in states_ep] == list(range(8))  # 멈춘 옛 sim(-99)이 아니라 지금 sim
+    assert [o["x"][0] for o in obs_ep] == list(range(8))
+    assert len(result["actions"]) == 8

@@ -107,6 +107,35 @@ def wait_for_renderer(make_env, camera_name, display_size, timeout_s=120.0, retr
         time.sleep(retry_s)
 
 
+def make_recorder(env, interv, obs_keys, rgb_keys):
+    """collect_episode의 pre_step_fn — 매 스텝 액션 직전 obs·sim 상태를 쌓고, 되감기 요청을 처리한다.
+
+    obs[t]·states[t]는 actions[t]를 넣기 직전 시점이다(render_fn은 스텝 뒤라 거기서 쌓으면 한 칸
+    밀린다 — 2026-09-22 이전 수집분이 그렇다). 상태는 되감기에 쓰고, 저장해 두면 나중에 아무
+    해상도로나 다시 렌더할 수 있다(프레임당 45 float).
+
+    sim은 **매번** env.env.sim에서 새로 읽는다 — robosuite hard_reset은 reset마다 MjSim을 새로
+    만들어서, 에피소드 시작 전에 잡아둔 sim은 멈춘 옛 객체다. 그걸 읽으면 모든 상태가 이전
+    에피소드 끝 값으로 저장되고 되감기가 거기로 순간이동한다(2026-09-22 r0v2 수집에서 실제로 났다).
+
+    Returns: (pre_step, obs_ep, states_ep) — 두 리스트는 pre_step이 채우고 자른다.
+    """
+    obs_ep, states_ep = [], []
+
+    def pre_step(step, obs_raw):
+        t = interv.pop_rewind(step) if hasattr(interv, "pop_rewind") else None
+        if t is not None and t < len(states_ep):
+            state = states_ep[t]
+            del obs_ep[t:], states_ep[t:]
+            print(f"  << 되감기 step {step} -> {t}", flush=True)
+            return t, env.reset_to({"states": state})
+        obs_ep.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
+        states_ep.append(np.asarray(env.env.sim.get_state().flatten()))
+        return None
+
+    return pre_step, obs_ep, states_ep
+
+
 def _to_storage(key, val, rgb_keys):
     """collect_square_rollouts._to_storage와 동일 — CHW,float[0,1] -> HWC,uint8."""
     val = np.asarray(val)
@@ -184,25 +213,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             # 개수에는 안 센다 — 라운드마다 "성공 N개"를 맞추려는 것이지 시도 횟수가 아니다.
             while outcomes["success"] < episodes:
                 interv.reset()
-                # 시뮬레이터 상태 — 되감기에 쓰고, 저장해 두면 나중에 아무 해상도로나 다시 렌더할 수
-                # 있다(84x84 obs만 남기던 시절 수집분은 재현이 불가능했다). 프레임당 45 float뿐이다.
-                obs_ep, states_ep = [], []
-                sim = env.env.sim
-                model_xml = sim.model.get_xml()
+                pre_step, obs_ep, states_ep = make_recorder(env, interv, obs_keys, rgb_keys)
                 noise_streak = [0]
-
-                def pre_step(step, obs_raw, _obs=obs_ep, _states=states_ep):
-                    t = interv.pop_rewind(step) if hasattr(interv, "pop_rewind") else None
-                    if t is not None and t < len(_states):
-                        state = _states[t]
-                        del _obs[t:], _states[t:]
-                        print(f"  << 되감기 step {step} -> {t}", flush=True)
-                        return t, env.reset_to({"states": state})
-                    # 액션 직전 obs·상태 — actions[step]과 같은 시점. (2026-09-22까지는 render_fn에서
-                    # 쌓아서 obs[t]가 실제로는 스텝 뒤 관측 o_{t+1}이었다 — r0 데이터가 그렇다.)
-                    _obs.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
-                    _states.append(np.asarray(sim.get_state().flatten()))
-                    return None
 
                 def track(obs_raw, _streak=noise_streak):
                     # 렌더가 도중에 고장나면(연속 3프레임 노이즈) 에피소드를 즉시 끊는다 —
@@ -245,7 +257,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 demo_grp.create_dataset("actions", data=actions)
                 demo_grp.create_dataset("action_mode", data=result["action_modes"])
                 demo_grp.create_dataset("states", data=np.stack(states_ep))
-                demo_grp.attrs["model_file"] = model_xml
+                demo_grp.attrs["model_file"] = env.env.sim.model.get_xml()
                 obs_grp = demo_grp.create_group("obs")
                 for k in obs_keys:
                     stacked = np.stack([o[k] for o in obs_ep], axis=0)
