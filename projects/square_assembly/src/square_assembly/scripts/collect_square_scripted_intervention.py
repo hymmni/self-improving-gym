@@ -149,7 +149,7 @@ def _to_storage(key, val, rgb_keys):
 
 
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
-        control_fps, display_size, window_name="rollout", mode="oracle", teleop=None):
+        control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
     if mode != "mouse":
@@ -204,7 +204,10 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     try:
         # 파일이 이미 있으면 이어서 모은다("a") — 같은 --out으로 다시 실행해도 기존 에피소드가 안 날아간다.
-        with h5py.File(out, "a") as f:
+        # --overwrite면 기존 파일을 비우고 처음부터("w").
+        if overwrite and os.path.exists(out):
+            print(f"--overwrite: 기존 {out}를 비우고 처음부터 모은다", flush=True)
+        with h5py.File(out, "w" if overwrite else "a") as f:
             data_grp = f.require_group("data")
             outcomes["success"] = sum(k.startswith("demo_") for k in data_grp.keys())
             outcomes["fail"] = sum(k.startswith("fail_") for k in data_grp.keys())
@@ -320,11 +323,14 @@ def main():
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
                     help=f"화면 표시용 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY})")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
-        mode=args.mode, teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, z_speed=args.z_speed,
-                                    yaw_step=np.deg2rad(args.yaw_step)))
+        mode=args.mode, overwrite=args.overwrite,
+        teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, z_speed=args.z_speed,
+                    yaw_step=np.deg2rad(args.yaw_step)))
 
 
 if __name__ == "__main__":
