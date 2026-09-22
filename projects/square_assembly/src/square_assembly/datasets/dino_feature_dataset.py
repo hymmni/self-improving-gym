@@ -61,7 +61,7 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
     """
 
     def __init__(self, cache_path, obs_horizon, fail_bin=None, label_horizon=None,
-                 mode_hdf5=None, preintv="none"):
+                 mode_hdf5=None, preintv="none", preintv_len=None):
         self.obs_horizon = obs_horizon
         self.fail_bin = fail_bin
         self.label_horizon = label_horizon
@@ -90,7 +90,7 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         ts = [t for _, t in self.samples]
         self._labels, self._preintv_mask = build_labels(
             names, ts, self.lengths, self.success, modes=self.modes, fail_bin=fail_bin,
-            label_horizon=label_horizon, preintv=preintv)
+            label_horizon=label_horizon, preintv=preintv, preintv_len=preintv_len)
 
     def __len__(self):
         return len(self.samples)

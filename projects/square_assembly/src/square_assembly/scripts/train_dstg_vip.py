@@ -65,7 +65,8 @@ def main(cfg: DictConfig):
     dataset = DinoFeatureWindows(cfg.cache_path, cfg.obs_horizon, fail_bin=cfg.get("fail_bin"),
                              label_horizon=cfg.get("label_horizon"),
                              mode_hdf5=cfg.get("mode_hdf5"),
-                             preintv=cfg.get("preintv", "none"))
+                             preintv=cfg.get("preintv", "none"),
+                             preintv_len=cfg.get("preintv_len"))
     with h5py.File(cfg.cache_path, "r") as f:
         cache_meta = json.loads(f.attrs["meta"])
     logger.info(f"cache={cfg.cache_path} meta={cache_meta}")
@@ -79,6 +80,14 @@ def main(cfg: DictConfig):
         before = len(train_idx)
         train_idx = [i for i in train_idx if i not in drop]
         logger.info(f"preintv=drop: train 샘플 {before} -> {len(train_idx)}")
+
+    # PREINTV 오버샘플링 — train_dstg.py와 같다(인덱스 복제, val은 그대로).
+    w = int(cfg.get("preintv_weight") or 1)
+    if w > 1:
+        pre = set(dataset.preintv_indices())
+        extra = [i for i in train_idx if i in pre] * (w - 1)
+        train_idx = train_idx + extra
+        logger.info(f"preintv_weight={w}: train 샘플 +{len(extra)} -> {len(train_idx)}")
 
     # train_demos_limit: val 데모는 그대로 두고 train 데모만 줄인다 — 같은 held-out 위에서
     # "데이터가 더 있으면 나아지는가"를 재는 규모 곡선용.
@@ -149,6 +158,8 @@ def main(cfg: DictConfig):
         "fail_bin": cfg.get("fail_bin"),
         "label_horizon": cfg.get("label_horizon"),
         "preintv": cfg.get("preintv", "none"),
+        "preintv_weight": cfg.get("preintv_weight"),
+        "preintv_len": cfg.get("preintv_len"),
         "frame_mean": frame_mean,
         "frame_std": frame_std,
         "cache_path": os.path.abspath(cfg.cache_path),

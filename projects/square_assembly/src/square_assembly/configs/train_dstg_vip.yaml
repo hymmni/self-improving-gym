@@ -12,6 +12,8 @@ train_demos_limit: null  # train 데모 수 상한(규모 곡선용). val 데모
 mode_hdf5: null          # action_mode를 읽어올 원본 hdf5 — preintv 처리를 쓸 때만 필요
 preintv: none            # PREINTV 프레임 처리: none(그대로) | drop(train에서 제외) |
                          # flat(구간 내내 같은 라벨 = 진전 0) | rise(스텝마다 +1 = 후퇴)
+preintv_weight: 1        # PREINTV 프레임을 train에서 몇 배로 복제할지(1=그대로)
+preintv_len: null        # PREINTV 구간을 개입 시작점부터 몇 프레임으로 다시 잴지(null=저장된 15)
 
 obs_horizon: 2           # configs/policy/diffusion_unet.yaml과 동일
 seed: 1

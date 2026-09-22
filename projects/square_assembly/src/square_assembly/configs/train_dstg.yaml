@@ -8,6 +8,7 @@ num_bins_override: null  # 설정하면 데이터에서 자동으로 정하는 �
 label_horizon: null      # 남은 비율 x 이 값으로 라벨링(사람 속도에 불변). null이면 남은 스텝 수
 preintv: none            # PREINTV 프레임 처리: none | drop | flat | rise
 preintv_weight: 1        # PREINTV 프레임을 train에서 몇 배로 복제할지(1=그대로)
+preintv_len: null        # PREINTV 구간을 개입 시작점부터 몇 프레임으로 다시 잴지(null=저장된 15)
 
 seed: 0
 device: cuda

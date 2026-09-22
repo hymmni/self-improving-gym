@@ -14,6 +14,10 @@ preintv
     말한다. 'flat'은 구간 내내 시작점의 참값으로 고정(진전 0), 'rise'는 스텝마다 1씩
     올린다(후퇴). 'drop'은 라벨을 건드리지 않고 마스크만 돌려주며, 그 프레임을 train에서
     뺄지는 부르는 쪽이 정한다(val에서 빼면 held-out 비교가 깨진다).
+
+preintv_len
+    PREINTV 구간 길이를 개입 시작점부터 다시 잰다. 수집 때 저장된 구간은 15프레임(0.75초)
+    고정이라(`relabel_preintv`), 더 긴 창을 실험하려면 재수집 없이 여기서 늘린다.
 """
 
 import numpy as np
@@ -22,7 +26,7 @@ PREINTV_MODES = ("none", "drop", "flat", "rise")
 
 
 def build_labels(names, ts, lengths, success, modes=None, fail_bin=None,
-                 label_horizon=None, preintv="none"):
+                 label_horizon=None, preintv="none", preintv_len=None):
     """(N,) int64 라벨과 PREINTV 마스크를 만든다.
 
     Args:
@@ -34,6 +38,7 @@ def build_labels(names, ts, lengths, success, modes=None, fail_bin=None,
         fail_bin: 실패 데모에 붙일 클래스. 실패 데모가 있는데 None이면 죽는다.
         label_horizon: 위 설명 참고. None이면 남은 스텝 수 그대로.
         preintv: PREINTV_MODES 중 하나.
+        preintv_len: 위 설명 참고. None이면 저장된 구간 그대로.
 
     Returns:
         (labels, preintv_mask): 각각 (N,) int64, (N,) bool.
@@ -43,6 +48,10 @@ def build_labels(names, ts, lengths, success, modes=None, fail_bin=None,
     names, ts = np.asarray(names), np.asarray(ts)
     if preintv != "none" and not modes:
         raise ValueError("preintv 처리를 쓰려면 action_mode(modes)가 필요하다")
+
+    if preintv_len and modes:
+        from square_assembly.datasets.labels import relabel_preintv
+        modes = {n: relabel_preintv(m, int(preintv_len)) for n, m in modes.items()}
 
     remaining = np.array([lengths[n] - 1 - t for n, t in zip(names, ts)], dtype=np.float64)
     mask = _preintv_mask(names, ts, modes)

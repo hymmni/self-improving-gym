@@ -61,3 +61,19 @@ def test_drop_reports_exactly_the_preintv_frames(paths):
 def test_preintv_handling_needs_the_action_mode_source(paths):
     with pytest.raises(ValueError, match="action_mode"):
         DinoFeatureWindows(paths[0], 2, preintv="flat")
+
+
+def test_preintv_len_extends_the_window_back_from_the_intervention():
+    """저장본은 개입 직전 15프레임만 PREINTV다. preintv_len으로 개입 시작점부터 다시 재서 늘린다."""
+    from square_assembly.datasets.stg_labels import build_labels
+
+    mode = np.array([0] * 5 + [-10] * 2 + [1] * 3)  # 개입은 t=7부터, 저장된 PREINTV는 t=5,6뿐
+    L = len(mode)
+    kw = dict(names=["d"] * L, ts=np.arange(L), lengths={"d": L}, success={"d": True},
+              modes={"d": mode}, preintv="rise")
+    lab, mask = build_labels(**kw)
+    assert list(np.flatnonzero(mask)) == [5, 6]
+    lab, mask = build_labels(**kw, preintv_len=4)
+    assert list(np.flatnonzero(mask)) == [3, 4, 5, 6]
+    assert list(lab[3:7]) == [6, 7, 8, 9]   # 시작점 참값(L-1-3)에서 매 스텝 +1
+    assert list(lab[7:]) == [2, 1, 0]       # 개입 구간은 그대로

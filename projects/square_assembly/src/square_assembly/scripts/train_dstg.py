@@ -83,7 +83,8 @@ def _stg_labels(dataset, cfg):
     return build_labels(names, ts, lengths, success, modes=modes,
                         fail_bin=cfg.get("fail_bin"),
                         label_horizon=cfg.get("label_horizon"),
-                        preintv=cfg.get("preintv", "none"))
+                        preintv=cfg.get("preintv", "none"),
+                        preintv_len=cfg.get("preintv_len"))
 
 
 def _episode_split(dataset, val_fraction, seed):
@@ -234,6 +235,7 @@ def main(cfg: DictConfig):
         "label_horizon": cfg.get("label_horizon"),
         "preintv": cfg.get("preintv", "none"),
         "preintv_weight": cfg.get("preintv_weight"),
+        "preintv_len": cfg.get("preintv_len"),
         "policy_ckpt": os.path.abspath(cfg.policy_ckpt),
         "obs_keys": obs_keys,
         "head_hidden": list(cfg.head_hidden),
