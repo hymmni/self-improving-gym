@@ -25,7 +25,8 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
         --out data/square_scripted_intv_v1.hdf5
 
 창이 뜨면 정책이 자동으로 진행한다. 실패로 보이면 's'를 눌러 오라클에 넘긴다(그 에피소드는
-끝까지 오라클이 잡는다 — 정책에 돌려주지 않는다). 포기하려면 'q'.
+끝까지 오라클이 잡는다 — 정책에 돌려주지 않는다). 포기하려면 'q'. --mode mouse면 'b'(2초 되감기)
+·'r'(같은 배치로 처음부터)로 되돌릴 수 있다 — 버린 배치는 다시 못 만나므로 q보다 이쪽을 쓴다.
 
 화면은 --display-size 해상도로 따로 렌더해서 보여준다(학습/저장 데이터는 task의
 image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리). 480을 넘길 순 없다
@@ -183,18 +184,27 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             # 개수에는 안 센다 — 라운드마다 "성공 N개"를 맞추려는 것이지 시도 횟수가 아니다.
             while outcomes["success"] < episodes:
                 interv.reset()
-                obs_ep = []
-                # 시뮬레이터 상태 — 저장해 두면 나중에 아무 해상도로나 되감아 렌더할 수 있다.
-                # (84x84 obs만 남기던 시절 수집분은 재현이 불가능했다.) 프레임당 45 float뿐이다.
-                sim_env = getattr(env, "env", None)
-                states_ep = [] if sim_env is not None and hasattr(sim_env, "sim") else None
-                model_xml = sim_env.sim.model.get_xml() if states_ep is not None else None
+                # 시뮬레이터 상태 — 되감기에 쓰고, 저장해 두면 나중에 아무 해상도로나 다시 렌더할 수
+                # 있다(84x84 obs만 남기던 시절 수집분은 재현이 불가능했다). 프레임당 45 float뿐이다.
+                obs_ep, states_ep = [], []
+                sim = env.env.sim
+                model_xml = sim.model.get_xml()
                 noise_streak = [0]
 
-                def track(obs_raw, _store=obs_ep, _streak=noise_streak, _states=states_ep):
-                    _store.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
-                    if _states is not None:   # 이 obs가 나온 시점의 상태 = actions[t]를 넣기 직전
-                        _states.append(np.asarray(sim_env.sim.get_state().flatten()))
+                def pre_step(step, obs_raw, _obs=obs_ep, _states=states_ep):
+                    t = interv.pop_rewind(step) if hasattr(interv, "pop_rewind") else None
+                    if t is not None and t < len(_states):
+                        state = _states[t]
+                        del _obs[t:], _states[t:]
+                        print(f"  << 되감기 step {step} -> {t}", flush=True)
+                        return t, env.reset_to({"states": state})
+                    # 액션 직전 obs·상태 — actions[step]과 같은 시점. (2026-09-22까지는 render_fn에서
+                    # 쌓아서 obs[t]가 실제로는 스텝 뒤 관측 o_{t+1}이었다 — r0 데이터가 그렇다.)
+                    _obs.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
+                    _states.append(np.asarray(sim.get_state().flatten()))
+                    return None
+
+                def track(obs_raw, _streak=noise_streak):
                     # 렌더가 도중에 고장나면(연속 3프레임 노이즈) 에피소드를 즉시 끊는다 —
                     # 사람이 지켜보다 q를 누를 필요 없이 아래서 버리고 복구를 기다린다.
                     r = frame_roughness(np.transpose(obs_raw[camera], (1, 2, 0)) * 255.0)
@@ -210,7 +220,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     env, policy, normalizer, obs_keys,
                     task_cfg.get("obs_horizon", policy_cfg.obs_horizon), policy_cfg.action_horizon, device,
                     intervention_fn=interv, max_steps=max_steps, render=False, render_fn=track,
-                    should_end_fn=interv.should_end, control_fps=control_fps,
+                    pre_step_fn=pre_step, should_end_fn=interv.should_end, control_fps=control_fps,
                     predict_fn=predict_fn, print_diagnostics=False,
                 )
                 if noise_streak[0] >= 3:
@@ -225,7 +235,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
                 actions = np.asarray(result["actions"], dtype=np.float64)
                 T = len(actions)
-                assert T == len(obs_ep), f"obs/action 스텝 수 불일치: {len(obs_ep)} vs {T}"
+                assert T == len(obs_ep) == len(states_ep), f"obs/state/action 스텝 수 불일치: {len(obs_ep)}/{len(states_ep)} vs {T}"
 
                 # 그룹 이름은 성공/실패를 따로 센다: 성공은 demo_0..N(학습용, 번호가 곧 성공 개수),
                 # 실패는 fail_0..M(fail-aware STG용으로 보존, 병합은 is_success로 거른다).
@@ -234,9 +244,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 demo_grp.attrs["num_samples"] = T
                 demo_grp.create_dataset("actions", data=actions)
                 demo_grp.create_dataset("action_mode", data=result["action_modes"])
-                if states_ep is not None and len(states_ep) >= T:
-                    demo_grp.create_dataset("states", data=np.stack(states_ep[:T]))
-                    demo_grp.attrs["model_file"] = model_xml
+                demo_grp.create_dataset("states", data=np.stack(states_ep))
+                demo_grp.attrs["model_file"] = model_xml
                 obs_grp = demo_grp.create_group("obs")
                 for k in obs_keys:
                     stacked = np.stack([o[k] for o in obs_ep], axis=0)

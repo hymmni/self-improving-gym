@@ -192,6 +192,7 @@ def collect_episode(
     merger_name="overwrite",
     te_coeff=0.01,
     print_diagnostics=True,
+    pre_step_fn=None,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
 
@@ -208,6 +209,14 @@ def collect_episode(
 
     render_fn(obs_raw)이 주어지면 매 스텝 obs_raw와 함께 호출하고 False 반환 시 에피소드를
     끝낸다(커스텀 뷰어용, render보다 우선). 없고 render=True면 기존 env.render(mode="human")를 쓴다.
+    render_fn은 env.step() **뒤에** 불리므로 받는 obs는 다음 스텝의 관측이다 — 저장용으로 쓰면
+    obs가 액션보다 한 칸 앞선다(2026-09-22까지의 수집기가 그랬다). 저장은 pre_step_fn에서 한다.
+
+    pre_step_fn(step, obs_raw)는 매 스텝 액션을 고르기 직전, 반환 obs[step]과 같은 시점에
+    불린다. None을 돌려주면 그대로 진행하고, (t, obs_t)를 돌려주면 되감기다 — 호출부가 env를
+    t 시점으로 이미 복원했다는 뜻이고, 여기서는 기록을 t까지 자르고 스텝 번호를 t로 되돌린 뒤
+    render_fn으로 복원된 장면을 한 번 다시 그린다(뷰어가 일시정지 중이면 거기서 멈춘다).
+    그다음 같은 스텝 번호 t로 pre_step_fn이 다시 불린다.
 
     predict_fn(obs_history) -> (T, Da) ndarray로 청크 예측을 대체할 수 있다(예: robomimic
     체크포인트처럼 자체 정규화·RNN 은닉상태를 갖는 정책 — 이 경우 T=1로 매 스텝 재계획해도
@@ -250,6 +259,17 @@ def collect_episode(
         while max_steps is None or step < max_steps:
             if should_end_fn is not None and should_end_fn():
                 break
+            rewound = pre_step_fn(step, obs_raw) if pre_step_fn is not None else None
+            if rewound is not None:
+                if async_ctx is not None:
+                    raise RuntimeError("async_infer에선 되감기를 못 한다 — obs_provider의 스텝 번호가 어긋난다")
+                step, obs_raw = rewound
+                del obs_seq[step:], action_seq[step:], mode_seq[step:]
+                obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
+                chunk = None
+                if render_fn is not None and not render_fn(obs_raw):
+                    break
+                continue
             loop_start = time.time()
 
             intv_action = intervention_fn(step, obs_raw)

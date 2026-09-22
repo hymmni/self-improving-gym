@@ -157,3 +157,41 @@ def test_cv2_key_paths_for_space_and_yaw():
     assert interv(2, {})[5] > 0            # a: +5도 목표 -> z축 양의 회전
     interv._handle_key(ord("d")); interv._handle_key(ord("d"))
     assert interv(3, {})[5] < 0
+
+
+def test_back_accumulates_pauses_and_clamps_at_zero():
+    interv = MouseTeleopIntervention(env=object(), state_fn=_state, back_steps=40)
+    assert interv.pop_rewind(100) is None
+    interv._handle_key(ord("b"))
+    interv._handle_key(ord("b"))
+    assert interv._paused                  # 되감으면 멈춰서 어디로 왔는지 보여준다
+    assert interv.pop_rewind(100) == 20    # 두 번 = 80스텝 뒤로
+    assert interv.pop_rewind(100) is None  # 꺼내면 비워진다
+    interv._handle_key(ord("b"))
+    assert interv.pop_rewind(15) == 0      # 시작보다 앞으로는 못 간다
+
+
+def test_restart_goes_to_zero_and_beats_back():
+    interv = _make()
+    interv._handle_key(ord("b"))
+    interv._handle_key(ord("r"))
+    interv._handle_key(ord("b"))
+    assert interv.pop_rewind(300) == 0
+
+
+def test_rewind_resyncs_the_controller_to_the_restored_pose():
+    """되감기 전 목표(커서·야우·그리퍼)를 그대로 들고 가면 재개하자마자 팔이 튄다."""
+    interv = _make()
+    interv._handle_key(ord("h"))
+    interv.controller.set_cursor((0.2, 0.2))
+    assert np.abs(interv(0, {})[:2]).max() > 0
+    interv._handle_key(ord("b"))
+    interv.pop_rewind(50)
+    np.testing.assert_allclose(interv(10, {})[:2], 0.0)  # 커서가 다시 움직일 때까지 제자리
+
+
+def test_reset_clears_pending_rewind():
+    interv = _make()
+    interv._handle_key(ord("r"))
+    interv.reset()
+    assert interv.pop_rewind(100) is None

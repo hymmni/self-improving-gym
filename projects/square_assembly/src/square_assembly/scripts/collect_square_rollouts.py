@@ -77,15 +77,14 @@ def run(base_ckpt, episodes, max_steps, seed0, out):
         for ep in range(episodes):
             obs_ep = []
 
-            def track(obs_raw, _store=obs_ep):
+            def track(step, obs_raw, _store=obs_ep):  # 액션 직전 obs — actions[step]과 같은 시점
                 _store.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
-                return True
 
             result = collect_episode(
                 env, policy, normalizer, obs_keys,
                 task_cfg.get("obs_horizon", policy_cfg.obs_horizon), policy_cfg.action_horizon, device,
                 intervention_fn=lambda step, obs: None,
-                max_steps=max_steps, render=False, render_fn=track,
+                max_steps=max_steps, render=False, pre_step_fn=track,
                 predict_fn=predict_fn, print_diagnostics=False,
             )
             actions = np.asarray(result["actions"], dtype=np.float64)

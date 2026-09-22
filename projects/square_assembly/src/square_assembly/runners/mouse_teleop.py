@@ -5,6 +5,12 @@
 뒤 다시 잡으면 개입이 여러 번 기록된다). `s`는 일시정지(sim·기록 모두 멈추고 창만 살아
 있음), `q`는 에피소드 포기.
 
+`b`는 back_steps(기본 40 = 2초)만큼 되감기(연타하면 누적), `r`은 에피소드 시작점으로 되감기 —
+같은 너트 배치로 다시 한다. 둘 다 누르면 일시정지로 멈춰 어디로 돌아왔는지 보여준다. 되감기
+자체(sim 복원, 기록 자르기)는 여기서 안 한다 — pop_rewind()로 요청만 꺼내 주고, 수집기가
+collect_episode의 pre_step_fn에서 처리한다. 버리지 않고 되돌리는 이유: robosuite는 reset마다
+배치를 새로 뽑고 시드를 안 남겨서, q로 버린 어려운 배치는 다시 만날 수 없다.
+
 사람 제어 중 매 스텝(20Hz)의 7-dim OSC_POSE delta 액션:
 - xy: 맵 위 커서 위치를 목표로 PD  (kp·err − kd·v, pos_cap으로 클립)
 - z: Space/Shift 누른 동안 일정 속도로 ↑/↓ (z_min~z_max에서 멈춤)
@@ -152,17 +158,21 @@ class MouseTeleopIntervention:
         state_fn: 테스트용 — sim 상태 dict를 돌려주는 함수(None이면 read_privileged_state).
     """
 
-    _HELP = "[h]=human [p]=policy [s]=pause [q]=give up  Space/Shift=z up/down  wheel or a/d=yaw  LMB=grip"
+    _HELP = ("[h]=human [p]=policy [s]=pause [b]=back 2s [r]=restart [q]=give up  "
+             "Space/Shift=z  wheel or a/d=yaw  LMB=grip")
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
-                 takeover_key="h", handback_key="p", pause_key="s", quit_key="q", state_fn=None):
+                 takeover_key="h", handback_key="p", pause_key="s", quit_key="q",
+                 back_key="b", restart_key="r", back_steps=40, state_fn=None):
         self.raw = getattr(env, "env", env)
         self.controller = controller or MouseTeleopController()
         table = getattr(self.raw, "table_offset", None)
         self.map = TopDownMap(table[:2] if table is not None else (0.0, 0.0), map_extent, map_size)
         self.window_name = window_name
+        self.back_steps = back_steps
         self.keys = {ord(takeover_key): "takeover", ord(handback_key): "handback",
                      ord(pause_key): "pause", ord(quit_key): "quit",
+                     ord(back_key): "back", ord(restart_key): "restart",
                      ord(" "): "z_up", ord("a"): "yaw_left", ord("d"): "yaw_right"}
         self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
         self._listener = None      # pynput, render()에서 지연 생성(테스트는 창 없이 돈다)
@@ -175,16 +185,29 @@ class MouseTeleopIntervention:
         self._active = False
         self._paused = False
         self._quit_requested = False
+        self._back, self._restart, self._resync = 0, False, False
         self.num_triggers = 0
         self.controller.reset()
 
     def should_end(self):
         return self._quit_requested
 
+    def pop_rewind(self, step):
+        """되감기 요청이 있으면 돌아갈 스텝 번호를(없으면 None) 돌려주고 요청을 비운다."""
+        if not (self._restart or self._back):
+            return None
+        t = 0 if self._restart else max(0, step - self._back)
+        self._back, self._restart = 0, False
+        self._resync = True
+        return t
+
     def __call__(self, step, obs_raw):
         self._last_obs = obs_raw
+        resync, self._resync = self._resync, False
         if not self._active:
             return None
+        if resync:  # 되감기 전 목표(커서·야우·그리퍼)를 들고 가면 재개하자마자 팔이 튄다
+            self.controller.take_over(self._state_fn(), self._finger_gap())
         return self.controller.action(self._state_fn())
 
     # ---- 입력 -> 상태 -------------------------------------------------------------
@@ -205,6 +228,12 @@ class MouseTeleopIntervention:
             self._paused = not self._paused
         elif what == "quit":
             self._quit_requested = True
+        elif what == "back":
+            self._back += self.back_steps
+            self._paused = True
+        elif what == "restart":
+            self._restart = True
+            self._paused = True
         # 아래 셋은 pynput이 못 받는 환경(원격 데스크톱이 문자로 주입)을 위한 cv2 경로.
         # space는 키 반복이 오는 동안 z-up이 유지되게 짧은 유효시간을 준다.
         elif what == "z_up":
@@ -272,6 +301,8 @@ class MouseTeleopIntervention:
         """frame(HWC uint8 RGB, agentview 고해상도)을 맵 옆에 붙여 띄우고 키를 처리한다.
 
         일시정지 중엔 여기서 창을 계속 갱신하며 머문다(호출부의 스텝 루프가 그동안 멈춘다).
+        되감기 요청이 들어오면 일시정지여도 돌아간다 — 호출부가 되감은 장면으로 다시 부르면
+        그 장면에서 다시 멈춘다(그래서 멈춘 채로 b를 연타해 뒤로 훑을 수 있다).
         """
         import cv2
 
@@ -280,7 +311,7 @@ class MouseTeleopIntervention:
         while True:
             cv2.imshow(self.window_name, self._compose(frame))
             self._handle_key(cv2.waitKey(50 if self._paused else 1) & 0xFF)
-            if self._quit_requested or not self._paused:
+            if self._quit_requested or not self._paused or self._back or self._restart:
                 return not self._quit_requested
 
     def _compose(self, frame):
