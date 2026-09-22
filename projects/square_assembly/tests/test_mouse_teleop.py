@@ -77,15 +77,15 @@ def test_wheel_turns_yaw_target_about_world_z():
     assert c.action(_state())[5] == pytest.approx(-np.deg2rad(10.0) / 0.5)
 
 
-def test_gripper_ramps_with_button():
-    c = MouseTeleopController(grip_rate=0.5)
+def test_gripper_follows_the_button_immediately():
+    """robosuite가 부호만 보고 스스로 램프한다 — 여기서 램프하면 부호가 바뀔 때까지 0.5초 늦기만 한다."""
+    c = MouseTeleopController()
     c.take_over(_state())
     assert c.grip_cmd == -1.0
     c.grip_pressed = True
-    assert [c.action(_state())[6] for _ in range(3)] == [-0.5, 0.0, 0.5]
-    assert c.action(_state())[6] == 1.0 and c.action(_state())[6] == 1.0  # 클램프
+    assert c.action(_state())[6] == 1.0
     c.grip_pressed = False
-    assert c.action(_state())[6] == 0.5
+    assert c.action(_state())[6] == -1.0
 
 
 def test_take_over_starts_closed_when_fingers_are_closed():

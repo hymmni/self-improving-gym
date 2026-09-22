@@ -315,8 +315,7 @@ def main():
     ap.add_argument("--kd", type=float, default=0.0, help="[mouse] xy D 게인")
     ap.add_argument("--pos-cap", type=float, default=0.3, help="[mouse] xy delta 상한(1.0=5cm/step)")
     ap.add_argument("--z-speed", type=float, default=0.2, help="[mouse] Space/Shift z 속도(0.2=1cm/step)")
-    ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
-    ap.add_argument("--grip-rate", type=float, default=0.1, help="[mouse] 스텝당 그리퍼 명령 변화")
+    ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸·a/d 한 번당 야우(도)")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
                     help=f"화면 표시용 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY})")
@@ -325,7 +324,7 @@ def main():
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
         mode=args.mode, teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, z_speed=args.z_speed,
-                                    yaw_step=np.deg2rad(args.yaw_step), grip_rate=args.grip_rate))
+                                    yaw_step=np.deg2rad(args.yaw_step)))
 
 
 if __name__ == "__main__":

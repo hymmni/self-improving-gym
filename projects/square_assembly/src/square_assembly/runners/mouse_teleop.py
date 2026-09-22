@@ -18,8 +18,11 @@ pop_rewind()로 돌아갈 스텝만 꺼내 주고, 수집기가 collect_episode�
 사람 제어 중 매 스텝(20Hz)의 7-dim OSC_POSE delta 액션:
 - xy: 맵 위 커서 위치를 목표로 PD  (kp·err − kd·v, pos_cap으로 클립)
 - z: Space/Shift 누른 동안 일정 속도로 ↑/↓ (z_min~z_max에서 멈춤)
-- 회전: 휠 한 칸 = 야우 목표 ±yaw_step. 손목은 항상 수직 아래(오라클과 같은 자세 제어)
-- 그리퍼: 좌클릭 누른 동안 +1(닫힘) 쪽으로, 뗀 동안 −1(열림) 쪽으로 grip_rate씩 램프
+- 회전: 휠 한 칸 또는 a/d = 야우 목표 ±yaw_step. 손목은 항상 수직 아래(오라클과 같은 자세 제어)
+- 그리퍼: 좌클릭 누른 동안 +1(닫힘), 뗀 동안 −1(열림). 일정 속도로 여닫는 램프는 robosuite
+  PandaGripper가 이미 한다(부호만 보고 내부 명령을 옮긴다). 예전엔 여기서도 스텝당 0.1씩 램프를
+  걸었는데, 부호가 뒤집히는 10스텝(0.5초) 동안 손가락이 전혀 안 움직여 반응만 늦었다(2026-09-22
+  실측: 누른 뒤 움직이기 시작 0.55초 → 0.05초). PH 시연의 그리퍼 액션도 ±1뿐이다.
 
 맵은 카메라 영상이 아니라 sim 좌표(특권 정보, 표시 전용)로 직접 그린다 — 픽셀↔월드가
 선형이라 캘리브레이션 없이 커서를 곧바로 목표 좌표로 쓴다. 화면 방향은 agentview와
@@ -59,14 +62,13 @@ class MouseTeleopController:
         z_min, z_max: 그리퍼 site z 허용 범위(m). 테이블 윗면 0.82, peg 윗면 0.95.
         yaw_step: 휠 한 칸당 야우 목표 변화(rad).
         rot_cap: 회전 delta 액션 상한.
-        grip_rate: 스텝당 그리퍼 명령 변화량(0.1 == 20스텝=1초에 완전 개폐).
     """
 
     def __init__(self, kp=1.0, kd=0.0, pos_cap=0.3, z_speed=0.2, z_min=0.83, z_max=1.10,
-                 yaw_step=np.deg2rad(5.0), rot_cap=0.4, grip_rate=0.1):
+                 yaw_step=np.deg2rad(5.0), rot_cap=0.4):
         self.kp, self.kd, self.pos_cap = kp, kd, pos_cap
         self.z_speed, self.z_min, self.z_max = z_speed, z_min, z_max
-        self.yaw_step, self.rot_cap, self.grip_rate = yaw_step, rot_cap, grip_rate
+        self.yaw_step, self.rot_cap = yaw_step, rot_cap
         self.reset()
 
     def reset(self):
@@ -113,8 +115,7 @@ class MouseTeleopController:
         yaw = self.target_yaw if self.target_yaw is not None else yaw_of(R)
         a[3:6], _ = rot_delta_toward(R, yaw, self.rot_cap)
 
-        self.grip_cmd = float(np.clip(
-            self.grip_cmd + self.grip_rate * (1.0 if self.grip_pressed else -1.0), -1.0, 1.0))
+        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
         a[6] = self.grip_cmd
         return a
 
