@@ -5,7 +5,7 @@
 뒤 다시 잡으면 개입이 여러 번 기록된다). `s`는 일시정지(sim·기록 모두 멈추고 창만 살아
 있음), `q`는 에피소드 포기.
 
-`b`는 back_steps(기본 40 = 2초)만큼 되감기(연타하면 누적), `r`은 에피소드 시작점으로 되감기 —
+`b`는 back_steps(기본 20 = 1초)만큼 되감기(연타하면 누적), `r`은 에피소드 시작점으로 되감기 —
 같은 너트 배치로 다시 한다. 둘 다 누르면 일시정지로 멈춰 어디로 돌아왔는지 보여준다. 되감기
 자체(sim 복원, 기록 자르기)는 여기서 안 한다 — pop_rewind()로 요청만 꺼내 주고, 수집기가
 collect_episode의 pre_step_fn에서 처리한다. 버리지 않고 되돌리는 이유: robosuite는 reset마다
@@ -77,6 +77,9 @@ class MouseTeleopController:
         self.target_yaw = yaw_of(state["R"])
         self._prev_xy = state["grip"][:2].copy()
         self.grip_cmd = 1.0 if (finger_gap is not None and finger_gap < _GAP_CLOSED) else -1.0
+        # 버튼 상태도 손가락에 맞춰 둔다 — 아니면 쥔 채 넘겨받았는데(h, 되감기) 버튼을 안 누르고
+        # 있으면 다음 스텝부터 열려 너트를 떨어뜨린다. 이후엔 실제 클릭(누름/뗌)만 바꾼다.
+        self.grip_pressed = self.grip_cmd > 0
 
     _HOLD = 0.6  # 키 반복 시작 지연(보통 0.5초)보다 길어야 첫 반복 전에 끊기지 않는다
 
@@ -158,12 +161,12 @@ class MouseTeleopIntervention:
         state_fn: 테스트용 — sim 상태 dict를 돌려주는 함수(None이면 read_privileged_state).
     """
 
-    _HELP = ("[h]=human [p]=policy [s]=pause [b]=back 2s [r]=restart [q]=give up  "
+    _HELP = ("[h]=human [p]=policy [s]=pause [b]=back 1s [r]=restart [q]=give up  "
              "Space/Shift=z  wheel or a/d=yaw  LMB=grip")
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
                  takeover_key="h", handback_key="p", pause_key="s", quit_key="q",
-                 back_key="b", restart_key="r", back_steps=40, state_fn=None):
+                 back_key="b", restart_key="r", back_steps=20, state_fn=None):
         self.raw = getattr(env, "env", env)
         self.controller = controller or MouseTeleopController()
         table = getattr(self.raw, "table_offset", None)
@@ -186,6 +189,7 @@ class MouseTeleopIntervention:
         self._paused = False
         self._quit_requested = False
         self._back, self._restart, self._resync = 0, False, False
+        self._rewound = None       # (되감기 전 스텝, 돌아간 스텝) — 멈춘 화면에 띄운다
         self.num_triggers = 0
         self.controller.reset()
 
@@ -199,6 +203,7 @@ class MouseTeleopIntervention:
         t = 0 if self._restart else max(0, step - self._back)
         self._back, self._restart = 0, False
         self._resync = True
+        self._rewound = (step, t)
         return t
 
     def __call__(self, step, obs_raw):
@@ -226,6 +231,8 @@ class MouseTeleopIntervention:
             self._active = False
         elif what == "pause":
             self._paused = not self._paused
+            if not self._paused:
+                self._rewound = None
         elif what == "quit":
             self._quit_requested = True
         elif what == "back":
@@ -325,6 +332,10 @@ class MouseTeleopIntervention:
         mode = "PAUSED" if self._paused else ("HUMAN" if self._active else "policy")
         color = (0, 200, 255) if self._paused else ((0, 0, 255) if self._active else (0, 200, 0))
         cv2.putText(canvas, mode, (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        if self._paused and self._rewound is not None:
+            src, dst = self._rewound
+            cv2.putText(canvas, f"<< step {src} -> {dst}  [s]=resume",
+                        (120, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
         cv2.putText(canvas, self._HELP, (8, canvas.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                     (255, 255, 255), 1)
         return canvas

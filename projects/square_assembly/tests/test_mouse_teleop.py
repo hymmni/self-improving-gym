@@ -98,6 +98,17 @@ def test_take_over_starts_closed_when_fingers_are_closed():
     assert c.grip_cmd == -1.0
 
 
+def test_take_over_keeps_a_held_nut_until_the_button_changes():
+    """쥔 채로 넘겨받으면(h, 또는 되감기 후) 버튼을 안 누르고 있어도 계속 쥔다 — 예전엔 다음
+    스텝부터 열리는 쪽으로 램프해 1초 안에 너트를 떨어뜨렸다."""
+    c = MouseTeleopController()
+    c.take_over(_state(), finger_gap=0.02)
+    for _ in range(30):
+        assert c.action(_state())[6] == 1.0
+    c.grip_pressed = False  # 실제로 버튼을 뗀 이벤트(LBUTTONUP)가 와야 연다
+    assert c.action(_state())[6] < 1.0
+
+
 def test_map_roundtrip_and_orientation():
     m = TopDownMap((0.0, 0.0), 0.8, 480)
     assert m.to_px((0.0, 0.0)) == (240, 240)
@@ -166,6 +177,9 @@ def test_back_accumulates_pauses_and_clamps_at_zero():
     interv._handle_key(ord("b"))
     assert interv._paused                  # 되감으면 멈춰서 어디로 왔는지 보여준다
     assert interv.pop_rewind(100) == 20    # 두 번 = 80스텝 뒤로
+    assert interv._rewound == (100, 20)    # 멈춘 화면에 "어디서 어디로" 띄울 정보
+    interv._handle_key(ord("s"))
+    assert interv._rewound is None         # 재개하면 지운다
     assert interv.pop_rewind(100) is None  # 꺼내면 비워진다
     interv._handle_key(ord("b"))
     assert interv.pop_rewind(15) == 0      # 시작보다 앞으로는 못 간다
@@ -188,6 +202,10 @@ def test_rewind_resyncs_the_controller_to_the_restored_pose():
     interv._handle_key(ord("b"))
     interv.pop_rewind(50)
     np.testing.assert_allclose(interv(10, {})[:2], 0.0)  # 커서가 다시 움직일 때까지 제자리
+
+
+def test_back_is_one_second_by_default():
+    assert _make().back_steps == 20  # 20Hz 제어
 
 
 def test_reset_clears_pending_rewind():
