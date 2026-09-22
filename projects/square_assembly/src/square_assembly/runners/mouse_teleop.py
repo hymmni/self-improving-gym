@@ -370,19 +370,14 @@ class MouseTeleopIntervention:
                       (80, 160, 255), 2)
         cv2.line(img, m.to_px(s["nut"]), m.to_px(s["handle"]), (80, 160, 255), 4)
 
-        # 그리퍼: 중심 십자 + 손가락 두 개(손가락 축 = R의 x열, 간격 = 실제 열림)
-        gap = self._finger_gap() or 0.08
-        u = s["R"][:2, 0]
-        u = u / (np.linalg.norm(u) + 1e-9)
-        n = np.array([-u[1], u[0]])
+        # 그리퍼: 실제(굵게, 간격 = 실제 열림)와 사람 제어 중엔 명령 목표(흰 선). 목표는 커서·휠·클릭을
+        # 그 자리에서 바로 따라가고 실제 그리퍼는 PD·OSC로 뒤따라온다 — 둘을 겹쳐 봐야 조종감이 맞는다.
         col = (0, 0, 255) if self._active else (0, 220, 0)
-        gx, gy = m.to_px(s["grip"])
-        cv2.drawMarker(img, (gx, gy), col, cv2.MARKER_CROSS, 14, 1)
-        for sign in (1, -1):
-            tip = s["grip"][:2] + sign * (gap / 2) * u
-            cv2.line(img, m.to_px(tip - 0.01 * n), m.to_px(tip + 0.01 * n), col, 3)
-        if c.target_xy is not None and self._active:
-            cv2.circle(img, m.to_px(c.target_xy), 6, (255, 255, 255), 1)
+        self._draw_gripper(img, s["grip"][:2], yaw_of(s["R"]), self._finger_gap() or 0.08, col, 3)
+        if self._active:
+            self._draw_gripper(img, c.target_xy if c.target_xy is not None else s["grip"][:2],
+                               c.target_yaw if c.target_yaw is not None else yaw_of(s["R"]),
+                               0.02 if c.grip_cmd > 0 else 0.08, (255, 255, 255), 2)
 
         # z 바(오른쪽 가장자리): z_min~z_max, 눈금 = 테이블 윗면/peg 윗면, 마커 = 현재 z
         x0, top, bot = S - 18, 40, S - 40
@@ -391,10 +386,26 @@ class MouseTeleopIntervention:
             return int(bot - (np.clip(z, c.z_min, c.z_max) - c.z_min) / (c.z_max - c.z_min) * (bot - top))
         for z_ref in (0.95,):
             cv2.line(img, (x0 - 4, z_to_py(z_ref)), (x0 + 12, z_to_py(z_ref)), (200, 200, 60), 1)
-        cv2.rectangle(img, (x0 - 2, z_to_py(s["grip"][2]) - 3), (x0 + 10, z_to_py(s["grip"][2]) + 3), col, -1)
+        zy = z_to_py(s["grip"][2])
+        cv2.rectangle(img, (x0 - 2, zy - 3), (x0 + 10, zy + 3), col, -1)
+        dz = float(c.z_up) - float(c.z_down)
+        if self._active and dz:  # z는 목표 위치가 아니라 속도 명령이라, 누르고 있는 방향을 화살표로
+            cv2.arrowedLine(img, (x0 - 10, zy), (x0 - 10, zy - int(24 * dz)), (255, 255, 255), 2, tipLength=0.4)
         cv2.putText(img, f"z {s['grip'][2]:.3f}  yaw {np.degrees(yaw_of(s['R'])):+.0f}  grip {c.grip_cmd:+.1f}",
                     (8, S - 28), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
         return img
+
+    def _draw_gripper(self, img, xy, yaw, gap, col, thickness):
+        """중심 십자 + 손가락 두 개(손가락 축 = yaw 방향, 간격 gap m)."""
+        import cv2
+
+        m = self.map
+        u = np.array([np.cos(yaw), np.sin(yaw)])
+        n = np.array([-u[1], u[0]])
+        cv2.drawMarker(img, m.to_px(xy), col, cv2.MARKER_CROSS, 14, 1)
+        for sign in (1, -1):
+            tip = np.asarray(xy)[:2] + sign * (gap / 2) * u
+            cv2.line(img, m.to_px(tip - 0.01 * n), m.to_px(tip + 0.01 * n), col, thickness)
 
     def close(self):
         if self._root is not None:
