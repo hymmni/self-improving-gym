@@ -1,4 +1,4 @@
-"""마우스 텔레옵 제어 법칙 + 키 상태 머신 검증. cv2/pynput/robosuite 없이 돈다.
+"""마우스 텔레옵 제어 법칙 + 키 상태 머신 검증. 창(Tk)/robosuite 없이 돈다.
 
 실제 조작감(게인·속도)은 서버에서 창을 띄워 손으로 맞추는 것이라 여기서는 "입력이 액션의
 어느 성분을 어느 방향으로 움직이는가"와 상한/클램프/초기화만 본다.
@@ -55,15 +55,13 @@ def test_take_over_holds_position_until_cursor_moves():
 def test_z_keys_and_limits():
     c = MouseTeleopController(z_speed=0.2, z_min=0.83, z_max=1.10)
     c.take_over(_state())
-    c.hold_z(up=True)
+    c.z_up = True
     assert c.action(_state(z=1.0))[2] == pytest.approx(0.2)
     assert c.action(_state(z=1.10))[2] == 0.0  # 상한에서 멈춤
-    c.release_z(up=True); c.hold_z(down=True)
+    c.z_up, c.z_down = False, True
     assert c.action(_state(z=1.0))[2] == pytest.approx(-0.2)
     assert c.action(_state(z=0.83))[2] == 0.0
-    c.hold_z(up=True)  # 둘 다 누르면 정지
-    assert c.action(_state(z=1.0))[2] == 0.0
-    c.z_up_until = c.z_down_until = 0.0  # 뗌 이벤트가 안 와도 만료되면 멈춘다
+    c.z_up = True  # 둘 다 누르면 정지
     assert c.action(_state(z=1.0))[2] == 0.0
 
 
@@ -99,13 +97,13 @@ def test_take_over_starts_closed_when_fingers_are_closed():
 
 
 def test_take_over_keeps_a_held_nut_until_the_button_changes():
-    """쥔 채로 넘겨받으면(h, 또는 되감기 후) 버튼을 안 누르고 있어도 계속 쥔다 — 예전엔 다음
+    """쥔 채로 넘겨받으면(Tab, 또는 되감기 후) 버튼을 안 누르고 있어도 계속 쥔다 — 예전엔 다음
     스텝부터 열리는 쪽으로 램프해 1초 안에 너트를 떨어뜨렸다."""
     c = MouseTeleopController()
     c.take_over(_state(), finger_gap=0.02)
     for _ in range(30):
         assert c.action(_state())[6] == 1.0
-    c.grip_pressed = False  # 실제로 버튼을 뗀 이벤트(LBUTTONUP)가 와야 연다
+    c.grip_pressed = False  # 실제로 버튼을 뗀 이벤트(ButtonRelease-1)가 와야 연다
     assert c.action(_state())[6] < 1.0
 
 
@@ -126,80 +124,94 @@ def test_keys_drive_the_state_machine():
     interv = _make()
     obs = {"robot0_gripper_qpos": np.array([0.04, -0.04])}
     assert interv(0, obs) is None
-    interv._handle_key(ord("h"))
+    interv._handle_key("Tab")
     assert interv.num_triggers == 1
     a = interv(1, obs)
     assert a.shape == (7,)
-    interv._handle_key(ord("h"))  # 이미 잡은 상태에서 또 눌러도 카운트 안 됨
-    assert interv.num_triggers == 1
-    interv._handle_key(ord("p"))
+    interv._handle_key("Tab")  # 한 번 더 누르면 정책에 돌려준다
     assert interv(2, obs) is None
-    interv._handle_key(ord("h"))
+    interv._handle_key("Tab")
     assert interv.num_triggers == 2
     assert not interv._paused
-    interv._handle_key(ord("s"))
+    interv._handle_key("s")
     assert interv._paused
-    interv._handle_key(ord("s"))
+    interv._handle_key("s")
     assert not interv._paused
     assert not interv.should_end()
-    interv._handle_key(ord("q"))
+    interv._handle_key("q")
     assert interv.should_end()
 
 
 def test_reset_clears_everything():
     interv = _make()
-    interv._handle_key(ord("h"))
-    interv._handle_key(ord("s"))
-    interv._handle_key(ord("q"))
+    interv._handle_key("Tab")
+    interv._handle_key("s")
+    interv._handle_key("q")
     interv.reset()
     assert interv(0, {}) is None and not interv._paused and not interv.should_end()
     assert interv.num_triggers == 0
 
 
-def test_cv2_key_paths_for_space_and_yaw():
-    """pynput 없이도 space(32)·a/d가 cv2 키 경로로 z-up·야우를 움직인다."""
+def test_space_and_shift_move_z_for_as_long_as_they_are_held():
+    """예전(pynput + 0.6초 유지)엔 꾹 눌러도 처음 0.6초만 움직였다 — 이제 누름~뗌 사이 내내 움직인다."""
     interv = _make()
-    interv._handle_key(ord("h"))
-    interv._handle_key(ord(" "))
-    assert interv(0, {})[2] > 0            # 유효시간 안: z-up
-    interv.controller.z_up_until = 0.0
-    assert interv(1, {})[2] == 0.0
-    interv._handle_key(ord("a"))
-    assert interv(2, {})[5] > 0            # a: +5도 목표 -> z축 양의 회전
-    interv._handle_key(ord("d")); interv._handle_key(ord("d"))
-    assert interv(3, {})[5] < 0
+    interv._on_key("Tab", True)
+    interv._on_key("space", True)
+    assert all(interv(t, {})[2] > 0 for t in range(40))    # 2초(40스텝) 누르고 있어도 계속
+    interv._on_key("space", False)
+    interv._on_key("space", True)                         # X11 키 반복 = 뗌+누름 쌍 — 끊기지 않는다
+    assert interv(40, {})[2] > 0
+    interv._on_key("space", False)
+    assert interv(41, {})[2] == 0.0
+    interv._on_key("Shift_L", True)
+    assert all(interv(t, {})[2] < 0 for t in range(42, 82))  # 수식키는 반복이 없어도 계속
+    interv._on_key("D", True)                             # Shift를 누른 채 d(대문자로 온다)도 먹는다
+    assert interv(82, {})[5] < 0
+    interv._on_key("Shift_L", False)
+    assert interv(83, {})[2] == 0.0
+
+
+def test_a_d_turn_yaw_and_shift_tab_still_toggles():
+    interv = _make()
+    interv._on_key("Tab", True)
+    interv._on_key("a", True)
+    assert interv(0, {})[5] > 0            # a: +5도 목표 -> z축 양의 회전
+    interv._on_key("d", True); interv._on_key("d", True)
+    assert interv(1, {})[5] < 0
+    assert interv._on_key("ISO_Left_Tab", True) == "break"  # Shift+Tab도 전환, Tk 포커스 이동은 막는다
+    assert interv(2, {}) is None
 
 
 def test_back_accumulates_pauses_and_clamps_at_zero():
     interv = MouseTeleopIntervention(env=object(), state_fn=_state, back_steps=40)
     assert interv.pop_rewind(100) is None
-    interv._handle_key(ord("b"))
-    interv._handle_key(ord("b"))
+    interv._handle_key("b")
+    interv._handle_key("b")
     assert interv._paused                  # 되감으면 멈춰서 어디로 왔는지 보여준다
     assert interv.pop_rewind(100) == 20    # 두 번 = 80스텝 뒤로
     assert interv._rewound == (100, 20)    # 멈춘 화면에 "어디서 어디로" 띄울 정보
-    interv._handle_key(ord("s"))
+    interv._handle_key("s")
     assert interv._rewound is None         # 재개하면 지운다
     assert interv.pop_rewind(100) is None  # 꺼내면 비워진다
-    interv._handle_key(ord("b"))
+    interv._handle_key("b")
     assert interv.pop_rewind(15) == 0      # 시작보다 앞으로는 못 간다
 
 
 def test_restart_goes_to_zero_and_beats_back():
     interv = _make()
-    interv._handle_key(ord("b"))
-    interv._handle_key(ord("r"))
-    interv._handle_key(ord("b"))
+    interv._handle_key("b")
+    interv._handle_key("r")
+    interv._handle_key("b")
     assert interv.pop_rewind(300) == 0
 
 
 def test_rewind_resyncs_the_controller_to_the_restored_pose():
     """되감기 전 목표(커서·야우·그리퍼)를 그대로 들고 가면 재개하자마자 팔이 튄다."""
     interv = _make()
-    interv._handle_key(ord("h"))
+    interv._handle_key("Tab")
     interv.controller.set_cursor((0.2, 0.2))
     assert np.abs(interv(0, {})[:2]).max() > 0
-    interv._handle_key(ord("b"))
+    interv._handle_key("b")
     interv.pop_rewind(50)
     np.testing.assert_allclose(interv(10, {})[:2], 0.0)  # 커서가 다시 움직일 때까지 제자리
 
@@ -210,6 +222,46 @@ def test_back_is_one_second_by_default():
 
 def test_reset_clears_pending_rewind():
     interv = _make()
-    interv._handle_key(ord("r"))
+    interv._handle_key("r")
     interv.reset()
     assert interv.pop_rewind(100) is None
+
+
+def _modes(interv, pattern):
+    """pattern(문자열, h=사람 p=정책)대로 스텝을 밟는다 — 스텝마다 모드가 기록된다."""
+    for t, m in enumerate(pattern):
+        if (m == "h") != interv._active:
+            interv._handle_key("Tab")
+        interv(t, {})
+    return len(pattern)
+
+
+def test_left_goes_back_to_where_the_current_mode_started():
+    interv = _make()
+    step = _modes(interv, "p" * 30 + "h" * 12)       # 30에서 개입, 지금 42
+    interv._handle_key("Left")
+    assert interv._paused
+    assert interv.pop_rewind(step) == 30 and interv._active  # 개입 시작점, 사람 모드 그대로
+    interv(30, {})
+    interv._handle_key("Left")                         # 전환점 위에서 또 누르면 그 앞 전환점
+    assert interv.pop_rewind(31) == 30
+    interv._handle_key("Left")
+    assert interv.pop_rewind(30) == 0 and not interv._active  # 정책 구간 시작 — 정책 모드로
+
+
+def test_left_presses_accumulate_across_switches():
+    interv = _make()
+    step = _modes(interv, "p" * 10 + "h" * 5 + "p" * 5 + "h" * 5)
+    interv._handle_key("Left"); interv._handle_key("Left")
+    assert interv.pop_rewind(step) == 15 and not interv._active
+
+
+def test_back_past_the_takeover_hands_control_back_to_the_policy():
+    """개입 시작점 앞으로 되감으면 정책이 다시 몬다 — 개입 시점이 되감기 계산으로 앞당겨지지 않는다."""
+    interv = _make()
+    step = _modes(interv, "p" * 100 + "h" * 10)
+    interv._handle_key("b")
+    assert interv.pop_rewind(step) == 90
+    assert interv(90, {}) is None                      # 90은 원래 정책 스텝
+    interv._handle_key("r")
+    assert interv.pop_rewind(91) == 0 and not interv._active

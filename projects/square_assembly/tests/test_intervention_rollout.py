@@ -34,11 +34,11 @@ class _CounterEnv:
         return {"task": False}
 
 
-def _run(env, **kwargs):
+def _run(env, predict_fn=lambda history: np.zeros((4, 7)), **kwargs):
     return collect_episode(
         env, policy=None, normalizer=None, obs_keys=["x"], obs_horizon=2, action_horizon=4,
         device=None, intervention_fn=lambda step, obs: None,
-        predict_fn=lambda history: np.zeros((4, 7)), print_diagnostics=False, **kwargs,
+        predict_fn=predict_fn, print_diagnostics=False, **kwargs,
     )
 
 
@@ -62,7 +62,8 @@ def test_rewind_truncates_and_continues_from_t():
     def pre_step(step, obs):
         calls.append((step, obs["x"][0]))
         if step == 6 and len(calls) == 7:  # 한 번만 6 -> 2로
-            return 2, env.reset_to(2)
+            env.reset_to(2)
+            return 2
         return None
 
     result = _run(env, max_steps=8, pre_step_fn=pre_step,
@@ -73,13 +74,34 @@ def test_rewind_truncates_and_continues_from_t():
     assert rendered[5:7] == [6, 2]             # 되감은 장면을 한 번 다시 그린다(일시정지 유지용)
 
 
+def test_rewind_resumes_the_chunk_that_was_running_then():
+    """6 -> 2로 되감으면 2·3은 원래 청크 0의 남은 액션, 4부터 새 추론(원래 obs 히스토리로)."""
+    env, seen, done = _CounterEnv(), [], []
+
+    def predict(history):
+        seen.append([o["x"][0] for o in history])
+        return np.full((4, 7), float(len(seen) - 1))
+
+    def pre_step(step, obs):
+        if step == 6 and not done:
+            done.append(step)
+            env.reset_to(2)
+            return 2
+        return None
+
+    result = _run(env, predict_fn=predict, max_steps=8, pre_step_fn=pre_step)
+    assert list(result["actions"][:, 0]) == [0, 0, 0, 0, 2, 2, 2, 2]  # 청크 1(4~5)은 되감기로 버려짐
+    assert seen == [[0, 0], [3, 4], [3, 4]]  # 되감은 뒤 첫 추론도 원래와 같은 히스토리
+
+
 def test_rewind_stops_when_the_redraw_says_stop():
     env, rewound = _CounterEnv(), []
 
     def pre_step(step, obs):
         if step == 3:
             rewound.append(step)
-            return 1, env.reset_to(1)
+            env.reset_to(1)
+            return 1
         return None
 
     result = _run(env, max_steps=10, pre_step_fn=pre_step, render_fn=lambda obs: not rewound)

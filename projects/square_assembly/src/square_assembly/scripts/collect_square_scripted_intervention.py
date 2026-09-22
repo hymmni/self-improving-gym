@@ -25,8 +25,9 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
         --out data/square_scripted_intv_v1.hdf5
 
 창이 뜨면 정책이 자동으로 진행한다. 실패로 보이면 's'를 눌러 오라클에 넘긴다(그 에피소드는
-끝까지 오라클이 잡는다 — 정책에 돌려주지 않는다). 포기하려면 'q'. --mode mouse면 'b'(1초 되감기)
-·'r'(같은 배치로 처음부터)로 되돌릴 수 있다 — 버린 배치는 다시 못 만나므로 q보다 이쪽을 쓴다.
+끝까지 오라클이 잡는다 — 정책에 돌려주지 않는다). 포기하려면 'q'. --mode mouse면 Tab으로 사람/정책을
+오가고, ←(직전 모드 전환점)·'b'(1초)·'r'(같은 배치로 처음부터)로 되감을 수 있다 — 버린 배치는
+다시 못 만나므로 q보다 이쪽을 쓴다.
 
 화면은 --display-size 해상도로 따로 렌더해서 보여준다(학습/저장 데이터는 task의
 image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리). 480을 넘길 순 없다
@@ -128,7 +129,8 @@ def make_recorder(env, interv, obs_keys, rgb_keys):
             state = states_ep[t]
             del obs_ep[t:], states_ep[t:]
             print(f"  << 되감기 step {step} -> {t}", flush=True)
-            return t, env.reset_to({"states": state})
+            env.reset_to({"states": state})
+            return t
         obs_ep.append({k: _to_storage(k, obs_raw[k], rgb_keys) for k in obs_keys})
         states_ep.append(np.asarray(env.env.sim.get_state().flatten()))
         return None
@@ -149,8 +151,9 @@ def _to_storage(key, val, rgb_keys):
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         control_fps, display_size, window_name="rollout", mode="oracle", teleop=None):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
-    # cv2.imshow가 영영 멈춘다.
-    open_window(window_name)
+    # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
+    if mode != "mouse":
+        open_window(window_name)
 
     if display_size > _MAX_DISPLAY:
         raise ValueError(
@@ -306,7 +309,7 @@ def main():
     ap.add_argument("--camera", default="agentview_image")
     ap.add_argument("--mode", choices=["oracle", "mouse"], default="oracle",
                     help="oracle: 트리거 키로 스크립트 오라클에 넘김 / mouse: 사람이 2D 맵 위에서 직접 조종"
-                         "(h=잡기 p=돌려주기 s=일시정지, runners/mouse_teleop.py 참고)")
+                         "(Tab=사람/정책 전환 ←=직전 전환점으로 s=일시정지, runners/mouse_teleop.py 참고)")
     ap.add_argument("--trigger-key", default="s", help="[oracle] 실패 판단 시 오라클에 넘기는 키")
     ap.add_argument("--kp", type=float, default=1.0, help="[mouse] xy P 게인")
     ap.add_argument("--kd", type=float, default=0.0, help="[mouse] xy D 게인")

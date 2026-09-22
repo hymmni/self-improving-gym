@@ -213,10 +213,12 @@ def collect_episode(
     obs가 액션보다 한 칸 앞선다(2026-09-22까지의 수집기가 그랬다). 저장은 pre_step_fn에서 한다.
 
     pre_step_fn(step, obs_raw)는 매 스텝 액션을 고르기 직전, 반환 obs[step]과 같은 시점에
-    불린다. None을 돌려주면 그대로 진행하고, (t, obs_t)를 돌려주면 되감기다 — 호출부가 env를
-    t 시점으로 이미 복원했다는 뜻이고, 여기서는 기록을 t까지 자르고 스텝 번호를 t로 되돌린 뒤
-    render_fn으로 복원된 장면을 한 번 다시 그린다(뷰어가 일시정지 중이면 거기서 멈춘다).
-    그다음 같은 스텝 번호 t로 pre_step_fn이 다시 불린다.
+    불린다. None을 돌려주면 그대로 진행하고, 스텝 번호 t(< step)를 돌려주면 되감기다 — 호출부가
+    env(sim)를 t 시점으로 이미 복원했다는 뜻이고, 여기서는 기록을 t까지 자르고 정책 쪽 상태도
+    t 시점 그대로 되돌린다: 그때 실행 중이던 청크와 그 안의 위치, obs 히스토리(원래 받았던 obs
+    그대로). 그래서 되감은 뒤엔 새로 추론하지 않고 그 청크의 남은 액션부터 이어 쓰고, 청크가
+    끝난 뒤부터 새로 추론한다. 그다음 render_fn으로 복원된 장면을 한 번 다시 그리고(뷰어가
+    일시정지 중이면 거기서 멈춘다) 같은 스텝 번호 t로 pre_step_fn이 다시 불린다.
 
     predict_fn(obs_history) -> (T, Da) ndarray로 청크 예측을 대체할 수 있다(예: robomimic
     체크포인트처럼 자체 정규화·RNN 은닉상태를 갖는 정책 — 이 경우 T=1로 매 스텝 재계획해도
@@ -243,6 +245,7 @@ def collect_episode(
     obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
 
     obs_seq, action_seq, mode_seq = [], [], []
+    ctx_seq = []  # 스텝별 (청크, 청크 위치, obs 히스토리) — 되감기 복원용
     chunk, chunk_ptr = None, 0
     success = False
     step_times_ms, render_times_ms = [], []  # 진단용(2026-07-27) - env.step()/render() 자체가
@@ -263,13 +266,15 @@ def collect_episode(
             if rewound is not None:
                 if async_ctx is not None:
                     raise RuntimeError("async_infer에선 되감기를 못 한다 — obs_provider의 스텝 번호가 어긋난다")
-                step, obs_raw = rewound
-                del obs_seq[step:], action_seq[step:], mode_seq[step:]
-                obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
-                chunk = None
+                step = rewound
+                chunk, chunk_ptr, history = ctx_seq[step]
+                obs_history = deque(history, maxlen=obs_horizon)
+                obs_raw = history[-1]
+                del obs_seq[step:], action_seq[step:], mode_seq[step:], ctx_seq[step:]
                 if render_fn is not None and not render_fn(obs_raw):
                     break
                 continue
+            ctx_seq.append((chunk, chunk_ptr, tuple(obs_history)))
             loop_start = time.time()
 
             intv_action = intervention_fn(step, obs_raw)
