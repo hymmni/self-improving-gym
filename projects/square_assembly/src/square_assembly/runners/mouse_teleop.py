@@ -63,13 +63,16 @@ class MouseTeleopController:
     Args:
         kp, kd: xy PD 게인. err(m)·v(m/step)에 곱해 delta(m)를 만든 뒤 _POS_SCALE로 나눈다.
         pos_cap: xy delta 액션 상한(1.0 == 5cm/step). 오라클(0.5)보다 낮춰야 사람이 따라간다.
-        z_speed: Space/Shift 누른 동안의 z 액션(0.2 == 1cm/step).
+        z_speed: Space/Shift 누른 동안의 z 액션. 액션 1.0이 목표 5cm지만 OSC(kp=150, 임계 감쇠)는 한
+            스텝(50ms)에 그 1/3쯤만 따라가서, 0.6이 실제 약 1cm/step이다. 0.2였을 땐 너트를 들고
+            내려가던 정책을 넘겨받으면 Space를 0.5초 눌러도 −2~+3mm로 거의 안 올라갔다(2026-09-22
+            pororo 실측, 0.6: 0.15초 안에 반등·0.5초에 4~6.5cm·뗀 뒤 5~9mm 더 감).
         z_min, z_max: 그리퍼 site z 허용 범위(m). 테이블 윗면 0.82, peg 윗면 0.95.
         yaw_step: 휠 한 칸당 야우 목표 변화(rad).
         rot_cap: 회전 delta 액션 상한.
     """
 
-    def __init__(self, kp=1.0, kd=0.0, pos_cap=0.3, z_speed=0.2, z_min=0.83, z_max=1.10,
+    def __init__(self, kp=1.0, kd=0.0, pos_cap=0.3, z_speed=0.6, z_min=0.83, z_max=1.10,
                  yaw_step=np.deg2rad(5.0), rot_cap=0.4):
         self.kp, self.kd, self.pos_cap = kp, kd, pos_cap
         self.z_speed, self.z_min, self.z_max = z_speed, z_min, z_max

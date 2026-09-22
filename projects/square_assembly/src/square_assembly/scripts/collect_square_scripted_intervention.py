@@ -317,7 +317,7 @@ def main():
     ap.add_argument("--kp", type=float, default=1.0, help="[mouse] xy P 게인")
     ap.add_argument("--kd", type=float, default=0.0, help="[mouse] xy D 게인")
     ap.add_argument("--pos-cap", type=float, default=0.3, help="[mouse] xy delta 상한(1.0=5cm/step)")
-    ap.add_argument("--z-speed", type=float, default=0.2, help="[mouse] Space/Shift z 속도(0.2=1cm/step)")
+    ap.add_argument("--z-speed", type=float, default=0.6, help="[mouse] Space/Shift z 액션(0.6 ≈ 실제 1cm/step)")
     ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
