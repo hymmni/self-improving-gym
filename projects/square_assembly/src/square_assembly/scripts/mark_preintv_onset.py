@@ -15,15 +15,19 @@ sim 상태(states)로 다시 렌더하므로 84픽셀 obs가 아니라 480 해�
     python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5
     # 찍은 결과 요약만
     python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5 --summary
+    # 찍은 구간을 PREINTV로 바꾼 사본(원본은 그대로) — 학습·평가가 이 구간을 쓰게
+    python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5 \
+        --write-marked data/square_mouse_intv_r0v3.marked.hdf5
 """
 
 import argparse
 import json
 import os
+import shutil
 
 import numpy as np
 
-from square_assembly.datasets.labels import LABEL_INTV
+from square_assembly.datasets.labels import LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
 
 FPS = 20          # 수집 control_fps — 초 단위 환산과 재생 속도
 AFTER = 40        # 인수인계 뒤로 보여줄 프레임(사람이 무엇을 고쳤는지 봐야 무엇이 틀렸는지 안다)
@@ -55,6 +59,37 @@ def summarize(marks, fps=FPS):
                     "lead_sec_p10_25_50_75_90": (pct / fps).round(2).tolist(),
                     "lead_frames_min_max": [int(leads.min()), int(leads.max())]})
     return out
+
+
+def marked_modes(modes, demo_marks):
+    """저장된 PREINTV(인수인계 앞 15프레임 고정)를 지우고 사람이 찍은 [표시, 인수인계)만 PREINTV로.
+
+    멈춤('x', mark=None)은 비워 둔다 — 잘못된 움직임이 아니라 움직임이 없는 경우다.
+    """
+    m = np.where(np.asarray(modes) == LABEL_PREINTV, LABEL_ROLLOUT, modes)
+    for r in demo_marks:
+        if r["mark"] is not None:
+            seg = m[r["mark"]:r["onset"]]
+            seg[seg == LABEL_ROLLOUT] = LABEL_PREINTV
+    return m
+
+
+def write_marked(hdf5, marks, out):
+    """hdf5 사본의 action_mode를 marked_modes로 바꾼다. 안 찍은 인수인계가 있으면 멈춘다."""
+    import h5py
+
+    by_demo = {}
+    for r in marks.values():
+        by_demo.setdefault(r["demo"], []).append(r)
+    shutil.copyfile(hdf5, out)
+    with h5py.File(out, "r+") as f:
+        for n in f["data"]:
+            g = f["data"][n]
+            missing = {o for _, o in takeovers(g["action_mode"][()])} - {r["onset"] for r in by_demo.get(n, [])}
+            if missing:
+                raise SystemExit(f"{n}의 인수인계 {sorted(missing)}를 아직 안 찍었다")
+            g["action_mode"][...] = marked_modes(g["action_mode"][()], by_demo.get(n, []))
+    print(f"{out}: 찍은 구간 {sum(r['mark'] is not None for r in marks.values())}개를 PREINTV로", flush=True)
 
 
 def _load_marks(path):
@@ -262,9 +297,12 @@ def main():
                     default="projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt",
                     help="env 설정을 읽어올 정책 체크포인트(수집 때와 같은 것)")
     ap.add_argument("--summary", action="store_true", help="창 없이 찍은 결과 요약만")
+    ap.add_argument("--write-marked", default=None, help="찍은 구간을 PREINTV로 바꾼 hdf5 사본 경로")
     args = ap.parse_args()
     out = args.out or os.path.splitext(args.hdf5)[0] + ".preintv_marks.json"
-    if args.summary:
+    if args.write_marked:
+        write_marked(args.hdf5, _load_marks(out), args.write_marked)
+    elif args.summary:
         print(json.dumps(summarize(_load_marks(out)), ensure_ascii=False, indent=1))
     else:
         run(args.hdf5, out, args.base_ckpt)

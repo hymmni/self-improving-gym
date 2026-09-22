@@ -15,6 +15,12 @@ preintv
     올린다(후퇴). 'drop'은 라벨을 건드리지 않고 마스크만 돌려주며, 그 프레임을 train에서
     뺄지는 부르는 쪽이 정한다(val에서 빼면 held-out 비교가 깨진다).
 
+    'rise'는 구간 끝(사람이 넘겨받기 직전)에서 라벨이 2w만큼 뚝 떨어진다 — 거의 같은 두
+    이미지(정책의 마지막 프레임, 사람의 첫 프레임)에 라벨이 둘이라 예측기는 평균을 낸다.
+    'anchor'는 인수인계 이후 라벨을 그대로 두고, 구간 안은 인수인계 시점 값까지 1씩 오르게,
+    구간보다 앞은 2w만큼 내린다("그 실수가 없었다면 잘못 가는 w + 되돌리는 w만큼 가까웠다").
+    라벨이 어디서도 끊기지 않는다. 앞쪽이 음수가 되면 0으로 자른다.
+
 preintv_len
     PREINTV 구간 길이를 개입 시작점부터 다시 잰다. 수집 때 저장된 구간은 15프레임(0.75초)
     고정이라(`relabel_preintv`), 더 긴 창을 실험하려면 재수집 없이 여기서 늘린다.
@@ -22,7 +28,7 @@ preintv_len
 
 import numpy as np
 
-PREINTV_MODES = ("none", "drop", "flat", "rise")
+PREINTV_MODES = ("none", "drop", "flat", "rise", "anchor")
 
 
 def build_labels(names, ts, lengths, success, modes=None, fail_bin=None,
@@ -50,8 +56,10 @@ def build_labels(names, ts, lengths, success, modes=None, fail_bin=None,
         raise ValueError("preintv 처리를 쓰려면 action_mode(modes)가 필요하다")
 
     if preintv_len and modes:
-        from square_assembly.datasets.labels import relabel_preintv
-        modes = {n: relabel_preintv(m, int(preintv_len)) for n, m in modes.items()}
+        from square_assembly.datasets.labels import LABEL_PREINTV, LABEL_ROLLOUT, relabel_preintv
+        # 저장된 구간을 먼저 지운다 — 안 지우면 저장본보다 짧은 창(예: 13 < 15)이 줄지 않는다.
+        modes = {n: relabel_preintv(np.where(np.asarray(m) == LABEL_PREINTV, LABEL_ROLLOUT, m),
+                                    int(preintv_len)) for n, m in modes.items()}
 
     remaining = np.array([lengths[n] - 1 - t for n, t in zip(names, ts)], dtype=np.float64)
     mask = _preintv_mask(names, ts, modes)
@@ -63,6 +71,16 @@ def build_labels(names, ts, lengths, success, modes=None, fail_bin=None,
             sel = (names == name) & (ts >= a) & (ts <= b)
             offset = (ts[sel] - a) if preintv == "rise" else 0
             remaining[sel] = base + offset
+
+    if preintv == "anchor":
+        # 뒤에서부터 쌓는다: 평소엔 한 스텝 앞이 1 더 멀고, 구간 안(a..b-1 -> 다음)은 1 더 가깝다.
+        step = {}
+        for name, a, b in _runs(names, ts, modes, success):
+            step.setdefault(name, np.r_[np.ones(lengths[name] - 1), 0.0])[a:b] = -1.0
+        for name, st in step.items():
+            lab = np.maximum(np.cumsum(st[::-1])[::-1], 0.0)
+            sel = names == name
+            remaining[sel] = lab[ts[sel]]
 
     if label_horizon is not None:
         span = np.array([max(lengths[n] - 1, 1) for n in names], dtype=np.float64)

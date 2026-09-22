@@ -77,3 +77,27 @@ def test_preintv_len_extends_the_window_back_from_the_intervention():
     assert list(np.flatnonzero(mask)) == [3, 4, 5, 6]
     assert list(lab[3:7]) == [6, 7, 8, 9]   # 시작점 참값(L-1-3)에서 매 스텝 +1
     assert list(lab[7:]) == [2, 1, 0]       # 개입 구간은 그대로
+
+
+def _build(mode, **kw):
+    from square_assembly.datasets.stg_labels import build_labels
+
+    L = len(mode)
+    return build_labels(names=["d"] * L, ts=np.arange(L), lengths={"d": L}, success={"d": True},
+                        modes={"d": np.array(mode)}, **kw)
+
+
+def test_preintv_len_can_also_shrink_the_stored_window():
+    lab, mask = _build([0] * 5 + [-10] * 2 + [1] * 3, preintv="rise", preintv_len=1)
+    assert list(np.flatnonzero(mask)) == [6]
+
+
+def test_anchor_rises_into_the_takeover_without_a_jump_and_shifts_what_came_before():
+    #                    t: 0  1  2  3  4  5  6 | 7  8  9 | 10 ...19   (창 t=7..9, 인수인계 t=10)
+    mode = [0] * 7 + [-10] * 3 + [1] * 10
+    lab, _ = _build(mode, preintv="anchor")
+    assert list(lab[5:12]) == [10, 9, 8, 9, 10, 9, 8]   # 카운트다운은 14 13 12 11 10 9 8
+    assert list(lab[10:]) == list(range(9, -1, -1))     # 인수인계 이후는 그대로
+    assert np.all(np.abs(np.diff(lab)) == 1)            # 어디서도 끊기지 않는다
+    rise, _ = _build(mode, preintv="rise")
+    assert rise[9] - rise[10] == 5                        # 기존 rise는 인수인계에서 2w+1 급락
