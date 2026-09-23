@@ -432,7 +432,8 @@ def _collect_cached(predictor_path, cache_path, source_hdf5, device, batch_size,
 
     head, ckpt = load_checkpoint(predictor_path, device)
     dataset = DinoFeatureWindows(cache_path, int(ckpt["obs_horizon"]), fail_bin=ckpt.get("fail_bin"),
-                                 label_horizon=ckpt.get("label_horizon"))
+                                 label_horizon=ckpt.get("label_horizon"),
+                                 obs_parts=ckpt.get("obs_parts", "all"))
     dataset.apply_frame_stats(np.asarray(ckpt["frame_mean"], np.float32),
                               np.asarray(ckpt["frame_std"], np.float32))
     train_idx, val_idx, val_demos = dataset.split_indices(val_fraction, split_seed)

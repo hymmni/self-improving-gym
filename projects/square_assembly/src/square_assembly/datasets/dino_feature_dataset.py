@@ -20,6 +20,8 @@ import torch
 
 from square_assembly.datasets.stg_labels import build_labels
 
+OBS_PARTS = {"all": ("feat", "lowdim"), "feat": ("feat",), "lowdim": ("lowdim",)}
+
 
 def episode_split_by_name(demo_names, val_fraction, seed):
     """train_dstg._episode_split과 동일한 val 데모 집합을, 데모 이름만으로 재현한다.
@@ -58,10 +60,13 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         obs_horizon (int): To — 기준선 정책과 같은 값을 써야 한다
             (configs/policy/diffusion_unet.yaml: 2).
         fail_bin (int | None): 실패 데모에 붙일 별도 클래스. 실패 데모가 있는데 None이면 죽는다.
+        obs_parts (str): 캐시의 어느 부분을 입력으로 쓸지 — all(이미지 특징+고유수용) |
+            feat(이미지 특징만) | lowdim(eef pos/quat + gripper qpos 9차원만). 예측기가
+            진행도를 이미지가 아니라 고유수용 감각에서 읽는지 가르기 위한 축이다(2026-09-23).
     """
 
     def __init__(self, cache_path, obs_horizon, fail_bin=None, label_horizon=None,
-                 mode_hdf5=None, preintv="none", preintv_len=None):
+                 mode_hdf5=None, preintv="none", preintv_len=None, obs_parts="all"):
         self.obs_horizon = obs_horizon
         self.fail_bin = fail_bin
         self.label_horizon = label_horizon
@@ -77,7 +82,10 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
                 # 캐스팅으로 바꾼다.
                 feat = np.asarray(g["feat"][:], dtype=np.float32)
                 low = np.asarray(g["lowdim"][:], dtype=np.float32)
-                self.frames[name] = np.concatenate([feat, low], axis=-1)
+                if obs_parts not in OBS_PARTS:
+                    raise ValueError(f"obs_parts는 {sorted(OBS_PARTS)} 중 하나여야 한다: {obs_parts}")
+                self.frames[name] = np.concatenate(
+                    [{"feat": feat, "lowdim": low}[k] for k in OBS_PARTS[obs_parts]], axis=-1)
                 self.lengths[name] = length
                 self.success[name] = bool(g.attrs["is_success"])
                 self.samples += [(name, t) for t in range(length)]

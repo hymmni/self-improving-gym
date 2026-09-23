@@ -192,3 +192,26 @@ def test_checkpoint_roundtrip_preserves_predictions(tmp_path):
     torch.testing.assert_close(loaded(x), expected)
     assert ckpt["cache_meta"]["crop"] == 76
     assert ckpt["num_bins"] == 7
+
+
+@pytest.mark.parametrize("parts,dim", [("all", 6), ("feat", 4), ("lowdim", 2)])
+def test_obs_parts_selects_which_columns_enter_the_window(tmp_path, parts, dim):
+    """obs_parts는 프레임 벡터에서 이미지 특징/고유수용 감각 중 어느 쪽을 쓸지 고른다 —
+    예측기가 진행도를 어디서 읽는지 가르는 실험 축(2026-09-23)."""
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3], feat_dim=4, low_dim=2)
+    ds = DinoFeatureWindows(str(cache), obs_horizon=2, obs_parts=parts)
+
+    assert ds.frame_dim == dim
+    x, _ = ds[2]                      # t=2 -> 윈도우 [frame 1, frame 2]
+    assert x.shape == (2 * dim,)
+    # feat은 +t, lowdim은 -t로 채워져 있어 어느 쪽이 들어왔는지 부호로 구분된다.
+    expected = {"all": [1, -1], "feat": [1, 1], "lowdim": [-1, -1]}[parts]
+    assert [np.sign(x[0].item()), np.sign(x[dim - 1].item())] == expected
+
+
+def test_obs_parts_rejects_unknown_value(tmp_path):
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[2])
+    with pytest.raises(ValueError, match="obs_parts"):
+        DinoFeatureWindows(str(cache), obs_horizon=2, obs_parts="images")

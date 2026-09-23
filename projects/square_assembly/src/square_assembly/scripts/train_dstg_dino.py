@@ -66,7 +66,8 @@ def main(cfg: DictConfig):
                              label_horizon=cfg.get("label_horizon"),
                              mode_hdf5=cfg.get("mode_hdf5"),
                              preintv=cfg.get("preintv", "none"),
-                             preintv_len=cfg.get("preintv_len"))
+                             preintv_len=cfg.get("preintv_len"),
+                             obs_parts=cfg.get("obs_parts", "all"))
     with h5py.File(cfg.cache_path, "r") as f:
         cache_meta = json.loads(f.attrs["meta"])
     logger.info(f"cache={cfg.cache_path} meta={cache_meta}")
@@ -169,6 +170,7 @@ def main(cfg: DictConfig):
         "preintv": cfg.get("preintv", "none"),
         "preintv_weight": cfg.get("preintv_weight"),
         "preintv_len": cfg.get("preintv_len"),
+        "obs_parts": cfg.get("obs_parts", "all"),
         "frame_mean": frame_mean,
         "frame_std": frame_std,
         "cache_path": os.path.abspath(cfg.cache_path),
