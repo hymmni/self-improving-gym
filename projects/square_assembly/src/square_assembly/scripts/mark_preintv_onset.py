@@ -120,8 +120,10 @@ class Replayer:
         self.view = MouseTeleopIntervention(self.env, map_size=size)  # 창은 안 연다 — _draw_map만 빌린다
         self.size = size
 
-    def frames(self, demo, t0, t1):
-        """demo(h5py 그룹)의 [t0, t1] 프레임들. 첫 프레임에서 되돌린 eef가 저장된 obs와 맞는지 확인한다."""
+    def frames(self, demo, t0, t1, with_map=True):
+        """demo(h5py 그룹)의 [t0, t1] 프레임들. 첫 프레임에서 되돌린 eef가 저장된 obs와 맞는지 확인한다.
+
+        with_map=False면 카메라 화면만 돌려준다(render_demo_video처럼 옆에 다른 패널을 붙일 때)."""
         states, acts = demo["states"], demo["actions"]
         eef, grip = demo["obs"]["robot0_eef_pos"], demo["obs"]["robot0_gripper_qpos"]
         out = []
@@ -135,7 +137,7 @@ class Replayer:
             self.view._last_obs = {"robot0_gripper_qpos": grip[t]}
             self.view.controller.grip_cmd = float(acts[t][6])
             cam = self.env.render(mode="rgb_array", height=self.size, width=self.size, camera_name="agentview")
-            out.append(np.concatenate([self.view._draw_map()[:, :, ::-1], cam], axis=1))  # RGB
+            out.append(np.concatenate([self.view._draw_map()[:, :, ::-1], cam], axis=1) if with_map else cam)  # RGB
         return out
 
 

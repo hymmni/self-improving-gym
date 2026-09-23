@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, Dataset
 
+from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
 from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
 from square_assembly.datasets.robomimic_dataset import RobomimicSequenceDataset
 from square_assembly.datasets.stg_labels import build_labels
@@ -36,6 +37,9 @@ from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_co
 from square_assembly.utils.task_utils import task_obs_keys
 
 logger = logging.getLogger(__name__)
+
+MODE_IDS = {"demo": LABEL_DEMO, "rollout": LABEL_ROLLOUT, "intv": LABEL_INTV, "preintv": LABEL_PREINTV}
+
 
 
 class _LabeledWindow(Dataset):
@@ -183,6 +187,14 @@ def main(cfg: DictConfig):
     logger.info(f"dataset len={len(dataset)} num_bins={num_bins} (max observed time-to-success={int(labels.max())})")
 
     train_idx, val_idx, n_train_demos, n_val_demos = _episode_split(dataset, cfg.val_fraction, cfg.split_seed)
+    if cfg.get("train_modes"):
+        # 프레임 종류로 train을 거른다(val은 그대로) — 예: 정책 롤아웃 프레임을 빼고
+        # 사람 시연·개입과 개입 직전만 남기기.
+        keep_ids = {MODE_IDS[m] for m in cfg.train_modes}
+        sample_modes = dataset.get_action_mode_first_frame()
+        before = len(train_idx)
+        train_idx = [i for i in train_idx if sample_modes[i] in keep_ids]
+        logger.info(f"train_modes={list(cfg.train_modes)}: train 샘플 {before} -> {len(train_idx)}")
     if cfg.get("train_sources"):
         # 병합본의 demo attrs["source"](merge_demo_hdf5)로 train만 거른다 — val은 그대로 둬야
         # 서로 다른 데이터로 학습한 arm들이 같은 held-out에서 비교된다.
@@ -249,6 +261,7 @@ def main(cfg: DictConfig):
             "preintv_len": cfg.get("preintv_len"),
             "init_ckpt": cfg.get("init_ckpt"),
             "train_sources": list(cfg.train_sources) if cfg.get("train_sources") else None,
+            "train_modes": list(cfg.train_modes) if cfg.get("train_modes") else None,
             "policy_ckpt": os.path.abspath(cfg.policy_ckpt),
             "obs_keys": obs_keys,
             "head_hidden": list(cfg.head_hidden),

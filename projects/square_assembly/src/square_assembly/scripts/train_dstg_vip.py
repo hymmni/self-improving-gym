@@ -75,6 +75,15 @@ def main(cfg: DictConfig):
     n_val_demos = len(val_demos)
     n_train_demos = len(dataset.frames) - n_val_demos
 
+    if cfg.get("train_modes"):
+        from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
+        keep = {"demo": LABEL_DEMO, "rollout": LABEL_ROLLOUT, "intv": LABEL_INTV, "preintv": LABEL_PREINTV}
+        keep_ids = {keep[m] for m in cfg.train_modes}
+        sample_modes = dataset.sample_modes()
+        before = len(train_idx)
+        train_idx = [i for i in train_idx if sample_modes[i] in keep_ids]
+        logger.info(f"train_modes={list(cfg.train_modes)}: train 샘플 {before} -> {len(train_idx)}")
+
     if cfg.get("preintv") == "drop":
         drop = set(dataset.preintv_indices())
         before = len(train_idx)

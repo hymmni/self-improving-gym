@@ -7,8 +7,8 @@ r"""저장된 hdf5 데모를 mp4로 재생한다 — 오른쪽에 STG 분포·�
 세로축은 **남은 스텝 수**다 — 예측기는 진행률x1000(label_horizon)으로 학습했지만
 표시할 때 (L-1)/1000을 곱해 스텝으로 되돌린다.
 
-주의: 수집 스크립트가 states/model_file을 저장하지 않아(무게 때문) 시뮬레이터 재현이
-불가능하다. 카메라 화면은 저장된 84x84를 보간 확대한 것이고, 없던 디테일이 생기지는 않는다.
+카메라 화면은 기본이 저장된 84x84를 보간 확대한 것이라 없던 디테일이 생기지 않는다. states가
+저장된 수집분(2026-09-21 이후)은 --from-states로 시뮬레이터를 되돌려 요청한 해상도로 다시 렌더한다.
 
     python -m square_assembly.scripts.render_demo_video \
         --hdf5 data/square_demo50_mouse50.hdf5 --demos demo_71 \
@@ -144,12 +144,18 @@ def _overlay_hist(frame, probs_t, vals, geom, mean_val=None, nbars=110, frac=0.4
     return frame
 
 
-def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass, tag, suffix):
+def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass, tag, suffix,
+           from_states=False, base_ckpt=None):
     os.makedirs(out_dir, exist_ok=True)
+    replayer = None
+    if from_states:  # sim을 되돌려 고해상도로 다시 렌더(저장된 84픽셀 대신)
+        from square_assembly.scripts.mark_preintv_onset import Replayer
+        replayer = Replayer(base_ckpt, size=size)
     with h5py.File(hdf5, "r") as f:
         for name in demos:
             g = f["data"][name]
             imgs = np.asarray(g["obs"][cam])
+            big = replayer.frames(g, 0, len(imgs) - 1, with_map=False) if replayer else None
             wrist = np.asarray(g["obs"][wrist_cam]) if wrist_cam in g["obs"] else None
             mode = np.asarray(g["action_mode"])[: len(imgs)]
             n = len(imgs)
@@ -170,7 +176,8 @@ def render(hdf5, demos, traces_dir, out_dir, fps, cam, wrist_cam, size, mass, ta
             out = os.path.join(out_dir, f"{name}{suffix}.mp4")
             with imageio.get_writer(out, fps=fps, macro_block_size=1) as w:
                 for t in range(n):
-                    frame = cv2.resize(imgs[t], (size, size), interpolation=cv2.INTER_LANCZOS4)
+                    frame = (np.ascontiguousarray(big[t]).copy() if big is not None
+                             else cv2.resize(imgs[t], (size, size), interpolation=cv2.INTER_LANCZOS4))
                     if wrist is not None:
                         s = size // 4
                         pip = cv2.resize(wrist[t], (s, s), interpolation=cv2.INTER_LANCZOS4)
@@ -201,6 +208,9 @@ def main():
     ap.add_argument("--mass", type=float, default=0.9, help="절단 분산이 남길 확률 질량")
     ap.add_argument("--tag", default=None, help="패널 제목(예측기 이름 등)")
     ap.add_argument("--suffix", default="", help="출력 파일명 꼬리표")
+    ap.add_argument("--from-states", action="store_true", help="저장된 states로 sim을 되돌려 다시 렌더(고해상도)")
+    ap.add_argument("--base-ckpt", default="projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt",
+                    help="[--from-states] env 설정을 읽어올 정책 체크포인트")
     render(**vars(ap.parse_args()))
 
 

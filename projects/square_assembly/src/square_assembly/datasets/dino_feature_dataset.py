@@ -99,6 +99,11 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         """(N,) int64 — num_bins 결정과 로깅용."""
         return self._labels
 
+    def sample_modes(self):
+        """(N,) int64 — 샘플별 action_mode(mode_hdf5가 없으면 전부 ROLLOUT 취급)."""
+        import numpy as _np
+        return _np.array([self.modes[n][t] if n in self.modes else 0 for n, t in self.samples], dtype=_np.int64)
+
     def preintv_indices(self):
         """PREINTV 프레임의 샘플 인덱스 — preintv='drop'일 때 train에서만 빼기 위함."""
         return np.flatnonzero(self._preintv_mask).tolist()

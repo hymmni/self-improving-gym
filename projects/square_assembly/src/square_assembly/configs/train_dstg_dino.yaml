@@ -14,6 +14,7 @@ preintv: none            # PREINTV 프레임 처리: none(그대로) | drop(trai
                          # flat(구간 내내 같은 라벨 = 진전 0) | rise(스텝마다 +1 = 후퇴) | anchor(끊김 없는 rise, stg_labels.py)
 preintv_weight: 1        # PREINTV 프레임을 train에서 몇 배로 복제할지(1=그대로)
 preintv_len: null        # PREINTV 구간을 개입 시작점부터 몇 프레임으로 다시 잴지(null=저장된 15)
+train_modes: null        # 학습에 쓸 프레임 종류(demo/rollout/intv/preintv). null이면 전부(val은 언제나 전부)
 
 obs_horizon: 2           # configs/policy/diffusion_unet.yaml과 동일
 seed: 1
