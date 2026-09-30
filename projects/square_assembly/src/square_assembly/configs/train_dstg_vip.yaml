@@ -14,9 +14,21 @@ preintv: none            # PREINTV 프레임 처리: none(그대로) | drop(trai
                          # flat(구간 내내 같은 라벨 = 진전 0) | rise(스텝마다 +1 = 후퇴) | anchor(끊김 없는 rise, stg_labels.py)
 preintv_weight: 1        # PREINTV 프레임을 train에서 몇 배로 복제할지(1=그대로)
 preintv_len: null        # PREINTV 구간을 개입 시작점부터 몇 프레임으로 다시 잴지(null=저장된 15)
+gauss_sigma: 0.0         # HL-Gauss width in label units; 0 preserves one-hot CE
+pair_weight: 0.0         # signed anchor-label difference loss; 0 disables pairs
+pair_stride: 8          # endpoints must both belong to retained training frames
+modality_dropout: 0.0   # total probability; half vision-only masking, half lowdim-only masking
 train_modes: null        # 학습에 쓸 프레임 종류(demo/rollout/intv/preintv). null이면 전부(val은 언제나 전부)
+success_tail_only: false # 성공 시연/무개입 rollout 전체, 개입 성공은 마지막 개입 시작 이후만
+record_curves: false     # 성공-tail 실험의 epoch별 train/val MAE/NLL/k8 및 최소 val MAE 모델 저장
+use_wandb: false
+wandb_project: square_assembly
+wandb_entity: null
+wandb_run_name: null
+wandb_group: null
+wandb_mode: online
 
-obs_parts: all           # 입력으로 캐시의 어느 부분을 쓸지: all | feat(이미지만) | lowdim(9차원만)
+obs_parts: all           # all | feat(모든 카메라) | lowdim(9차원) | agentview(main camera만)
 obs_horizon: 2           # configs/policy/diffusion_unet.yaml과 동일
 seed: 1
 device: cuda

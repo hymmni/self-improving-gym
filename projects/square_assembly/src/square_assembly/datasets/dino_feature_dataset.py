@@ -14,13 +14,16 @@ tests/test_dino_stg.py가 손으로 계산한 기대값과 train_dstg._episode_s
 robomimic을 import하지 않는다 — 캐시에 필요한 정보(데모 이름, 길이, 성공 여부)가 전부 있다.
 """
 
+import json
+
 import h5py
 import numpy as np
 import torch
 
 from square_assembly.datasets.stg_labels import build_labels
 
-OBS_PARTS = {"all": ("feat", "lowdim"), "feat": ("feat",), "lowdim": ("lowdim",)}
+OBS_PARTS = {"all": ("feat", "lowdim"), "feat": ("feat",), "lowdim": ("lowdim",),
+             "agentview": ("feat",)}
 
 
 def episode_split_by_name(demo_names, val_fraction, seed):
@@ -37,15 +40,19 @@ def episode_split_by_name(demo_names, val_fraction, seed):
     return {unique[i] for i in perm[:n_val]}
 
 
-def _load_modes(mode_hdf5, frames, lengths):
+def _load_modes(mode_hdf5, frames, lengths, strict=False):
     """원본 hdf5에서 데모별 action_mode를 읽는다 — 캐시엔 없는 정보다."""
     out = {}
     with h5py.File(mode_hdf5, "r") as f:
         for name in frames:
             g = f["data"].get(name)
             if g is None or "action_mode" not in g:
+                if strict:
+                    raise ValueError(f"{name}: missing action_mode")
                 continue
             m = np.asarray(g["action_mode"])
+            if strict and (m.ndim != 1 or len(m) != lengths[name]):
+                raise ValueError(f"{name}: action_mode length/shape does not match cached frames")
             if len(m) < lengths[name]:  # 마지막 프레임 복제로 길이를 맞춘다
                 m = np.concatenate([m, np.repeat(m[-1:], lengths[name] - len(m))])
             out[name] = m[: lengths[name]]
@@ -61,31 +68,47 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
             (configs/policy/diffusion_unet.yaml: 2).
         fail_bin (int | None): 실패 데모에 붙일 별도 클래스. 실패 데모가 있는데 None이면 죽는다.
         obs_parts (str): 캐시의 어느 부분을 입력으로 쓸지 — all(이미지 특징+고유수용) |
-            feat(이미지 특징만) | lowdim(eef pos/quat + gripper qpos 9차원만). 예측기가
+            feat(모든 카메라 특징만) | lowdim(eef pos/quat + gripper qpos 9차원만) |
+            agentview(main camera 특징만; wrist와 lowdim 제외). 예측기가
             진행도를 이미지가 아니라 고유수용 감각에서 읽는지 가르기 위한 축이다(2026-09-23).
     """
 
     def __init__(self, cache_path, obs_horizon, fail_bin=None, label_horizon=None,
-                 mode_hdf5=None, preintv="none", preintv_len=None, obs_parts="all"):
+                 mode_hdf5=None, preintv="none", preintv_len=None, obs_parts="all", strict_modes=False):
         self.obs_horizon = obs_horizon
         self.fail_bin = fail_bin
         self.label_horizon = label_horizon
         self.frames, self.lengths, self.success = {}, {}, {}
         self.samples = []
+        self.history_starts = {}
+        if obs_parts not in OBS_PARTS:
+            raise ValueError(f"obs_parts는 {sorted(OBS_PARTS)} 중 하나여야 한다: {obs_parts}")
 
         with h5py.File(cache_path, "r") as f:
+            if obs_parts == "agentview":
+                cameras = json.loads(f.attrs.get("meta", "{}")).get("rgb_keys")
+                if (not isinstance(cameras, list) or not all(isinstance(k, str) for k in cameras)
+                        or cameras.count("agentview_image") != 1):
+                    raise ValueError("agentview requires rgb_keys containing one agentview_image camera")
+                camera_index = cameras.index("agentview_image")
             for name in sorted(f["data"].keys()):
                 g = f["data"][name]
                 length = int(g.attrs["length"])
                 # ponytail: 캐시 전체를 float32로 메모리에 올린다. 7.5k 프레임(=46MB)엔 과하지 않지만
                 # 19만 프레임(square_scale3_1000)이면 ~1.2GB — 그때 float16 유지 + 배치 단위
                 # 캐스팅으로 바꾼다.
-                feat = np.asarray(g["feat"][:], dtype=np.float32)
-                low = np.asarray(g["lowdim"][:], dtype=np.float32)
-                if obs_parts not in OBS_PARTS:
-                    raise ValueError(f"obs_parts는 {sorted(OBS_PARTS)} 중 하나여야 한다: {obs_parts}")
-                self.frames[name] = np.concatenate(
-                    [{"feat": feat, "lowdim": low}[k] for k in OBS_PARTS[obs_parts]], axis=-1)
+                blocks = []
+                for part in OBS_PARTS[obs_parts]:
+                    columns = slice(None)
+                    if obs_parts == "agentview":
+                        feat = g["feat"]
+                        if (feat.ndim != 2 or feat.shape[1] < len(cameras)
+                                or feat.shape[1] % len(cameras)):
+                            raise ValueError(f"{name}: camera feature width does not match rgb_keys")
+                        width = feat.shape[1] // len(cameras)
+                        columns = slice(camera_index * width, (camera_index + 1) * width)
+                    blocks.append(np.asarray(g[part][:, columns], dtype=np.float32))
+                self.frames[name] = np.concatenate(blocks, axis=-1)
                 self.lengths[name] = length
                 self.success[name] = bool(g.attrs["is_success"])
                 self.samples += [(name, t) for t in range(length)]
@@ -93,7 +116,9 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         if not self.samples:
             raise ValueError(f"{cache_path}에 데모가 없다")
         self.frame_dim = next(iter(self.frames.values())).shape[1]
-        self.modes = _load_modes(mode_hdf5, self.frames, self.lengths) if mode_hdf5 else {}
+        if strict_modes and not mode_hdf5:
+            raise ValueError("strict modes require action_mode source")
+        self.modes = _load_modes(mode_hdf5, self.frames, self.lengths, strict_modes) if mode_hdf5 else {}
         names = [n for n, _ in self.samples]
         ts = [t for _, t in self.samples]
         self._labels, self._preintv_mask = build_labels(
@@ -122,10 +147,40 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         val_idx = [i for i, (n, _) in enumerate(self.samples) if n in val_demos]
         return train_idx, val_idx, val_demos
 
-    def compute_frame_stats(self, indices):
+    def retain_success_tails(self, indices):
+        """Keep successful full demos/rollouts or the tail from the final human onset.
+
+        Only retained training histories are clamped; held-out trajectories stay intact.
+        Original action_mode and labels are never rewritten.
+        """
+        from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
+
+        starts = {}
+        for name in sorted({self.samples[i][0] for i in indices}):
+            if not self.success[name]:
+                continue
+            mode = self.modes.get(name)
+            if mode is None or len(mode) != self.lengths[name] or not np.isin(
+                    mode, [LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT]).all():
+                raise ValueError(f"{name}: complete valid action_mode is required for success tails")
+            human = mode == LABEL_INTV
+            onsets = np.flatnonzero(human & ~np.r_[False, human[:-1]])
+            starts[name] = int(onsets[-1]) if len(onsets) else 0
+        kept = [i for i in indices if self.samples[i][0] in starts
+                and self.samples[i][1] >= starts[self.samples[i][0]]]
+        if not kept:
+            raise ValueError("success-tail selection retained no training samples")
+        self.history_starts = starts
+        return kept
+
+    def compute_frame_stats(self, indices, sample_only=False):
         """주어진 샘플 인덱스가 속한 데모들의 프레임으로 (mean, std)를 낸다 — val 누출 방지."""
-        names = sorted({self.samples[i][0] for i in indices})
-        stacked = np.concatenate([self.frames[n] for n in names], axis=0)
+        if sample_only:
+            stacked = np.stack([self.frames[n][t] for n, t in
+                                (self.samples[i] for i in sorted(set(indices)))])
+        else:
+            names = sorted({self.samples[i][0] for i in indices})
+            stacked = np.concatenate([self.frames[n] for n in names], axis=0)
         mean = stacked.mean(axis=0)
         std = stacked.std(axis=0)
         std[std < 1e-6] = 1.0  # 상수 차원에서 0으로 나누지 않게
@@ -138,6 +193,8 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
     def __getitem__(self, i):
         name, t = self.samples[i]
         length = self.lengths[name]
-        idx = np.clip(np.arange(t - self.obs_horizon + 1, t + 1), 0, length - 1)
+        start = self.history_starts.get(name, 0)
+        lower = start if t >= start else 0
+        idx = np.clip(np.arange(t - self.obs_horizon + 1, t + 1), lower, length - 1)
         x = self.frames[name][idx].reshape(-1)
         return torch.from_numpy(x.copy()), int(self._labels[i])

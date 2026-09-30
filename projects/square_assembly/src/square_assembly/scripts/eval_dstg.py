@@ -72,7 +72,7 @@ def best_f1(score, label):
     return best
 
 
-_STRIDES = (1, 2, 5, 10, 20)
+_STRIDES = (1, 2, 5, 8, 10, 20)
 _SMOOTHS = (1, 5, 10, 20, 40, 80, 160)
 _ALPHAS = (1.0, 0.5, 0.3, 0.2, 0.1, 0.05)
 
@@ -326,7 +326,7 @@ def evaluate(d, nll, label, demo, t, mode):
         "mae": float(np.abs(d_null - label).mean()),
         "by_smooth": {str(w): {str(k): reward_metrics(d_null, label, demo, t, stride=k,
                                                       smooth=w).get("reward_sign_acc")
-                               for k in (1, 20)}
+                               for k in (1, 8, 20)}
                       for w in _SMOOTHS},
         "by_segment": (segment_metrics(d_null, label, demo, t, mode) if mode is not None else {}),
         "spearman": reward_metrics(d_null, label, demo, t).get("spearman"),
@@ -346,7 +346,7 @@ def evaluate(d, nll, label, demo, t, mode):
         out["preintv_auroc"] = auroc(d[pre], d[roll])
         out["preintv_auroc_oracle"] = auroc(label[pre], label[roll])
         out["n_preintv"] = int(pre.sum())
-        out["reward_by_mode"] = {str(k): reward_by_mode(d, label, demo, t, mode, k) for k in (1, 20)}
+        out["reward_by_mode"] = {str(k): reward_by_mode(d, label, demo, t, mode, k) for k in (1, 8, 20)}
         out["by_segment"] = segment_metrics(d, label, demo, t, mode)
     return out
 
@@ -355,6 +355,54 @@ def _ckpt_meta(path):
     """예측기 체크포인트에서 라벨 관련 메타만 꺼낸다(state_dict는 안 건드림)."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     return {k: v for k, v in ckpt.items() if k != "state_dict"}
+
+
+def closed_gripper_metrics(d, label, gripper, threshold=0.002):
+    """Fully closed fingers are a proxy for empty grasp; use unnormalized joint positions.
+
+    This also includes valid empty states before grasping/after placing, so report modes
+    and nonterminal frames separately instead of calling every closed frame a drop.
+    """
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError("closed threshold must be finite and positive")
+    closed = np.max(np.abs(gripper), axis=-1) <= threshold
+    error = np.asarray(d)[closed] - np.asarray(label)[closed]
+    return {"n": int(closed.sum()),
+            "mae_steps": float(np.abs(error).mean()) if len(error) else None,
+            "bias_steps": float(error.mean()) if len(error) else None,
+            "underestimate_fraction": float((error < 0).mean()) if len(error) else None}
+
+
+def step_diagnostics(arrays, source_hdf5, label_horizon, closed_threshold=0.002):
+    """Compare checkpoints in actual step units, keeping the same original countdown target."""
+    import h5py
+
+    d, _, _, demo, t, mode = arrays
+    with h5py.File(source_hdf5, "r") as f:
+        grips = {n: np.asarray(f["data"][n]["obs/robot0_gripper_qpos"]) for n in set(demo)}
+        lengths = {n: len(f["data"][n]["actions"]) for n in set(demo)}
+    for name, length in lengths.items():
+        if len(grips[name]) < length or not np.array_equal(np.sort(t[demo == name]), np.arange(length)):
+            raise ValueError(f"{name}: source actions and evaluated frames are misaligned")
+    spans = np.array([lengths[n] - 1 for n in demo], float)
+    raw_label = spans - t
+    d_steps = d * spans / label_horizon if label_horizon is not None else d
+    gripper = np.array([grips[n][ti] for n, ti in zip(demo, t)])
+    out = {"mae_steps": float(np.abs(d_steps - raw_label).mean()),
+           "reward_k8": reward_metrics(d_steps, raw_label, demo, t, stride=8),
+           "closed_threshold": closed_threshold,
+           "closed_gripper": closed_gripper_metrics(d_steps, raw_label, gripper, closed_threshold)}
+    nonterminal = raw_label > 8
+    out["closed_nonterminal"] = closed_gripper_metrics(
+        d_steps[nonterminal], raw_label[nonterminal], gripper[nonterminal], closed_threshold)
+    if mode is not None:
+        from square_assembly.datasets.labels import LABEL_PREINTV, LABEL_ROLLOUT, LABEL_INTV
+        out["closed_by_mode"] = {}
+        for name, value in [("preintv", LABEL_PREINTV), ("rollout", LABEL_ROLLOUT), ("intv", LABEL_INTV)]:
+            m = mode == value
+            out["closed_by_mode"][name] = closed_gripper_metrics(
+                d_steps[m], raw_label[m], gripper[m], closed_threshold)
+    return out
 
 
 def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fraction, split_seed,
@@ -477,6 +525,8 @@ def main():
     ap.add_argument("--split-seed", type=int, default=0, help="학습 때와 같은 값이어야 held-out이다")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--closed-threshold", type=float, default=0.002,
+                    help="fully closed finger threshold in raw joint units (empty-grasp proxy)")
     ap.add_argument("--out", default=None, help="지표를 JSON으로 저장할 경로")
     ap.add_argument("--by-source", action="store_true",
                     help="[--hdf5일 때] held-out을 병합 출처(demo attrs['source'])별로도 나눠 잰다 — 망각/적응 구분")
@@ -494,6 +544,10 @@ def main():
                                  args.batch_size, args.val_fraction, args.split_seed)
 
     metrics = evaluate(*arrays)
+    source_hdf5 = args.hdf5 or args.source_hdf5
+    if source_hdf5:
+        metrics["step_units"] = step_diagnostics(
+            arrays, source_hdf5, _ckpt_meta(args.predictor).get("label_horizon"), args.closed_threshold)
     if args.by_source and args.hdf5:
         import os
 

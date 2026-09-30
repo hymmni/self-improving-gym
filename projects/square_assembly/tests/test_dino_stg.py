@@ -215,3 +215,97 @@ def test_obs_parts_rejects_unknown_value(tmp_path):
     _write_fake_cache(cache, lengths=[2])
     with pytest.raises(ValueError, match="obs_parts"):
         DinoFeatureWindows(str(cache), obs_horizon=2, obs_parts="images")
+
+
+def test_success_tail_selection_uses_last_onset_and_excludes_prefix_from_inputs_and_stats(tmp_path):
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[8, 4, 4, 4], success=[True, True, True, False])
+    with h5py.File(source, "w") as f:
+        for name, modes in {"demo_0": [0, 1, 1, 0, 0, 1, 1, 0],
+                            "demo_1": [-1] * 4, "demo_2": [0] * 4,
+                            "demo_3": [0] * 4}.items():
+            f.create_dataset(f"data/{name}/action_mode", data=modes)
+    ds = DinoFeatureWindows(cache, 2, fail_bin=99, mode_hdf5=source)
+    # Last onset is frame 5, not last human frame 6; final policy frame 7 stays.
+    kept = ds.retain_success_tails(list(range(20)))
+    assert kept == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    assert len(ds) == 20  # Excluded prefixes remain available for evaluation.
+    np.testing.assert_array_equal(ds.labels()[kept], [2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0])
+    np.testing.assert_array_equal(ds[5][0].numpy(), [5] * 4 + [-5] * 2 + [5] * 4 + [-5] * 2)
+    np.testing.assert_array_equal(ds[4][0].numpy(), [3] * 4 + [-3] * 2 + [4] * 4 + [-4] * 2)
+    mean, std = ds.compute_frame_stats(kept + [5], sample_only=True)
+    # Three tail frames (5,6,7), four demo (1000..1003), four rollout (2000..2003).
+    expected = 12030 / 11
+    np.testing.assert_allclose(mean, [expected] * 4 + [-expected] * 2)
+    assert np.isfinite(std).all() and (std > 0).all()
+
+
+def test_success_tail_selection_does_not_clamp_heldout_history(tmp_path):
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[4, 4])
+    with h5py.File(source, "w") as f:
+        for name in ("demo_0", "demo_1"):
+            f.create_dataset(f"data/{name}/action_mode", data=[0, 0, 1, 1])
+    ds = DinoFeatureWindows(cache, 2, mode_hdf5=source)
+    assert ds.retain_success_tails([0, 1, 2, 3]) == [2, 3]
+    assert ds[2][0][0].item() == 2  # Train start pads within the tail.
+    assert ds[6][0][0].item() == 1001  # Held-out start still sees its real history.
+
+
+def test_success_tail_selection_requires_complete_mode_metadata(tmp_path):
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[4])
+    ds = DinoFeatureWindows(cache, 2)
+    with pytest.raises(ValueError, match="action_mode"):
+        ds.retain_success_tails([0, 1, 2, 3])
+
+
+@pytest.mark.parametrize("modes", [[0, 0], [0, 0, 1, 1, 0]])
+def test_strict_modes_rejects_source_length_mismatch_before_padding(tmp_path, modes):
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[4])
+    with h5py.File(source, "w") as f:
+        f.create_dataset("data/demo_0/action_mode", data=modes)
+    with pytest.raises(ValueError, match="action_mode"):
+        DinoFeatureWindows(cache, 2, mode_hdf5=source, strict_modes=True)
+
+
+def test_agentview_selects_named_camera_and_ignores_other_inputs(tmp_path):
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3])
+    with h5py.File(cache, "r+") as f:
+        # Camera order deliberately differs from the real VIP cache.
+        f.attrs["meta"] = json.dumps({"rgb_keys": ["robot0_eye_in_hand_image", "agentview_image"]})
+        f["data/demo_0/feat"][:] = [[90, 91, 10, 11], [92, 93, 20, 21], [94, 95, 30, 31]]
+    before = DinoFeatureWindows(cache, 2, obs_parts="agentview")
+    assert before.frame_dim == 2
+    np.testing.assert_array_equal(before[2][0].numpy(), [20, 21, 30, 31])
+    np.testing.assert_array_equal(before[0][0].numpy(), [10, 11, 10, 11])
+    mean, std = before.compute_frame_stats([0, 1, 2])
+    np.testing.assert_array_equal(mean, [20, 21])
+    with h5py.File(cache, "r+") as f:
+        f["data/demo_0/feat"][:, :2] = np.nan
+        del f["data/demo_0/lowdim"]  # Proprioception must not even be read.
+    after = DinoFeatureWindows(cache, 2, obs_parts="agentview")
+    for i in range(3):
+        torch.testing.assert_close(after[i][0], before[i][0])
+        assert after[i][1] == before[i][1]
+    mean_after, std_after = after.compute_frame_stats([0, 1, 2])
+    np.testing.assert_array_equal(mean_after, mean)
+    np.testing.assert_array_equal(std_after, std)
+
+
+@pytest.mark.parametrize("keys,width", [([], 4), (["wrist"], 4),
+                                      (["agentview_image", "agentview_image"], 4),
+                                      (["agentview_image", "wrist"], 3)])
+def test_agentview_rejects_missing_ambiguous_or_misaligned_camera_metadata(tmp_path, keys, width):
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3], feat_dim=width)
+    with h5py.File(cache, "r+") as f:
+        f.attrs["meta"] = json.dumps({"rgb_keys": keys})
+    with pytest.raises(ValueError, match="camera|rgb_keys"):
+        DinoFeatureWindows(cache, 2, obs_parts="agentview")
