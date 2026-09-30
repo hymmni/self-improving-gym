@@ -203,8 +203,16 @@ def _to_storage(key, val, rgb_keys):
     return val
 
 
+def sampler_label(policy):
+    """정책 추론 샘플러 이름(에피소드 attrs["sampler"]) — 예: "DDPM100", "DDIM10 eta=1"."""
+    name = type(policy.inference_scheduler).__name__.removesuffix("Scheduler")
+    eta = getattr(policy, "inference_step_kwargs", {}).get("eta")
+    return f"{name}{policy.num_inference_steps}" + ("" if eta is None else f" eta={eta:g}")
+
+
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
-        control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False):
+        control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False,
+        ddim_steps=10, ddim_eta=1.0):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
     if mode != "mouse":
@@ -219,6 +227,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
     from square_assembly.factory import registry
     from square_assembly.runners.intervention_rollout import _predict_chunk, collect_episode
+    from square_assembly.runners.rollout import maybe_speed_up_inference
     from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_config
     from square_assembly.utils.task_utils import is_image_task, make_eval_env, task_obs_keys
 
@@ -230,6 +239,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     policy = registry.create_policy(policy_name, task_cfg, policy_cfg).to(device)
     load_epoch_checkpoint(base_ckpt, policy, device)
     policy.eval()
+    maybe_speed_up_inference(policy, ddim_steps or None, eta=ddim_eta)
+    sampler = sampler_label(policy)
 
     stats_path = os.path.join(os.path.dirname(base_ckpt), "normalization_stats.json")
     normalizer = MinMaxNormalizer(load_stats(stats_path))
@@ -272,6 +283,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             ep = outcomes["success"] + outcomes["fail"]
             if ep:
                 print(f"이어서 수집: 기존 성공 {outcomes['success']} / 실패 {outcomes['fail']} -> 목표 성공 {episodes}", flush=True)
+                old = {str(g.attrs.get("sampler", "기록 없음(DDPM100 추정)")) for g in data_grp.values()}
+                if old != {sampler}:
+                    print(f"  !! 기존 에피소드 샘플러 {sorted(old)} ≠ 이번 {sampler} — 섞지 않으려면 --out을 새로", flush=True)
             # episodes = 저장할 *성공* 에피소드 수. 실패도 저장은 되지만(is_success=False, 병합에서 제외)
             # 개수에는 안 센다 — 라운드마다 "성공 N개"를 맞추려는 것이지 시도 횟수가 아니다.
             # ←← + Enter로 다시 모으기: 이번 실행에서 바로 전에 저장한 에피소드와, 지운 뒤 다시 시작할 상태
@@ -318,6 +332,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 is_success = bool(result["success"])
                 demo_grp = data_grp.create_group(f"demo_{outcomes['success']}" if is_success else f"fail_{outcomes['fail']}")
                 demo_grp.attrs["num_samples"] = T
+                demo_grp.attrs["sampler"] = sampler
                 demo_grp.create_dataset("actions", data=actions)
                 demo_grp.create_dataset("action_mode", data=result["action_modes"])
                 demo_grp.create_dataset("states", data=np.stack(states_ep))
@@ -381,6 +396,11 @@ def main():
     ap.add_argument("--z-down", type=float, default=7.0, help="[mouse] Shift 내림 속도(cm/s, PH 시연 중앙값)")
     ap.add_argument("--z-up", type=float, default=18.0, help="[mouse] Ctrl 올림 속도(cm/s, 가속 뒤, PH 시연)")
     ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
+    ap.add_argument("--ddim-steps", type=int, default=10,
+                    help="정책 추론을 DDIM N스텝으로(0=학습 그대로 DDPM 100). 2026-09-30 50ep 비교에서 성공률·실패 "
+                         "유형 차이 없음, 청크 666→75ms. 에피소드마다 attrs['sampler']에 기록")
+    ap.add_argument("--ddim-eta", type=float, default=1.0,
+                    help="DDIM 단계별 노이즈(1=DDPO가 단계별 확률을 계산할 수 있음, 0=결정적)")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
                     help=f"화면 표시용 카메라 한 장의 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY}). "
@@ -391,7 +411,7 @@ def main():
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
-        mode=args.mode, overwrite=args.overwrite,
+        mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta,
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step)))
 

@@ -112,6 +112,7 @@ class DiffusionPolicyLowDim(nn.Module):
 
         for t in self.inference_scheduler.timesteps:
             noise_pred = self.unet(sample, t, global_cond)
-            sample = self.inference_scheduler.step(noise_pred, t, sample).prev_sample
+            sample = self.inference_scheduler.step(noise_pred, t, sample,
+                                                   **getattr(self, "inference_step_kwargs", {})).prev_sample
 
         return sample
