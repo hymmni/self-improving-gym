@@ -328,3 +328,225 @@ def test_cursor_only_follows_the_mouse_over_the_map():
     assert interv.controller.target_xy is None
     interv._on_motion(480 + 480, 480)  # 맵 한가운데 = 테이블 중심
     np.testing.assert_allclose(interv.controller.target_xy, interv.map.center, atol=1e-3)
+
+
+def _paused_human():
+    interv = MouseTeleopIntervention(env=object(), state_fn=_state)  # 그리퍼 (0, 0), 맵 480px = 0.8m
+    interv._handle_key("Tab")
+    interv._handle_key("s")
+    return interv
+
+
+def _px(interv, xy):
+    x, y = interv.map.to_px(xy)
+    return x + interv._map_x0, y
+
+
+def _x_server(interv):
+    """X 서버 흉내: 옮긴 포인터 자리마다 그 자리 Motion 이벤트를 보낸다."""
+    for w, _ in list(interv._pending):
+        interv._on_motion(*w)
+
+
+def _hold(interv, seconds, dt=0.02):
+    for _ in range(int(round(seconds / dt))):
+        interv._tick(_state(), dt)
+        _x_server(interv)
+
+
+def _hand(interv, dpx):
+    """손이 dpx(px)만큼 움직인 마우스 이벤트 — 지금 포인터 자리에서 상대 이동."""
+    _x_server(interv)
+    interv._on_motion(*(np.asarray(interv._prev_px, dtype=float) + dpx))
+    _x_server(interv)
+
+
+def _cursor_cm(interv):
+    return np.linalg.norm(interv._cur) * 100
+
+
+def test_paused_pointer_near_the_gripper_snaps_the_target_onto_it():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.01)))          # 2.2cm 옆 — 붙는 반경(2.5cm) 안
+    assert interv._snapped
+    np.testing.assert_allclose(interv.controller.target_xy, [0.0, 0.0], atol=1e-9)
+
+
+def test_snapped_cursor_is_pulled_onto_the_gripper_and_the_os_pointer_follows():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.01)))
+    _hold(interv, 0.6)
+    assert _cursor_cm(interv) < 0.3                          # 커서가 그리퍼 중심으로 끌려왔고
+    np.testing.assert_allclose(interv._last_warp, _px(interv, (0.0, 0.0)), atol=1.0)  # 실제 포인터도 옮겼다
+
+
+def test_a_gentle_tug_stretches_then_springs_back():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    _hold(interv, 0.6)
+    _hand(interv, (12, 0))                                   # 손이 오른쪽으로 2cm(12px)
+    _hold(interv, 0.06)
+    assert interv._snapped and 0.3 < _cursor_cm(interv) < 1.0  # 끈적하게 일부만 따라 늘어났다가
+    _hold(interv, 0.6)
+    assert interv._snapped and _cursor_cm(interv) < 0.3      # 힘을 빼면 돌아온다
+    np.testing.assert_allclose(interv.controller.target_xy, [0.0, 0.0], atol=1e-9)
+
+
+def test_a_hard_yank_breaks_free_and_is_not_pulled_back():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    _hold(interv, 0.6)
+    _hand(interv, (36, 0))                                   # 한 번에 6cm
+    assert not interv._snapped
+    assert 2.0 < _cursor_cm(interv) < 2.3                    # 보이던 자리(늘어난 2.1cm)에서 떨어져
+    _hold(interv, 0.3)
+    popped = _cursor_cm(interv)
+    assert 3.1 < popped < 3.5                                # 당긴 쪽으로 1.2cm 미끄러져 나가고
+    _hold(interv, 0.5)
+    assert _cursor_cm(interv) == pytest.approx(popped, abs=0.05)  # 떨어진 채 — 다시 끌려오지 않는다
+    np.testing.assert_allclose(interv.controller.target_xy, interv._cur, atol=1e-9)
+
+
+def test_nearby_cursor_is_drawn_in_and_captured():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.04, 0.0)))            # 끌림 반경(4.5cm) 안, 붙는 반경 밖
+    assert not interv._snapped
+    _hold(interv, 1.0)
+    assert interv._snapped
+
+
+def test_far_pointer_does_not_snap_and_pulling_away_releases():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    interv._on_motion(*_px(interv, (0.10, 0.0)))            # 크게 빼면 떨어져 당긴 쪽으로 튀어나간다
+    assert not interv._snapped
+    np.testing.assert_allclose(interv.controller.target_xy, interv._cur, atol=1e-9)
+
+
+def test_no_snap_while_running_or_in_policy_mode():
+    running = MouseTeleopIntervention(env=object(), state_fn=_state)
+    running._handle_key("Tab")
+    running._on_motion(*_px(running, (0.02, 0.0)))
+    _hold(running, 0.5)
+    assert not running._snapped and running._last_warp is None
+    np.testing.assert_allclose(running.controller.target_xy, [0.02, 0.0], atol=2e-3)
+    policy = MouseTeleopIntervention(env=object(), state_fn=_state)
+    policy._handle_key("s")
+    policy._on_motion(*_px(policy, (0.02, 0.0)))
+    assert not policy._snapped
+
+
+def test_new_takeover_forgets_the_magnet():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.01)))
+    interv._handle_key("s"); interv._handle_key("Tab"); interv._handle_key("Tab")  # 재개 → 정책 → 다시 사람
+    interv._on_motion(*_px(interv, (0.05, 0.0)))
+    assert not interv._snapped
+    np.testing.assert_allclose(interv.controller.target_xy, [0.05, 0.0], atol=2e-3)
+
+
+def test_capture_also_pulls_the_yaw_onto_the_gripper():
+    interv = _paused_human()
+    interv.controller.target_yaw = 0.5                      # 멈춘 동안 휠로 돌려둔 목표
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    assert interv.controller.target_yaw == pytest.approx(0.0, abs=1e-9)
+
+
+def test_wheel_twists_the_snapped_yaw_but_it_springs_back_and_never_breaks_off_alone():
+    """회전엔 따로 떨어지는 조건이 없다 — 붙은 채 세게 돌려도 비틀렸다가 원래 각도로 돌아온다."""
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    for _ in range(8):                                       # 40도를 한 번에
+        interv._on_wheel(+1)
+    assert interv._snapped and interv._yo > np.deg2rad(5)   # 화면의 목표 그리퍼는 비틀리고
+    assert interv.controller.target_yaw == pytest.approx(0.0, abs=1e-9)  # 제어 목표는 그대로
+    _hold(interv, 0.8)
+    assert abs(interv._yo) < np.deg2rad(1)                  # 휠을 멈추면 원래 각도로
+    _hand(interv, (36, 0))                                   # 위치를 당겨 떨어지면
+    interv._on_wheel(+1)
+    assert interv.controller.target_yaw == pytest.approx(interv.controller.yaw_step, abs=np.deg2rad(1))
+
+
+def test_wheel_is_plain_yaw_while_running():
+    interv = MouseTeleopIntervention(env=object(), state_fn=_state)
+    interv._handle_key("Tab")
+    interv._on_wheel(+1)
+    assert interv.controller.target_yaw == pytest.approx(interv.controller.yaw_step)
+
+
+def test_events_that_left_before_the_warp_are_measured_from_the_old_spot():
+    """옮기기 전에 생겨 늦게 온 이벤트는 옛 기준, 옮긴 자리 이벤트 뒤로는 새 기준 — 손 움직임을 안 잃는다."""
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    _hold(interv, 0.6)
+    stretch0 = interv._stretch.copy()
+    old = np.asarray(interv._prev_px, dtype=float)
+    interv._on_motion(*(old + (3, 0)))                       # 손 +3px → 끈적하게 따라가며 포인터를 옮긴다
+    interv._on_motion(*(old + (6, 0)))                       # 옮기기 전에 생긴 이벤트(옛 기준 +3px)
+    _x_server(interv)                                        # 옮긴 자리 이벤트
+    interv._on_motion(*(np.asarray(interv._prev_px) + (3, 0)))  # 새 기준 +3px
+    moved_px = (interv._stretch - stretch0)[1] * interv.map.scale  # 월드 +y = 화면 오른쪽
+    assert moved_px == pytest.approx(9.0, abs=0.5)
+
+
+def test_far_cursor_is_not_drawn_in():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.06, 0.0)))            # 끌림 반경(4.5cm) 밖
+    _hold(interv, 1.0)
+    assert not interv._snapped and _cursor_cm(interv) == pytest.approx(6.0, abs=0.2)
+
+
+def _break_free(interv, dpx=(30, 0)):
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    _hold(interv, 0.6)
+    _hand(interv, dpx)                                       # 5cm 당겨 떨어짐 — 끌림 반경 안에 떨어진다
+    assert not interv._snapped
+    _hold(interv, 0.3)                                       # 떨어져 미끄러지는 것까지
+
+
+def test_resting_after_breaking_free_is_not_grabbed_again():
+    interv = _paused_human()
+    _break_free(interv)
+    popped = _cursor_cm(interv)
+    _hold(interv, 1.0)
+    assert not interv._snapped and _cursor_cm(interv) == pytest.approx(popped, abs=0.05)
+
+
+def test_moving_back_toward_the_gripper_after_a_short_break_re_attaches():
+    interv = _paused_human()
+    _break_free(interv)
+    _hold(interv, 0.4)                                       # 떨어진 직후의 쉬는 시간이 지나고
+    for _ in range(3):
+        _hand(interv, (-2, 0))                               # 그리퍼 쪽으로 조금씩
+        _hold(interv, 0.1)
+    _hold(interv, 0.5)
+    assert interv._snapped
+
+
+def test_capture_turns_the_yaw_the_short_way():
+    """350도 돌려둔 목표는 붙을 때 +10도만, 370도는 −10도만 돌아 붙는다."""
+    for off, sign in ((350, +1), (370, -1)):
+        interv = _paused_human()
+        interv.controller.target_yaw = np.deg2rad(off)
+        interv._on_motion(*_px(interv, (0.02, 0.0)))
+        assert np.degrees(interv._yo) == pytest.approx(-10 * sign, abs=1e-6)  # 보이는 목표는 10도 옆에서
+        seen = []
+        for _ in range(40):
+            interv._tick(_state(), 0.02)
+            seen.append(np.degrees(interv._yo))
+        assert max(abs(v) for v in seen) <= 10.5 and abs(seen[-1]) < 0.5  # 짧은 쪽으로 돌아 붙는다
+        assert interv.controller.target_yaw == pytest.approx(0.0, abs=1e-9)
+
+
+def test_a_long_wheel_spin_while_snapped_also_returns_the_short_way():
+    interv = _paused_human()
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    for _ in range(120):                                     # 600도 — 보이는 비틀림 210도
+        interv._on_wheel(+1)
+    assert abs(interv._yo) <= np.pi
+    start = abs(np.degrees(interv._yo))
+    seen = []
+    for _ in range(50):
+        interv._tick(_state(), 0.02)
+        seen.append(abs(np.degrees(interv._yo)))
+    assert max(seen) <= start + 1 and seen[-1] < 1
