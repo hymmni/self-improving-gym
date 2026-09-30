@@ -193,6 +193,7 @@ def collect_episode(
     te_coeff=0.01,
     print_diagnostics=True,
     pre_step_fn=None,
+    reset_fn=None,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
 
@@ -211,6 +212,8 @@ def collect_episode(
     끝낸다(커스텀 뷰어용, render보다 우선). 없고 render=True면 기존 env.render(mode="human")를 쓴다.
     render_fn은 env.step() **뒤에** 불리므로 받는 obs는 다음 스텝의 관측이다 — 저장용으로 쓰면
     obs가 액션보다 한 칸 앞선다(2026-09-22까지의 수집기가 그랬다). 저장은 pre_step_fn에서 한다.
+
+    reset_fn()이 주어지면 env.reset() 대신 불러 첫 obs를 받는다 — 저장해 둔 시작 상태에서 다시 모을 때.
 
     pre_step_fn(step, obs_raw)는 매 스텝 액션을 고르기 직전, 반환 obs[step]과 같은 시점에
     불린다. None을 돌려주면 그대로 진행하고, 스텝 번호 t(< step)를 돌려주면 되감기다 — 호출부가
@@ -241,7 +244,7 @@ def collect_episode(
         predict_fn = lambda history: _predict_chunk(policy, normalizer, history, obs_keys, device)
     if hasattr(policy, "eval"):
         policy.eval()
-    obs_raw = env.reset()
+    obs_raw = env.reset() if reset_fn is None else reset_fn()
     obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
 
     obs_seq, action_seq, mode_seq = [], [], []

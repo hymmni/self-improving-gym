@@ -70,3 +70,17 @@ def test_without_rewind_support_the_episode_is_dropped_as_before():
     interv = _Interv(rewind=False)
     results, noise, waits = _run("cccnnn", interv)
     assert results[-1] is False and waits == []
+
+
+def test_drop_episode_removes_the_group_and_returns_its_start_state():
+    import h5py
+    from square_assembly.scripts.collect_square_scripted_intervention import drop_episode
+
+    with h5py.File("mem.h5", "w", driver="core", backing_store=False) as f:
+        data = f.create_group("data")
+        g = data.create_group("demo_4")
+        g.attrs["num_samples"], g.attrs["is_success"] = 3, True
+        g.create_dataset("states", data=np.arange(6.0).reshape(3, 2))
+        s0, T, ok = drop_episode(data, "demo_4")
+        assert "demo_4" not in data and T == 3 and ok
+        np.testing.assert_array_equal(s0, [0.0, 1.0])

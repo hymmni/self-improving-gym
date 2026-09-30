@@ -5,6 +5,10 @@ INTV, 직전 구간은 PREINTV — SIRIUS 스킴, intervention_rollout.collect_e
 돌려준 뒤 다시 잡으면 개입이 여러 번 기록된다). `s`는 일시정지(sim·기록 모두 멈추고 창만 살아
 있음), `q`는 에피소드 포기.
 
+다시 수집: `←`를 0.4초 안에 두 번 누르면 "이전 에피소드를 다시 모을까" 확인창이 뜬다. Enter면 이번
+에피소드를 버리고 끝내며(redo_requested), 수집기가 바로 전에 저장한 에피소드를 지우고 그 시작 상태에서
+다시 모은다. Esc면 닫는다. 첫 번째 ←는 평소대로 되감기가 먼저 된다(두 번째만 확인창으로 쓴다).
+
 되감기: `←`는 직전 모드 전환점(지금 모드가 시작된 스텝 — 개입 중이면 개입 시작점)으로, 이미
 전환점에 서 있으면 그 앞 전환점으로 간다. `b`는 back_steps(기본 20 = 1초)만큼(연타하면 누적),
 `r`은 에피소드 시작점으로 — 같은 너트 배치로 다시 한다. 되감으면 일시정지로 멈춰 어디로
@@ -17,7 +21,15 @@ pop_rewind()로 돌아갈 스텝만 꺼내 주고, 수집기가 collect_episode�
 
 사람 제어 중 매 스텝(20Hz)의 7-dim OSC_POSE delta 액션:
 - xy: 맵 위 커서 위치를 목표로 PD  (kp·err − kd·v, pos_cap으로 클립)
-- z: Ctrl(또는 Space)/Shift 누른 동안 일정 속도로 ↑/↓ (z_min~z_max에서 멈춤)
+- z: 붙잡는 높이(target_z)를 PI로 따라간다. Ctrl(또는 Space)/Shift를 누르는 동안 그 높이를 PH 시연에서
+  잰 속도 규칙으로 옮긴다(2026-09-30, PH 50개의 잡기·놓기 기준 높이별 z 속도): 내림 7cm/s, 그리퍼가 열려
+  있으면 너트 높이 1cm 위부터 3cm/s(잡는 높이 = 너트 높이 ±2mm), 올림은 2cm 동안 4→18cm/s로 가속하고
+  z_max 3cm 전부터 줄인다. 예전엔 z 액션을 고정값(0.6 ≈ 15cm/s)으로 줬는데, 너트를 쥐면 같은 액션에도
+  속도가 크게 틀어져서(쥔 채 내림: 액션 0.1에 4.8cm/s, 0.3~0.45는 6cm/s로 같음) 높이를 옮기는 쪽으로 바꿨다.
+  z_min~z_max에서 멈춘다. 안 누르면 마지막 높이를
+  절대 목표로 붙잡는다(PI: kp_z 2, ki_z 0.2/스텝 — 잡은 채 25cm를 최대 속도로 옮겨도 −0.6cm까지만
+  처지고 멈추면 0으로 돌아온다, 시뮬 실측) — 예전엔 매 스텝 '지금 높이'를 목표로 보내서, 옆으로 빨리 움직이며 처진 만큼이
+  계속 쌓여 Shift 없이 내려갔다(r0v3~v5: 잡은 채 xy 최대 속도 구간에서 z 액션 0인데 초속 4~5cm 하강).
 - 회전: 휠 한 칸 = 야우 목표 ±yaw_step. 손목은 항상 수직 아래(오라클과 같은 자세 제어)
 - 그리퍼: 좌클릭 누른 동안 +1(닫힘), 뗀 동안 −1(열림). 일정 속도로 여닫는 램프는 robosuite
   PandaGripper가 이미 한다(부호만 보고 내부 명령을 옮긴다). 예전엔 여기서도 스텝당 0.1씩 램프를
@@ -97,25 +109,34 @@ class MouseTeleopController:
     Args:
         kp, kd: xy PD 게인. err(m)·v(m/step)에 곱해 delta(m)를 만든 뒤 _POS_SCALE로 나눈다.
         pos_cap: xy delta 액션 상한(1.0 == 5cm/step). 오라클(0.5)보다 낮춰야 사람이 따라간다.
-        z_speed: Space/Shift 누른 동안의 z 액션. 액션 1.0이 목표 5cm지만 OSC(kp=150, 임계 감쇠)는 한
-            스텝(50ms)에 그 1/3쯤만 따라가서, 0.6이 실제 약 1cm/step이다. 0.2였을 땐 너트를 들고
-            내려가던 정책을 넘겨받으면 Space를 0.5초 눌러도 −2~+3mm로 거의 안 올라갔다(2026-09-22
-            pororo 실측, 0.6: 0.15초 안에 반등·0.5초에 4~6.5cm·뗀 뒤 5~9mm 더 감).
+        down_speed, down_near_speed, near_zone: 내림 속도(m/s), 그리퍼가 열려 있을 때 너트 높이 near_zone(m)
+            위부터의 속도.
+        up_speed, up_start_speed, up_ramp, top_zone: 올림 속도, 누르기 시작할 때 속도와 가속 거리(m),
+            z_max 앞 감속 구간. (z_up/z_down은 키가 눌렸는지다 — 속도와 헷갈리지 말 것)
+        z_cap: z 액션 상한(1.0 == 5cm/step). 쥔 채 18cm/s로 올리려면 0.8쯤 필요하다(시뮬 실측).
+        dt: action() 한 번의 시간(s) — 20Hz 제어.
         z_min, z_max: 그리퍼 site z 허용 범위(m). 테이블 윗면 0.82, peg 윗면 0.95.
         yaw_step: 휠 한 칸당 야우 목표 변화(rad).
         rot_cap: 회전 delta 액션 상한.
     """
 
-    def __init__(self, kp=1.0, kd=0.0, pos_cap=0.3, z_speed=0.6, z_min=0.83, z_max=1.10,
-                 yaw_step=np.deg2rad(5.0), rot_cap=0.4):
-        self.kp, self.kd, self.pos_cap = kp, kd, pos_cap
-        self.z_speed, self.z_min, self.z_max = z_speed, z_min, z_max
+    def __init__(self, kp=1.0, kd=0.0, pos_cap=0.3, z_min=0.83, z_max=1.10,
+                 yaw_step=np.deg2rad(5.0), rot_cap=0.4, kp_z=2.0, ki_z=0.2,
+                 down_speed=0.07, down_near_speed=0.03, near_zone=0.01,
+                 up_speed=0.18, up_start_speed=0.04, up_ramp=0.02, top_zone=0.03, z_cap=1.0, dt=0.05):
+        self.kp, self.kd, self.pos_cap, self.kp_z, self.ki_z = kp, kd, pos_cap, kp_z, ki_z
+        self.z_min, self.z_max, self.z_cap, self.dt = z_min, z_max, z_cap, dt
+        self.down_speed, self.down_near_speed, self.near_zone = down_speed, down_near_speed, near_zone
+        self.up_speed, self.up_start_speed, self.up_ramp, self.top_zone = up_speed, up_start_speed, up_ramp, top_zone
         self.yaw_step, self.rot_cap = yaw_step, rot_cap
         self.reset()
 
     def reset(self):
         self.target_xy = None      # None이면 xy는 제자리 유지(잡은 뒤 커서가 아직 안 움직임)
         self.target_yaw = None     # None이면 현재 야우 유지
+        self.target_z = None       # z 키를 안 누를 때 붙잡는 높이 — 뗀 곳(None이면 다음 스텝 높이)
+        self._z_err_sum = 0.0      # 붙잡는 높이 오차의 누적(적분 항) — 너트 무게처럼 계속 누르는 힘을 없앤다
+        self._up_from = None       # 올림 키를 누르기 시작한 높이 — 가속 거리 재기
         self.grip_cmd = -1.0
         self.z_up = self.z_down = False  # 올리기/내리기 키를 누르고 있는 동안 True(창의 누름·뗌 이벤트)
         self.grip_pressed = False
@@ -126,6 +147,8 @@ class MouseTeleopController:
         그리퍼는 손가락 상태와 무관하게 지금 버튼 상태를 따른다(모듈 docstring)."""
         self.target_xy = None
         self.target_yaw = yaw_of(state["R"])
+        self.target_z = float(state["grip"][2])
+        self._z_err_sum = 0.0
         self._prev_xy = state["grip"][:2].copy()
         self.grip_cmd = 1.0 if self.grip_pressed else -1.0
 
@@ -147,10 +170,28 @@ class MouseTeleopController:
             delta = self.kp * (self.target_xy - xy) - self.kd * v
             a[:2] = np.clip(delta / _POS_SCALE, -self.pos_cap, self.pos_cap)
 
-        dz = float(self.z_up) - float(self.z_down)
-        if (dz > 0 and grip[2] >= self.z_max) or (dz < 0 and grip[2] <= self.z_min):
-            dz = 0.0
-        a[2] = self.z_speed * dz
+        if self.target_z is None:
+            self.target_z = float(grip[2])
+        dz = float(self.z_up) - float(self.z_down)  # 둘 다 누르면 0 — 그 자리에 붙잡는다
+        if dz > 0:
+            if self._up_from is None:
+                self._up_from = self.target_z
+            ramp = min(1.0, (self.target_z - self._up_from) / self.up_ramp)
+            speed = self.up_start_speed + (self.up_speed - self.up_start_speed) * ramp
+            room = self.z_max - self.target_z
+            if room < self.top_zone:
+                speed = max(0.02, speed * room / self.top_zone)
+            self.target_z = min(self.z_max, self.target_z + speed * self.dt)
+        else:
+            self._up_from = None
+            if dz < 0:
+                near_nut = not self.grip_pressed and self.target_z - state["nut"][2] < self.near_zone
+                speed = self.down_near_speed if near_nut else self.down_speed
+                self.target_z = max(self.z_min, self.target_z - speed * self.dt)
+        err = self.target_z - grip[2]
+        # ponytail: 적분 항은 상한만 두는 단순 anti-windup — 넘겨받으면 비운다
+        self._z_err_sum = float(np.clip(self._z_err_sum + err, -0.1, 0.1))
+        a[2] = np.clip((self.kp_z * err + self.ki_z * self._z_err_sum) / _POS_SCALE, -self.z_cap, self.z_cap)
 
         yaw = self.target_yaw if self.target_yaw is not None else yaw_of(R)
         a[3:6], _ = rot_delta_toward(R, yaw, self.rot_cap)
@@ -208,7 +249,8 @@ class MouseTeleopIntervention:
         self.back_steps = back_steps
         self.keys = {toggle_key: "toggle", switch_key: "last_switch",
                      pause_key: "pause", quit_key: "quit",
-                     back_key: "back", restart_key: "restart"}
+                     back_key: "back", restart_key: "restart", "Return": "confirm", "Escape": "cancel"}
+        self.redo_label = None     # 다시 모을 수 있는 이전 에피소드 설명(수집기가 채움) — None이면 없음
         self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
         self._root = None          # Tk 창, render()에서 지연 생성(테스트는 창 없이 돈다)
         self._last_obs = None
@@ -228,12 +270,15 @@ class MouseTeleopIntervention:
         self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
         self._modes = []           # 스텝별 사람 제어 여부 — 되감으면 그 스텝의 모드로 돌아간다
         self._rewound = None       # (되감기 전 스텝, 돌아간 스텝) — 멈춘 화면에 띄운다
+        self._confirm_redo = self.redo_requested = False
+        self._left_t = -np.inf     # 직전 ← 시각 — 두 번 연타 판정
+        self._toast = None         # (글, 사라질 시각)
         self._release_grab()
         self.num_triggers = 0
         self.controller.reset()
 
     def should_end(self):
-        return self._quit_requested
+        return self._quit_requested or self.redo_requested
 
     def rewind_to(self, step):
         """수집기가 돌아갈 스텝을 직접 지정한다(렌더 노이즈 직전의 정상 스텝) — 되돌린 뒤 일시정지."""
@@ -305,6 +350,22 @@ class MouseTeleopIntervention:
     def _handle_key(self, key):
         """Tk keysym -> 상태 갱신. Tk 없이 테스트 가능하게 이벤트 처리와 분리."""
         what = self.keys.get(key)
+        if self._confirm_redo:  # 확인창이 떠 있으면 Enter/Esc만
+            if what == "confirm":
+                self.redo_requested = True
+            elif what == "cancel":
+                self._confirm_redo = False
+            return
+        if what == "last_switch":
+            now = time.time()
+            if now - self._left_t < 0.4:  # 두 번 연타 — 이전 에피소드 다시 모으기
+                self._left_t = -np.inf
+                if self.redo_label is None:
+                    self._toast = ("no previous episode to redo", now + 1.5)
+                else:
+                    self._confirm_redo = self._paused = True
+                return
+            self._left_t = now
         if what == "toggle":
             self._release_grab()
             self._active = not self._active
@@ -525,7 +586,7 @@ class MouseTeleopIntervention:
 
         일시정지 중엔 여기서 창을 계속 갱신하며 머문다(호출부의 스텝 루프가 그동안 멈춘다).
         되감기 요청이 들어오면 일시정지여도 돌아간다 — 호출부가 되감은 장면으로 다시 부르면
-        그 장면에서 다시 멈춘다(그래서 멈춘 채로 ←/b를 연타해 뒤로 훑을 수 있다).
+        그 장면에서 다시 멈춘다(그래서 멈춘 채로 b를 연타하거나 ←를 0.4초보다 천천히 눌러 뒤로 훑을 수 있다 — ← 두 번 연타는 다시 수집).
         """
         from PIL import Image, ImageTk
 
@@ -540,8 +601,9 @@ class MouseTeleopIntervention:
             else:
                 self._photo.paste(img)
             self._root.update()
-            if self._quit_requested or not self._paused or self._back or self._restart or self._switches:
-                return not self._quit_requested
+            if (self._quit_requested or self.redo_requested or not self._paused
+                    or self._back or self._restart or self._switches):
+                return not (self._quit_requested or self.redo_requested)
             self._pump(0.02)
 
     def _compose(self, frames):
@@ -570,7 +632,30 @@ class MouseTeleopIntervention:
         if names[0] is not None:
             self._draw_camera_labels(d, names, h, x0, k)
         self._draw_hud(d, s, x0, S, k)
-        return np.asarray(Image.alpha_composite(img, over).convert("RGB"))
+        img = Image.alpha_composite(img, over)
+        if self._confirm_redo:  # 확인창은 따로 한 층 — 같은 층에 반투명으로 칠하면 밑의 HUD를 덮어쓴다
+            modal = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            self._draw_redo_dialog(ImageDraw.Draw(modal), x0, S, k)
+            img = Image.alpha_composite(img, modal)
+        return np.asarray(img.convert("RGB"))
+
+    def _draw_redo_dialog(self, d, x0, S, k):
+        """←← 확인창: 화면을 어둡게 하고 가운데에 '이전 에피소드를 다시 모을까'."""
+        from square_assembly.runners import teleop_hud as hud
+
+        d.rectangle((0, 0, x0 + S, S), fill=(0, 0, 0, 120))
+        bw, bh = 560 * k, 170 * k
+        bx, by = x0 + (S - bw) / 2, (S - bh) / 2
+        d.rounded_rectangle((bx, by, bx + bw, by + bh), radius=18 * k, fill=(22, 25, 30, 240),
+                            outline=hud.PAUSED + (255,), width=max(1, round(2 * k)))
+        d.text((bx + 28 * k, by + 38 * k), "Redo the previous episode?", font=hud.font(round(22 * k), True),
+               fill=hud.TEXT, anchor="lm")
+        d.text((bx + 28 * k, by + 76 * k), f"{self.redo_label} is deleted and collected again",
+               font=hud.font(round(15 * k)), fill=hud.DIM, anchor="lm")
+        d.text((bx + 28 * k, by + 98 * k), "from the same start; this episode is discarded.",
+               font=hud.font(round(15 * k)), fill=hud.DIM, anchor="lm")
+        hud.row(d, (bx + 28 * k, by + 136 * k), [("key", "Enter"), ("text", "redo"), ("key", "Esc"),
+                                                 ("text", "cancel")], size=round(16 * k))
 
     def _draw_camera_labels(self, d, names, h, x0, k):
         from square_assembly.runners import teleop_hud as hud
@@ -671,6 +756,11 @@ class MouseTeleopIntervention:
         hud.row(d, (lx, ly + 64 * k), [("key", "S"), ("text", "pause"), ("key", "Q"), ("text", "give up"),
                                        ("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"),
                                        ("key", "Wheel"), ("text", "yaw"), ("key", "LMB"), ("text", "grip")], size=sz)
+        now = time.time()
+        if self._toast is not None and now < self._toast[1]:
+            f = hud.font(round(15 * k), True)
+            w = d.textlength(self._toast[0], font=f) + 24 * k
+            hud.pill(d, (x0 + (S - w) / 2, 70 * k), self._toast[0], hud.PANEL, color=hud.TEXT, size=round(15 * k))
 
     def _draw_map(self, s):
         """맵 도형(격자·peg·너트·그리퍼)만 cv2로 BGR에 그린다 — 글씨·게이지는 _draw_hud."""

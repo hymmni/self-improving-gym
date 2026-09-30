@@ -27,7 +27,8 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
 창이 뜨면 정책이 자동으로 진행한다. 실패로 보이면 's'를 눌러 오라클에 넘긴다(그 에피소드는
 끝까지 오라클이 잡는다 — 정책에 돌려주지 않는다). 포기하려면 'q'. --mode mouse면 Tab으로 사람/정책을
 오가고, ←(직전 모드 전환점)·'b'(1초)·'r'(같은 배치로 처음부터)로 되감을 수 있다 — 버린 배치는
-다시 못 만나므로 q보다 이쪽을 쓴다.
+다시 못 만나므로 q보다 이쪽을 쓴다. ←를 두 번 연타하고 Enter면 바로 전에 저장한 에피소드를 지우고 그
+시작 상태에서 다시 모은다(이번 실행에서 저장한 것만, Esc는 취소).
 
 화면은 --display-size 해상도로 따로 렌더해서 보여준다(학습/저장 데이터는 task의
 image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리). 480을 넘길 순 없다
@@ -154,6 +155,14 @@ def make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_e
     return track, noise
 
 
+def drop_episode(data_grp, name):
+    """저장한 에피소드를 지운다(다시 모으기). Returns: (시작 sim 상태, 길이, 성공 여부)."""
+    g = data_grp[name]
+    s0, T, ok = np.asarray(g["states"][0]), int(g.attrs["num_samples"]), bool(g.attrs["is_success"])
+    del data_grp[name]
+    return s0, T, ok
+
+
 def make_recorder(env, interv, obs_keys, rgb_keys):
     """collect_episode의 pre_step_fn — 매 스텝 액션 직전 obs·sim 상태를 쌓고, 되감기 요청을 처리한다.
 
@@ -265,8 +274,13 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 print(f"이어서 수집: 기존 성공 {outcomes['success']} / 실패 {outcomes['fail']} -> 목표 성공 {episodes}", flush=True)
             # episodes = 저장할 *성공* 에피소드 수. 실패도 저장은 되지만(is_success=False, 병합에서 제외)
             # 개수에는 안 센다 — 라운드마다 "성공 N개"를 맞추려는 것이지 시도 횟수가 아니다.
+            # ←← + Enter로 다시 모으기: 이번 실행에서 바로 전에 저장한 에피소드와, 지운 뒤 다시 시작할 상태
+            last_saved, redo_state = None, None
             while outcomes["success"] < episodes:
                 interv.reset()
+                interv.redo_label = last_saved[1] if last_saved else None
+                reset_fn = None if redo_state is None else (
+                    lambda s=redo_state: (env.reset(), env.reset_to({"states": s}))[1])
                 pre_step, obs_ep, states_ep = make_recorder(env, interv, obs_keys, rgb_keys)
                 track, noise = make_noise_tracker(
                     env, interv, camera, display_cameras, display_size, obs_ep,
@@ -279,12 +293,20 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     task_cfg.get("obs_horizon", policy_cfg.obs_horizon), policy_cfg.action_horizon, device,
                     intervention_fn=interv, max_steps=max_steps, render=False, render_fn=track,
                     pre_step_fn=pre_step, should_end_fn=interv.should_end, control_fps=control_fps,
-                    predict_fn=predict_fn, print_diagnostics=False,
+                    predict_fn=predict_fn, print_diagnostics=False, reset_fn=reset_fn,
                 )
                 if noise["streak"] >= 3:
                     print(f"  !! 렌더 노이즈로 에피소드 중단(step {len(obs_ep)}) — 버리고 렌더 복구를 기다린다", flush=True)
                     wait_for_render_recovery(env, camera, display_size, sleep_fn=getattr(interv, "idle", time.sleep))
                     print("  같은 에피소드 번호로 다시 수집", flush=True)
+                    continue
+                if getattr(interv, "redo_requested", False):
+                    redo_state, T_old, was_success = drop_episode(data_grp, last_saved[0])
+                    outcomes["success" if was_success else "fail"] -= 1
+                    total -= T_old
+                    ep -= 1
+                    print(f"  << 다시 수집: {last_saved[0]}({T_old}스텝)을 지우고 같은 시작 상태에서 다시 모은다", flush=True)
+                    last_saved = None
                     continue
 
                 actions = np.asarray(result["actions"], dtype=np.float64)
@@ -320,6 +342,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 demo_grp.attrs["is_success"] = is_success
                 outcomes["success" if is_success else "fail"] += 1
                 total += T
+                name = demo_grp.name.split("/")[-1]
+                last_saved = (name, f"{name} ({'success' if is_success else 'fail'}, {T} steps)")
+                redo_state = None
                 print(
                     f"ep {ep}: steps={T} success={is_success} triggers={interv.num_triggers}  "
                     f"누적 성공 {outcomes['success']}/{ep + 1} ({outcomes['success'] / (ep + 1):.1%})",
@@ -353,7 +378,8 @@ def main():
     ap.add_argument("--kp", type=float, default=1.0, help="[mouse] xy P 게인")
     ap.add_argument("--kd", type=float, default=0.0, help="[mouse] xy D 게인")
     ap.add_argument("--pos-cap", type=float, default=0.3, help="[mouse] xy delta 상한(1.0=5cm/step)")
-    ap.add_argument("--z-speed", type=float, default=0.6, help="[mouse] Space/Shift z 액션(0.6 ≈ 실제 1cm/step)")
+    ap.add_argument("--z-down", type=float, default=7.0, help="[mouse] Shift 내림 속도(cm/s, PH 시연 중앙값)")
+    ap.add_argument("--z-up", type=float, default=18.0, help="[mouse] Ctrl 올림 속도(cm/s, 가속 뒤, PH 시연)")
     ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
@@ -366,7 +392,7 @@ def main():
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
         mode=args.mode, overwrite=args.overwrite,
-        teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, z_speed=args.z_speed,
+        teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step)))
 
 

@@ -52,17 +52,94 @@ def test_take_over_holds_position_until_cursor_moves():
     np.testing.assert_array_equal(c.action(_state())[:2], [0.0, 0.0])
 
 
-def test_z_keys_and_limits():
-    c = MouseTeleopController(z_speed=0.2, z_min=0.83, z_max=1.10)
-    c.take_over(_state())
+def _press(c, key, z=1.0, n=1, **kw):
+    setattr(c, key, True)
+    for _ in range(n):
+        c.action(_state(z=z, **kw))
+    setattr(c, key, False)
+
+
+def test_down_key_lowers_the_held_height_at_the_demo_speed():
+    """Shift = 붙잡는 높이를 PH 시연의 내림 속도(7cm/s)로 옮긴다 — 액션을 바로 주면 너트를 쥐었을 때 속도가 틀어진다."""
+    c = MouseTeleopController()
+    c.take_over(_state(z=1.0))
+    c.grip_pressed = True                                     # 쥔 채 — 너트 근처 감속 없음
+    c.z_down = True
+    a = c.action(_state(z=1.0))
+    assert c.target_z == pytest.approx(1.0 - 0.07 * 0.05)
+    assert a[2] < 0
+
+
+def test_down_slows_near_the_nut_with_an_open_gripper():
+    c = MouseTeleopController()
+    c.take_over(_state(z=0.835))                              # 너트(0.83) 5mm 위, 그리퍼 열림
+    _press(c, "z_down", z=0.835)
+    assert c.target_z == pytest.approx(0.835 - 0.03 * 0.05)   # 마지막 1cm는 3cm/s
+    c.take_over(_state(z=0.835)); c.grip_pressed = True       # 쥐고 있으면 7cm/s 그대로
+    _press(c, "z_down", z=0.835)
+    assert c.target_z == pytest.approx(0.835 - 0.07 * 0.05)
+
+
+def test_up_key_starts_slow_and_ramps_to_lift_speed():
+    c = MouseTeleopController()
+    c.take_over(_state(z=0.90))
     c.z_up = True
-    assert c.action(_state(z=1.0))[2] == pytest.approx(0.2)
-    assert c.action(_state(z=1.10))[2] == 0.0  # 상한에서 멈춤
-    c.z_up, c.z_down = False, True
-    assert c.action(_state(z=1.0))[2] == pytest.approx(-0.2)
-    assert c.action(_state(z=0.83))[2] == 0.0
-    c.z_up = True  # 둘 다 누르면 정지
-    assert c.action(_state(z=1.0))[2] == 0.0
+    c.action(_state(z=0.90))
+    assert c.target_z == pytest.approx(0.90 + 0.04 * 0.05)    # 떼는 순간 4cm/s
+    while c.target_z < 0.921:                                 # 가속 거리 2cm를 지나면
+        c.action(_state(z=0.90))
+    before = c.target_z
+    c.action(_state(z=0.90))
+    assert c.target_z - before == pytest.approx(0.18 * 0.05)  # 2cm 뒤엔 18cm/s
+
+
+def test_up_slows_before_the_top_and_stops_there():
+    c = MouseTeleopController(z_max=1.10)
+    c.take_over(_state(z=1.09))
+    c.z_up = True
+    for _ in range(100):
+        c.action(_state(z=1.09))
+    assert c.target_z == pytest.approx(1.10)                  # 상한에서 멈춤
+    c.take_over(_state(z=1.09)); c.z_up = True
+    c.action(_state(z=1.09))
+    assert c.target_z - 1.09 < 0.18 * 0.05                    # 상한 3cm 안에선 느리다
+
+
+def test_both_z_keys_hold_still_and_release_keeps_the_new_height():
+    c = MouseTeleopController()
+    c.take_over(_state(z=1.0))
+    c.z_up = c.z_down = True
+    c.action(_state(z=1.0))
+    assert c.target_z == pytest.approx(1.0)
+    c.z_up = False
+    for _ in range(4):
+        c.action(_state(z=1.0))
+    c.z_down = False
+    t = c.target_z
+    c.action(_state(z=1.0))
+    assert c.target_z == pytest.approx(t) and t < 1.0         # 뗀 곳의 높이를 붙잡는다
+
+
+def test_z_holds_its_height_without_a_key():
+    """z 키를 안 누르면 마지막 높이를 절대 목표로 붙잡는다 — 옆으로 빨리 움직일 때 처져도 되돌린다
+    (예전엔 매 스텝 '지금 높이'가 목표라 처짐이 쌓였다: r0v3~v5 잡은 채 xy 최대 속도 구간에서 초속 4~5cm 하강)."""
+    c = MouseTeleopController(kp_z=1.0, ki_z=0.0)
+    c.take_over(_state(z=1.0))
+    assert c.action(_state(z=1.0))[2] == pytest.approx(0.0)
+    assert c.action(_state(z=0.99))[2] == pytest.approx(0.2)   # 1cm 처지면 끌어올린다(kp 1)
+    assert c.action(_state(z=0.50))[2] == pytest.approx(c.z_cap)  # 액션 상한
+
+
+def test_a_steady_sag_is_pushed_back_harder_over_time():
+    """너트 무게처럼 계속 누르면 비례 항만으론 오차가 남는다 — 적분 항이 쌓여 끝내 없앤다."""
+    c = MouseTeleopController()
+    c.take_over(_state(z=1.0))
+    first = c.action(_state(z=0.995))[2]
+    for _ in range(5):
+        later = c.action(_state(z=0.995))[2]
+    assert later > first > 0
+    c.take_over(_state(z=0.995))                              # 넘겨받으면 적분을 비운다
+    assert c.action(_state(z=0.995))[2] == pytest.approx(0.0)
 
 
 def test_wheel_turns_yaw_target_about_world_z():
@@ -153,18 +230,31 @@ def test_space_and_shift_move_z_for_as_long_as_they_are_held():
     interv = _make()
     interv._on_key("Tab", True)
     interv._on_key("space", True)
-    assert all(interv(t, {})[2] > 0 for t in range(40))    # 2초(40스텝) 누르고 있어도 계속
+    c = interv.controller
+    c.up_speed = 0.02                                     # 2초 동안 상한(1.10)에 안 닿게 천천히
+
+    def moved(t):
+        before = c.target_z if c.target_z is not None else 1.0
+        interv(t, {})
+        return c.target_z - before
+
+    assert all(moved(t) > 0 for t in range(40))           # 2초(40스텝) 누르고 있어도 계속 올라간다
     interv._on_key("space", False)
     interv._on_key("space", True)                         # X11 키 반복 = 뗌+누름 쌍 — 끊기지 않는다
-    assert interv(40, {})[2] > 0
+    assert moved(40) > 0
     interv._on_key("space", False)
-    assert interv(41, {})[2] == 0.0
+    t = interv.controller.target_z
+    interv(41, {})
+    assert interv.controller.target_z == t                # 떼면 붙잡는 높이가 더 안 움직인다
     interv._on_key("Shift_L", True)
-    assert all(interv(t, {})[2] < 0 for t in range(42, 82))  # 수식키는 반복이 없어도 계속
+    assert all(moved(t) < 0 for t in range(42, 82))       # 수식키는 반복이 없어도 계속
     interv._on_key("B", True)                             # Shift를 누른 채 b(대문자로 온다)도 먹는다
     assert interv.pop_rewind(82) == 62
     interv._on_key("Shift_L", False)
-    assert interv(62, {})[2] == 0.0
+    interv(62, {})                                        # 되감은 뒤 첫 스텝은 현재 자세로 다시 맞춘다
+    t = interv.controller.target_z
+    interv(63, {})
+    assert interv.controller.target_z == t
 
 
 def test_ctrl_lifts_because_rustdesk_sends_space_as_taps():
@@ -174,9 +264,11 @@ def test_ctrl_lifts_because_rustdesk_sends_space_as_taps():
     interv._on_key("Control_L", True)
     assert all(interv(t, {})[2] > 0 for t in range(20))
     interv._on_key("Control_L", False)
-    assert interv(20, {})[2] == 0.0
+    t = interv.controller.target_z
+    interv(20, {})
     interv._on_key("space", True); interv._on_key("space", False)  # 같은 update()에서 처리되는 탭 쌍
-    assert interv(21, {})[2] == 0.0
+    interv(21, {})
+    assert interv.controller.target_z == t
 
 
 def test_shift_tab_still_toggles_and_yaw_is_wheel_only():
@@ -244,23 +336,25 @@ def _modes(interv, pattern):
     return len(pattern)
 
 
-def test_left_goes_back_to_where_the_current_mode_started():
+def test_left_goes_back_to_where_the_current_mode_started(clock):
     interv = _make()
     step = _modes(interv, "p" * 30 + "h" * 12)       # 30에서 개입, 지금 42
     interv._handle_key("Left")
     assert interv._paused
     assert interv.pop_rewind(step) == 30 and interv._active  # 개입 시작점, 사람 모드 그대로
     interv(30, {})
+    clock.t += 0.5                                     # 0.4초 안의 두 번째 ←는 '다시 수집'이라 천천히
     interv._handle_key("Left")                         # 전환점 위에서 또 누르면 그 앞 전환점
     assert interv.pop_rewind(31) == 30
+    clock.t += 0.5
     interv._handle_key("Left")
     assert interv.pop_rewind(30) == 0 and not interv._active  # 정책 구간 시작 — 정책 모드로
 
 
-def test_left_presses_accumulate_across_switches():
+def test_left_presses_accumulate_across_switches(clock):
     interv = _make()
     step = _modes(interv, "p" * 10 + "h" * 5 + "p" * 5 + "h" * 5)
-    interv._handle_key("Left"); interv._handle_key("Left")
+    interv._handle_key("Left"); clock.t += 0.5; interv._handle_key("Left")
     assert interv.pop_rewind(step) == 15 and not interv._active
 
 
@@ -550,3 +644,74 @@ def test_a_long_wheel_spin_while_snapped_also_returns_the_short_way():
         interv._tick(_state(), 0.02)
         seen.append(abs(np.degrees(interv._yo)))
     assert max(seen) <= start + 1 and seen[-1] < 1
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 100.0
+
+    def time(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    import square_assembly.runners.mouse_teleop as mt
+    c = _Clock()
+    monkeypatch.setattr(mt, "time", c)
+    return c
+
+
+def _with_previous(label="demo_3 (success, 180 steps)"):
+    interv = _make()
+    interv.redo_label = label
+    return interv
+
+
+def test_double_left_asks_to_redo_the_previous_episode(clock):
+    interv = _with_previous()
+    interv._handle_key("Left")
+    clock.t += 0.2
+    interv._handle_key("Left")
+    assert interv._confirm_redo and interv._paused
+    assert interv._switches == 1                             # 두 번째 ←는 되감기로 안 센다
+
+
+def test_enter_confirms_and_ends_the_episode_escape_cancels(clock):
+    interv = _with_previous()
+    interv._handle_key("Left"); interv._handle_key("Left")
+    interv._handle_key("Escape")
+    assert not interv._confirm_redo and not interv.redo_requested and interv._paused
+    interv._handle_key("Left"); clock.t += 1.0; interv._handle_key("Left"); clock.t += 0.1; interv._handle_key("Left")
+    interv._handle_key("Return")
+    assert interv.redo_requested and interv.should_end()
+
+
+def test_slow_left_presses_do_not_ask(clock):
+    interv = _with_previous()
+    interv._handle_key("Left"); clock.t += 0.6; interv._handle_key("Left")
+    assert not interv._confirm_redo and interv._switches == 2
+
+
+def test_other_keys_are_ignored_while_asking(clock):
+    interv = _with_previous()
+    interv._handle_key("Left"); interv._handle_key("Left")
+    interv._handle_key("Tab"); interv._handle_key("q")
+    assert not interv._active and not interv._quit_requested and interv._confirm_redo
+
+
+def test_no_previous_episode_only_shows_a_notice(clock):
+    interv = _make()
+    interv.redo_label = None
+    interv._handle_key("Left"); interv._handle_key("Left")
+    assert not interv._confirm_redo and interv._toast is not None
+
+
+def test_reset_clears_the_redo_request(clock):
+    interv = _with_previous()
+    interv._handle_key("Left"); interv._handle_key("Left"); interv._handle_key("Return")
+    interv.reset()
+    assert not interv.redo_requested and not interv._confirm_redo
