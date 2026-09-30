@@ -88,23 +88,19 @@ def test_gripper_follows_the_button_immediately():
     assert c.action(_state())[6] == -1.0
 
 
-def test_take_over_starts_closed_when_fingers_are_closed():
+def test_take_over_follows_the_button_not_the_fingers():
+    """넘겨받는 순간에도 그리퍼는 버튼만 따른다 — 빈손으로 닫힌 채(헛집기) 넘겨받으면 클릭 없이 바로 연다.
+    쥔 너트를 유지하려면 버튼을 누른 채 Tab을 누른다(2026-09-30 사용자 결정)."""
     c = MouseTeleopController()
-    c.take_over(_state(), finger_gap=0.02)
+    c.take_over(_state())
+    assert c.grip_cmd == -1.0 and c.action(_state())[6] == -1.0
+    c.grip_pressed = True  # 누른 채 Tab
+    c.take_over(_state())
     assert c.grip_cmd == 1.0
-    c.take_over(_state(), finger_gap=0.08)
-    assert c.grip_cmd == -1.0
-
-
-def test_take_over_keeps_a_held_nut_until_the_button_changes():
-    """쥔 채로 넘겨받으면(Tab, 또는 되감기 후) 버튼을 안 누르고 있어도 계속 쥔다 — 예전엔 다음
-    스텝부터 열리는 쪽으로 램프해 1초 안에 너트를 떨어뜨렸다."""
-    c = MouseTeleopController()
-    c.take_over(_state(), finger_gap=0.02)
     for _ in range(30):
         assert c.action(_state())[6] == 1.0
-    c.grip_pressed = False  # 실제로 버튼을 뗀 이벤트(ButtonRelease-1)가 와야 연다
-    assert c.action(_state())[6] < 1.0
+    c.grip_pressed = False
+    assert c.action(_state())[6] == -1.0
 
 
 def test_map_roundtrip_and_orientation():
@@ -277,3 +273,58 @@ def test_back_past_the_takeover_hands_control_back_to_the_policy():
     assert interv(90, {}) is None                      # 90은 원래 정책 스텝
     interv._handle_key("r")
     assert interv.pop_rewind(91) == 0 and not interv._active
+
+
+def test_rewind_to_jumps_to_that_step_pauses_and_restores_its_mode():
+    """렌더 노이즈 복구용 — 수집기가 노이즈 직전 정상 스텝을 직접 지정한다. 키 되감기보다 우선."""
+    interv = _make()
+    step = _modes(interv, "p" * 20 + "h" * 10)
+    interv._handle_key("b")
+    interv.rewind_to(12)
+    assert interv._paused
+    assert interv.pop_rewind(step) == 12 and not interv._active  # 12는 정책 스텝
+    assert interv.pop_rewind(12) is None                        # 요청은 한 번만
+
+
+def test_reset_clears_a_pending_rewind_to():
+    interv = _make()
+    _modes(interv, "p" * 5)
+    interv.rewind_to(2)
+    interv.reset()
+    assert interv.pop_rewind(5) is None
+
+
+def _map_state():
+    box = [np.array([0.0, 0.0]), np.array([0.02, 0.0]), np.array([0.02, 0.02]), np.array([0.0, 0.02])]
+    return {**_state(), "peg_boxes": [box], "nut_boxes": [box, box]}
+
+
+def test_cameras_stack_on_the_left_and_the_map_takes_the_right():
+    pytest.importorskip("cv2")
+    interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960)
+    frames = [np.zeros((480, 480, 3), np.uint8), np.full((480, 480, 3), 255, np.uint8)]
+    canvas = interv._compose(frames)
+    assert canvas.shape == (960, 480 + 960, 3)
+    assert canvas[300, 200].max() == 0 and canvas[700, 200].min() == 255  # agentview 위, wrist 아래
+
+
+def test_camera_tiles_get_a_border_and_their_name():
+    pytest.importorskip("cv2")
+    interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960)
+    gray = np.full((480, 480, 3), 128, np.uint8)
+    plain = interv._compose([gray, gray])
+    boxed = interv._compose({"agentview": gray, "robot0_eye_in_hand": gray})
+    assert (plain[480, 240] == 128).all() and (plain[5:25, 5:60] == 128).all()  # 이름 없으면 안 그림
+    assert (boxed[480, 240] != 128).any() and (boxed[240, 240] == 128).all()  # 경계선만, 가운데는 그대로
+    assert (boxed[5:25, 5:60] != 128).any()  # 왼쪽 위 이름표
+
+
+def test_cursor_only_follows_the_mouse_over_the_map():
+    pytest.importorskip("cv2")
+    interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960)
+    interv._compose([np.zeros((480, 480, 3), np.uint8)] * 2)
+    interv.controller.target_xy = None
+    interv._on_motion(100, 480)  # 카메라 열 위
+    assert interv.controller.target_xy is None
+    interv._on_motion(480 + 480, 480)  # 맵 한가운데 = 테이블 중심
+    np.testing.assert_allclose(interv.controller.target_xy, interv.map.center, atol=1e-3)

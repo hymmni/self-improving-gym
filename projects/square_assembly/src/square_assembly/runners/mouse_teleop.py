@@ -23,6 +23,9 @@ pop_rewind()로 돌아갈 스텝만 꺼내 주고, 수집기가 collect_episode�
   PandaGripper가 이미 한다(부호만 보고 내부 명령을 옮긴다). 예전엔 여기서도 스텝당 0.1씩 램프를
   걸었는데, 부호가 뒤집히는 10스텝(0.5초) 동안 손가락이 전혀 안 움직여 반응만 늦었다(2026-09-22
   실측: 누른 뒤 움직이기 시작 0.55초 → 0.05초). PH 시연의 그리퍼 액션도 ±1뿐이다.
+  넘겨받는 순간(Tab·되감기)에도 버튼만 따른다. 예전엔 손가락이 닫혀 있으면 클릭이 올 때까지 닫아뒀는데
+  (쥔 너트를 Tab 순간 떨어뜨리지 않게), 헛집기로 빈손인 채 넘겨받아도 닫혀 있어 누르고 떼야 열렸다
+  (2026-09-30 사용자 보고). 이제 쥔 너트를 유지하려면 버튼을 누른 채 Tab을 누른다.
 
 맵은 카메라 영상이 아니라 sim 좌표(특권 정보, 표시 전용)로 직접 그린다 — 픽셀↔월드가
 선형이라 캘리브레이션 없이 커서를 곧바로 목표 좌표로 쓴다. 화면 방향은 agentview와
@@ -59,9 +62,6 @@ from square_assembly.runners.square_oracle import (
     _POS_SCALE, read_privileged_state, rot_delta_toward, yaw_of,
 )
 
-_GAP_CLOSED = 0.05  # 손가락 간격(m)이 이보다 좁으면 "쥔 상태"로 보고 닫힘 명령에서 시작
-
-
 class MouseTeleopController:
     """입력 상태(커서·키·버튼·휠)를 7-dim 액션으로 바꾸는 제어 법칙. 창(Tk) 무관.
 
@@ -92,15 +92,13 @@ class MouseTeleopController:
         self.grip_pressed = False
         self._prev_xy = None
 
-    def take_over(self, state, finger_gap=None):
-        """사람이 잡는 순간 목표를 현재 자세로 초기화 — 그 전에 쌓인 커서/휠로 튀지 않게."""
+    def take_over(self, state):
+        """사람이 잡는 순간 목표를 현재 자세로 초기화 — 그 전에 쌓인 커서/휠로 튀지 않게.
+        그리퍼는 손가락 상태와 무관하게 지금 버튼 상태를 따른다(모듈 docstring)."""
         self.target_xy = None
         self.target_yaw = yaw_of(state["R"])
         self._prev_xy = state["grip"][:2].copy()
-        self.grip_cmd = 1.0 if (finger_gap is not None and finger_gap < _GAP_CLOSED) else -1.0
-        # 버튼 상태도 손가락에 맞춰 둔다 — 아니면 쥔 채 넘겨받았는데(Tab, 되감기) 버튼을 안 누르고
-        # 있으면 다음 스텝부터 열려 너트를 떨어뜨린다. 이후엔 실제 클릭(누름/뗌)만 바꾼다.
-        self.grip_pressed = self.grip_cmd > 0
+        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
 
     def set_cursor(self, world_xy):
         self.target_xy = np.asarray(world_xy, dtype=float)[:2].copy()
@@ -159,14 +157,14 @@ class MouseTeleopIntervention:
     Args:
         env: robomimic EnvRobosuite(또는 raw robosuite env). 맵과 제어에 sim 상태를 읽는다.
         controller: MouseTeleopController(None이면 기본 게인).
-        map_size: 맵 한 변 픽셀. 오른쪽 agentview 프레임도 이 높이로 맞춘다.
+        map_size: 맵 한 변 픽셀. 왼쪽 카메라 열(위에서부터 세로로 쌓음)도 이 높이로 맞춘다.
         map_extent: 맵이 덮는 월드 폭(m). 테이블 한 변이 0.8m.
         state_fn: 테스트용 — sim 상태 dict를 돌려주는 함수(None이면 read_privileged_state).
         키 인자들은 Tk keysym이다("Tab", "Left", 소문자 한 글자).
     """
 
-    _HELP = ("[Tab]=human/policy [<-]=last switch [b]=back 1s [r]=restart [s]=pause [q]=give up  "
-             "Ctrl/Shift=up/down  wheel=yaw  LMB=grip")
+    _HELP = ("[Tab] human/policy   [<-] last switch   [b] back 1s   [r] restart",
+             "[s] pause   [q] give up   Ctrl/Shift up/down   wheel yaw   LMB grip")
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
                  toggle_key="Tab", switch_key="Left", pause_key="s", quit_key="q",
@@ -183,6 +181,7 @@ class MouseTeleopIntervention:
         self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
         self._root = None          # Tk 창, render()에서 지연 생성(테스트는 창 없이 돈다)
         self._last_obs = None
+        self._map_x0 = 0          # 캔버스에서 맵이 시작하는 x — 왼쪽 카메라 열의 폭
         self.reset()
 
     # ---- intervention_fn 계약 -------------------------------------------------
@@ -191,6 +190,7 @@ class MouseTeleopIntervention:
         self._paused = False
         self._quit_requested = False
         self._back, self._restart, self._switches, self._resync = 0, False, 0, False
+        self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
         self._modes = []           # 스텝별 사람 제어 여부 — 되감으면 그 스텝의 모드로 돌아간다
         self._rewound = None       # (되감기 전 스텝, 돌아간 스텝) — 멈춘 화면에 띄운다
         self.num_triggers = 0
@@ -199,14 +199,29 @@ class MouseTeleopIntervention:
     def should_end(self):
         return self._quit_requested
 
+    def rewind_to(self, step):
+        """수집기가 돌아갈 스텝을 직접 지정한다(렌더 노이즈 직전의 정상 스텝) — 되돌린 뒤 일시정지."""
+        self._goto = step
+        self._paused = True
+
+    def idle(self, seconds):
+        """창을 살려둔 채 기다린다(렌더 회복 대기) — 그냥 sleep하면 창이 응답 없음이 된다."""
+        end = time.time() + seconds
+        while time.time() < end:
+            if self._root is not None:
+                self._root.update()
+            time.sleep(0.05)
+
     def pop_rewind(self, step):
         """되감기 요청이 있으면 돌아갈 스텝 번호를(없으면 None) 돌려주고 요청을 비운다.
 
         모드(사람/정책)도 돌아간 스텝에서 쓰던 대로 되돌린다.
         """
-        if not (self._restart or self._back or self._switches):
+        if not (self._restart or self._back or self._switches or self._goto is not None):
             return None
-        if self._restart:
+        if self._goto is not None:
+            t = self._goto
+        elif self._restart:
             t = 0
         elif self._back:
             t = max(0, step - self._back)
@@ -214,7 +229,7 @@ class MouseTeleopIntervention:
             t = step
             for _ in range(self._switches):
                 t = self._last_switch_before(t)
-        self._back, self._restart, self._switches = 0, False, 0
+        self._back, self._restart, self._switches, self._goto = 0, False, 0, None
         if t < len(self._modes):
             self._active = self._modes[t]
             del self._modes[t:]
@@ -237,7 +252,7 @@ class MouseTeleopIntervention:
         if not self._active:
             return None
         if resync:  # 되감기 전 목표(커서·야우·그리퍼)를 들고 가면 재개하자마자 팔이 튄다
-            self.controller.take_over(self._state_fn(), self._finger_gap())
+            self.controller.take_over(self._state_fn())
         return self.controller.action(self._state_fn())
 
     # ---- 입력 -> 상태 -------------------------------------------------------------
@@ -252,7 +267,7 @@ class MouseTeleopIntervention:
             self._active = not self._active
             if self._active:
                 self.num_triggers += 1
-                self.controller.take_over(self._state_fn(), self._finger_gap())
+                self.controller.take_over(self._state_fn())
         elif what == "pause":
             self._paused = not self._paused
             if not self._paused:
@@ -287,15 +302,12 @@ class MouseTeleopIntervention:
         root = tk.Tk()
         root.tk.call("tk", "useinputmethods", False)  # ibus-hangul이 Shift+Space를 가져가지 않게(모듈 docstring)
         root.title(self.window_name)
+        root.resizable(False, False)  # 창 = 캔버스 크기 고정 — 늘리면 빈 여백만 생긴다
         view = tk.Label(root, bd=0, highlightthickness=0)
         view.pack()
         c = self.controller
 
-        def on_motion(e):
-            if e.x < self.map.size:  # 오른쪽 agentview 패널 위에서는 목표를 안 바꾼다
-                c.set_cursor(self.map.to_world(e.x, e.y))
-
-        view.bind("<Motion>", on_motion)
+        view.bind("<Motion>", lambda e: self._on_motion(e.x, e.y))
         view.bind("<ButtonPress-1>", lambda e: setattr(c, "grip_pressed", True))
         view.bind("<ButtonRelease-1>", lambda e: setattr(c, "grip_pressed", False))
         view.bind("<Button-4>", lambda e: c.wheel(+1))   # X11 휠 위
@@ -307,9 +319,15 @@ class MouseTeleopIntervention:
         root.focus_force()
         self._root, self._view, self._photo = root, view, None
 
+    def _on_motion(self, x, y):
+        """왼쪽 카메라 열 위에서는 목표를 안 바꾼다 — 맵은 그 오른쪽에 붙어 있다."""
+        if x >= self._map_x0:
+            self.controller.set_cursor(self.map.to_world(x - self._map_x0, y))
+
     # ---- render_fn 계약 -----------------------------------------------------------
     def render(self, frame):
-        """frame(HWC uint8 RGB, agentview 고해상도)을 맵 옆에 붙여 띄우고 입력을 처리한다.
+        """frame(HWC uint8 RGB 한 장, 여러 장의 리스트, 또는 {카메라 이름: 영상})을 맵 왼쪽에 세로로
+        쌓아 띄우고 입력을 처리한다. dict면 칸마다 테두리와 카메라 이름을 붙인다.
 
         일시정지 중엔 여기서 창을 계속 갱신하며 머문다(호출부의 스텝 루프가 그동안 멈춘다).
         되감기 요청이 들어오면 일시정지여도 돌아간다 — 호출부가 되감은 장면으로 다시 부르면
@@ -319,8 +337,9 @@ class MouseTeleopIntervention:
 
         if self._root is None:
             self._open_window()
+        frames = frame if isinstance(frame, (list, tuple, dict)) else [frame]
         while True:
-            img = Image.fromarray(np.ascontiguousarray(self._compose(frame)[:, :, ::-1]))  # BGR -> RGB
+            img = Image.fromarray(np.ascontiguousarray(self._compose(frames)[:, :, ::-1]))  # BGR -> RGB
             if self._photo is None:
                 self._photo = ImageTk.PhotoImage(img)
                 self._view.configure(image=self._photo)
@@ -331,23 +350,45 @@ class MouseTeleopIntervention:
                 return not self._quit_requested
             time.sleep(0.05)
 
-    def _compose(self, frame):
+    def _compose(self, frames):
+        """[카메라들(위에서부터) | 맵] BGR 캔버스. 카메라 한 장의 높이 = 맵 높이 / 카메라 수.
+        frames가 {이름: 영상}이면 칸 경계가 보이게 테두리와 이름표를 그린다."""
         import cv2
 
-        rgb = np.asarray(frame)
-        if rgb.shape[0] != self.map.size:
-            rgb = cv2.resize(rgb, (int(rgb.shape[1] * self.map.size / rgb.shape[0]), self.map.size))
-        right = np.ascontiguousarray(rgb[:, :, ::-1])
-        canvas = np.concatenate([self._draw_map(), right], axis=1)
+        names = list(frames) if isinstance(frames, dict) else [None] * len(frames)
+        frames = list(frames.values()) if isinstance(frames, dict) else frames
+        S = self.map.size
+        h = S // len(frames)
+        cams = []
+        for f, name in zip(frames, names):
+            f = np.asarray(f)
+            f = f if f.shape[0] == h else cv2.resize(f, (int(f.shape[1] * h / f.shape[0]), h))
+            f = np.ascontiguousarray(f[:, :, ::-1])  # RGB -> BGR
+            if name is not None:
+                label = name + (" (wrist)" if name == "robot0_eye_in_hand" else "")
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+                cv2.rectangle(f, (0, 0), (f.shape[1] - 1, h - 1), (0, 200, 255), 2)
+                cv2.rectangle(f, (2, 2), (tw + 14, th + 14), (30, 30, 30), -1)
+                cv2.putText(f, label, (8, th + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 1)
+            cams.append(f)
+        left = np.concatenate(cams, axis=0)
+        left = np.pad(left, ((0, S - left.shape[0]), (0, 0), (0, 0)))
+        self._map_x0 = left.shape[1]
+        canvas = np.ascontiguousarray(np.concatenate([left, self._draw_map()], axis=1))
+        x0 = self._map_x0
         mode = "PAUSED" if self._paused else ("HUMAN" if self._active else "policy")
         color = (0, 200, 255) if self._paused else ((0, 0, 255) if self._active else (0, 200, 0))
-        cv2.putText(canvas, mode, (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.putText(canvas, mode, (x0 + 8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         if self._paused and self._rewound is not None:
             src, dst = self._rewound
             cv2.putText(canvas, f"<< step {src} -> {dst}  [s]=resume",
-                        (120, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
-        cv2.putText(canvas, self._HELP, (8, canvas.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                    (255, 255, 255), 1)
+                        (x0 + 120, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+        # 도움말은 맵 왼쪽 아래에 두 줄로, 맵 크기에 비례한 글씨로(480 맵 기준 0.35 → 960 맵 0.7)
+        scale, thick = 0.35 * self.map.size / 480, max(1, round(self.map.size / 480))
+        line_h = int(32 * self.map.size / 960)
+        for i, line in enumerate(self._HELP):
+            y = canvas.shape[0] - 12 - (len(self._HELP) - 1 - i) * line_h
+            cv2.putText(canvas, line, (x0 + 12, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thick)
         return canvas
 
     def _draw_map(self):
@@ -386,20 +427,25 @@ class MouseTeleopIntervention:
                                c.target_yaw if c.target_yaw is not None else yaw_of(s["R"]),
                                0.02 if c.grip_cmd > 0 else 0.08, (255, 255, 255), 2)
 
-        # z 바(오른쪽 가장자리): z_min~z_max, 눈금 = 테이블 윗면/peg 윗면, 마커 = 현재 z
-        x0, top, bot = S - 18, 40, S - 40
-        cv2.rectangle(img, (x0, top), (x0 + 8, bot), (120, 120, 120), 1)
+        # z 바(오른쪽 가장자리): z_min~z_max, 눈금 = peg 윗면, 마커 = 현재 z, 바닥~현재 z는 채운다.
+        # 맵 크기에 비례해 굵게 — 480 기준 두께 그대로 960 맵에 그렸더니 안 보였다(2026-09-30).
+        k = max(1, S // 480)
+        x0, top, bot = S - 18 * k, 40, S - 40
         def z_to_py(z):
             return int(bot - (np.clip(z, c.z_min, c.z_max) - c.z_min) / (c.z_max - c.z_min) * (bot - top))
-        for z_ref in (0.95,):
-            cv2.line(img, (x0 - 4, z_to_py(z_ref)), (x0 + 12, z_to_py(z_ref)), (200, 200, 60), 1)
         zy = z_to_py(s["grip"][2])
-        cv2.rectangle(img, (x0 - 2, zy - 3), (x0 + 10, zy + 3), col, -1)
+        cv2.rectangle(img, (x0, zy), (x0 + 8 * k, bot), (100, 100, 100), -1)
+        cv2.rectangle(img, (x0, top), (x0 + 8 * k, bot), (170, 170, 170), k)
+        for z_ref in (0.95,):
+            cv2.line(img, (x0 - 4 * k, z_to_py(z_ref)), (x0 + 12 * k, z_to_py(z_ref)), (200, 200, 60), 2 * k)
+        cv2.rectangle(img, (x0 - 3 * k, zy - 3 * k), (x0 + 11 * k, zy + 3 * k), col, -1)
         dz = float(c.z_up) - float(c.z_down)
         if self._active and dz:  # z는 목표 위치가 아니라 속도 명령이라, 누르고 있는 방향을 화살표로
-            cv2.arrowedLine(img, (x0 - 10, zy), (x0 - 10, zy - int(24 * dz)), (255, 255, 255), 2, tipLength=0.4)
+            cv2.arrowedLine(img, (x0 - 10 * k, zy), (x0 - 10 * k, zy - int(24 * k * dz)), (255, 255, 255),
+                            2 * k, tipLength=0.4)
         cv2.putText(img, f"z {s['grip'][2]:.3f}  yaw {np.degrees(yaw_of(s['R'])):+.0f}  grip {c.grip_cmd:+.1f}",
-                    (8, S - 28), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                    (12, S - 12 - 2 * int(32 * S / 960) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.35 * S / 480,
+                    (200, 200, 200), max(1, round(S / 480)))
         return img
 
     def _draw_gripper(self, img, xy, yaw, gap, col, thickness):

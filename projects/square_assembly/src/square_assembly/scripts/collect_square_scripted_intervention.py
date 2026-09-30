@@ -108,6 +108,52 @@ def wait_for_renderer(make_env, camera_name, display_size, timeout_s=120.0, retr
         time.sleep(retry_s)
 
 
+def wait_for_render_recovery(env, camera_name, display_size, sleep_fn=time.sleep, timeout_s=600.0, retry_s=5.0):
+    """에피소드 도중 고장난 렌더가 (같은 env에서) 회복될 때까지 기다린다. 점검이 env를 reset하니
+    호출부가 그 뒤 상태를 되돌리거나 새 에피소드를 시작해야 한다."""
+    t0 = time.time()
+    while renderer_is_noisy(env, camera_name, display_size):
+        if time.time() - t0 > timeout_s:
+            raise RuntimeError(f"{timeout_s / 60:.0f}분 동안 렌더가 복구되지 않았다 — 컨테이너를 새로 만들어 다시 시도한다(DOCKER.md §4).")
+        sleep_fn(retry_s)
+    print("  렌더 복구됨", flush=True)
+
+
+def make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_ep, wait_for_recovery):
+    """collect_episode의 render_fn — 저장될 obs의 렌더 노이즈를 감시하고 화면을 그린다.
+
+    연속 3프레임 노이즈면, 되감기를 지원하는 개입 장치(마우스)는 에피소드를 살린다: 렌더가 회복될
+    때까지 기다린 뒤 노이즈 직전의 정상 스텝으로 되감고 일시정지한다. 그사이 저장된 노이즈 프레임
+    (1~2개)은 되감기가 잘라낸다. 돌아갈 정상 스텝이 없거나(첫 프레임부터 노이즈) 되감기가 없는
+    장치(오라클)면 False로 에피소드를 끊는다 — 호출부가 버리고 다시 모은다(2026-09-30 이전엔 늘 이쪽).
+
+    Returns: (track, noise) — 끊겼으면 noise["streak"] >= 3.
+    """
+    noise = {"streak": 0, "last_clean": None}
+
+    def track(obs_raw):
+        idx = len(obs_ep)  # 이 obs가 다음 pre_step에서 저장될 자리
+        r = frame_roughness(np.transpose(obs_raw[camera], (1, 2, 0)) * 255.0)
+        if 2.0 < r < 15.0:
+            noise["streak"], noise["last_clean"] = 0, idx
+        else:
+            noise["streak"] += 1
+        if noise["streak"] >= 3:
+            if not hasattr(interv, "rewind_to") or noise["last_clean"] is None:
+                return False
+            print(f"  !! 렌더 노이즈(step {idx}) — 회복을 기다렸다가 step {noise['last_clean']}로 되감는다", flush=True)
+            wait_for_recovery()
+            interv.rewind_to(noise["last_clean"])
+            noise["streak"] = 0
+            return True
+        # 저장/학습은 obs의 84픽셀 그대로, 화면만 따로 고해상도로 렌더한다.
+        frames = {c: env.render(mode="rgb_array", height=display_size, width=display_size, camera_name=c)
+                  for c in display_cameras}
+        return interv.render(frames if len(frames) > 1 else frames[display_cameras[0]])
+
+    return track, noise
+
+
 def make_recorder(env, interv, obs_keys, rgb_keys):
     """collect_episode의 pre_step_fn — 매 스텝 액션 직전 obs·sim 상태를 쌓고, 되감기 요청을 처리한다.
 
@@ -184,11 +230,13 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         raise ValueError(f"--camera {camera}는 task.rgb_keys {rgb_keys}에 없다")
 
     env = wait_for_renderer(lambda: make_eval_env(task_cfg), camera, display_size)
-    display_camera = camera[: -len("_image")]
+    # 마우스 모드는 모든 카메라(--camera가 맨 위)를 맵 왼쪽에 쌓아 보여주고, 맵은 그 높이 합만큼 키운다.
+    shown = [camera] + [k for k in rgb_keys if k != camera] if mode == "mouse" else [camera]
+    display_cameras = [k[: -len("_image")] for k in shown]
 
     if mode == "mouse":
         interv = MouseTeleopIntervention(
-            env, controller=MouseTeleopController(**(teleop or {})), map_size=display_size,
+            env, controller=MouseTeleopController(**(teleop or {})), map_size=display_size * len(shown),
             window_name=window_name, quit_key=quit_key,
         )
     else:
@@ -220,19 +268,11 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             while outcomes["success"] < episodes:
                 interv.reset()
                 pre_step, obs_ep, states_ep = make_recorder(env, interv, obs_keys, rgb_keys)
-                noise_streak = [0]
-
-                def track(obs_raw, _streak=noise_streak):
-                    # 렌더가 도중에 고장나면(연속 3프레임 노이즈) 에피소드를 즉시 끊는다 —
-                    # 사람이 지켜보다 q를 누를 필요 없이 아래서 버리고 복구를 기다린다.
-                    r = frame_roughness(np.transpose(obs_raw[camera], (1, 2, 0)) * 255.0)
-                    _streak[0] = 0 if 2.0 < r < 15.0 else _streak[0] + 1
-                    # 저장/학습은 obs의 84픽셀 그대로, 화면만 따로 고해상도로 렌더한다.
-                    keep = interv.render(env.render(
-                        mode="rgb_array", height=display_size, width=display_size,
-                        camera_name=display_camera,
-                    ))
-                    return keep and _streak[0] < 3
+                track, noise = make_noise_tracker(
+                    env, interv, camera, display_cameras, display_size, obs_ep,
+                    lambda: wait_for_render_recovery(env, camera, display_size,
+                                                     sleep_fn=getattr(interv, "idle", time.sleep)),
+                )
 
                 result = collect_episode(
                     env, policy, normalizer, obs_keys,
@@ -241,14 +281,10 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     pre_step_fn=pre_step, should_end_fn=interv.should_end, control_fps=control_fps,
                     predict_fn=predict_fn, print_diagnostics=False,
                 )
-                if noise_streak[0] >= 3:
+                if noise["streak"] >= 3:
                     print(f"  !! 렌더 노이즈로 에피소드 중단(step {len(obs_ep)}) — 버리고 렌더 복구를 기다린다", flush=True)
-                    t0 = time.time()
-                    while renderer_is_noisy(env, camera, display_size):
-                        if time.time() - t0 > 600:
-                            raise RuntimeError("10분 동안 렌더가 복구되지 않았다 — 컨테이너를 새로 만들어 다시 시도한다(DOCKER.md §4).")
-                        time.sleep(5)
-                    print("  렌더 복구됨 — 같은 에피소드 번호로 다시 수집", flush=True)
+                    wait_for_render_recovery(env, camera, display_size, sleep_fn=getattr(interv, "idle", time.sleep))
+                    print("  같은 에피소드 번호로 다시 수집", flush=True)
                     continue
 
                 actions = np.asarray(result["actions"], dtype=np.float64)
@@ -321,7 +357,8 @@ def main():
     ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
     ap.add_argument("--quit-key", default="q", help="에피소드를 포기하고 다음으로 넘어가는 키")
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
-                    help=f"화면 표시용 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY})")
+                    help=f"화면 표시용 카메라 한 장의 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY}). "
+                         "마우스 모드의 맵은 이 값 × 카메라 수")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
