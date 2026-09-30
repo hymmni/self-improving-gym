@@ -108,7 +108,8 @@ class MouseTeleopController:
 
     Args:
         kp, kd: xy PD 게인. err(m)·v(m/step)에 곱해 delta(m)를 만든 뒤 _POS_SCALE로 나눈다.
-        pos_cap: xy delta 액션 상한(1.0 == 5cm/step). 오라클(0.5)보다 낮춰야 사람이 따라간다.
+        pos_cap: xy delta 액션 상한(1.0 == 5cm/step). 0.3이면 최고 약 7.7cm/s로 PH 시연(p90 21.8)보다
+            느려서 kp 2·상한 1.0으로 올렸다: 정상 속도 20~26cm/s, 넘침 0.6cm(시뮬 실측, z PI 적용 상태).
         down_speed, down_near_speed, near_zone: 내림 속도(m/s), 그리퍼가 열려 있을 때 너트 높이 near_zone(m)
             위부터의 속도.
         up_speed, up_start_speed, up_ramp, top_zone: 올림 속도, 누르기 시작할 때 속도와 가속 거리(m),
@@ -120,7 +121,7 @@ class MouseTeleopController:
         rot_cap: 회전 delta 액션 상한.
     """
 
-    def __init__(self, kp=1.0, kd=0.0, pos_cap=0.3, z_min=0.83, z_max=1.10,
+    def __init__(self, kp=2.0, kd=0.0, pos_cap=1.0, z_min=0.83, z_max=1.10,
                  yaw_step=np.deg2rad(5.0), rot_cap=0.4, kp_z=2.0, ki_z=0.2,
                  down_speed=0.07, down_near_speed=0.03, near_zone=0.01,
                  up_speed=0.18, up_start_speed=0.04, up_ramp=0.02, top_zone=0.03, z_cap=1.0, dt=0.05):

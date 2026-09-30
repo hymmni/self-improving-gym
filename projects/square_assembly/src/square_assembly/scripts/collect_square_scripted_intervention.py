@@ -347,7 +347,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 redo_state = None
                 print(
                     f"ep {ep}: steps={T} success={is_success} triggers={interv.num_triggers}  "
-                    f"누적 성공 {outcomes['success']}/{ep + 1} ({outcomes['success'] / (ep + 1):.1%})",
+                    f"성공 {outcomes['success']}/{episodes} (시도 {ep + 1})",
                     flush=True,
                 )
                 ep += 1
@@ -375,9 +375,9 @@ def main():
                     help="oracle: 트리거 키로 스크립트 오라클에 넘김 / mouse: 사람이 2D 맵 위에서 직접 조종"
                          "(Tab=사람/정책 전환 ←=직전 전환점으로 s=일시정지, runners/mouse_teleop.py 참고)")
     ap.add_argument("--trigger-key", default="s", help="[oracle] 실패 판단 시 오라클에 넘기는 키")
-    ap.add_argument("--kp", type=float, default=1.0, help="[mouse] xy P 게인")
+    ap.add_argument("--kp", type=float, default=2.0, help="[mouse] xy P 게인")
     ap.add_argument("--kd", type=float, default=0.0, help="[mouse] xy D 게인")
-    ap.add_argument("--pos-cap", type=float, default=0.3, help="[mouse] xy delta 상한(1.0=5cm/step)")
+    ap.add_argument("--pos-cap", type=float, default=1.0, help="[mouse] xy delta 상한(1.0=5cm/step)")
     ap.add_argument("--z-down", type=float, default=7.0, help="[mouse] Shift 내림 속도(cm/s, PH 시연 중앙값)")
     ap.add_argument("--z-up", type=float, default=18.0, help="[mouse] Ctrl 올림 속도(cm/s, 가속 뒤, PH 시연)")
     ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
