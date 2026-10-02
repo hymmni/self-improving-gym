@@ -14,6 +14,16 @@ train_sources: null      # 병합본 demo attrs["source"]에 이 문자열 중 �
 train_modes: null        # 학습에 쓸 프레임 종류(demo/rollout/intv/preintv). null이면 전부(val은 언제나 전부)
 save_epochs: null        # 이 epoch들이 끝날 때 <out>_ep{N}.pt로 중간 저장(학습 곡선용)
 encoder_lr: null         # 설정하면 비전 인코더도 이 lr로 같이 학습(풀 파인튜닝). null이면 헤드만
+# 아래는 train_dstg_vip.yaml의 같은 이름 옵션과 같은 뜻 — VIP 예측기와 같은 조건으로 학습할 때 쓴다.
+success_tail_only: false # 성공 시연/무개입 rollout 전체, 개입 성공은 마지막 개입 시작 이후만(train만, val은 그대로)
+record_curves: false     # epoch별 train/val MAE/NLL/k8(learning_curve.json) + val 유지 구간 MAE 최저 모델(best_predictor.pt)
+random_crop: true        # false면 학습도 CenterCrop(증강 없음) — 특징 캐시로 학습하는 VIP 경로와 같은 조건
+use_wandb: false
+wandb_project: square_assembly
+wandb_entity: null
+wandb_run_name: null
+wandb_group: null
+wandb_mode: online
 
 seed: 0
 device: cuda

@@ -98,6 +98,17 @@ def build_labels(names, ts, lengths, success, modes=None, fail_bin=None,
     return labels, mask
 
 
+def success_tail_start(mode):
+    """성공-tail이 시작하는 프레임 — 마지막 인간 개입이 시작된 곳(개입이 없으면 0).
+
+    DinoFeatureWindows.retain_success_tails와 같은 규칙이다(VIP 기준선이라 그쪽은 안 건드렸다).
+    """
+    from square_assembly.datasets.labels import LABEL_INTV
+    human = np.asarray(mode) == LABEL_INTV
+    onsets = np.flatnonzero(human & ~np.r_[False, human[:-1]])
+    return int(onsets[-1]) if len(onsets) else 0
+
+
 def _preintv_mask(names, ts, modes):
     from square_assembly.datasets.labels import LABEL_PREINTV
     if not modes:

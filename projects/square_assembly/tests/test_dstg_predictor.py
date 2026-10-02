@@ -120,3 +120,25 @@ def test_train_encoder_lets_grads_reach_the_encoder_but_not_the_unet():
     assert not any(p.requires_grad for p in predictor.frozen_policy.unet.parameters())
     with torch.no_grad():  # 보상 계산(no_grad) 경로에선 그래프를 안 만든다
         assert not predictor(_make_obs(image_hw=hw)).requires_grad
+
+
+def test_success_tail_uses_last_human_onset_and_keeps_prefix_out_of_history():
+    import numpy as np
+
+    from square_assembly.datasets.stg_labels import success_tail_start
+    from square_assembly.scripts.train_dstg import _LabeledWindow
+
+    assert success_tail_start(np.array([0, 1, 1, 0, -10, 1, 1, 0])) == 5  # 개입 두 번 — 마지막 시작
+    assert success_tail_start(np.zeros(4, int)) == 0                      # 무개입 성공은 전부
+
+    class Base:  # obs 창 = 프레임 [t-1, t] (To=2)
+        def __getitem__(self, t):
+            return {"obs": {"x": torch.tensor([[max(t - 1, 0)], [t]], dtype=torch.float32)},
+                    "demo_id": "demo_0", "index_in_demo": t}
+
+    labels = np.arange(8)[::-1]
+    tail = _LabeledWindow(Base(), labels, range(8), {"demo_0": 5})
+    assert tail[5]["obs"]["x"].flatten().tolist() == [5, 5]  # 잘라낸 4번 프레임이 이력에 안 들어온다
+    assert tail[6]["obs"]["x"].flatten().tolist() == [5, 6]
+    assert tail[3]["obs"]["x"].flatten().tolist() == [2, 3]  # tail 밖 샘플은 그대로
+    assert _LabeledWindow(Base(), labels, range(8))[5]["obs"]["x"].flatten().tolist() == [4, 5]  # held-out은 안 건드림
