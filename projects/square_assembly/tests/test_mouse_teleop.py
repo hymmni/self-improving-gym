@@ -715,3 +715,16 @@ def test_reset_clears_the_redo_request(clock):
     interv._handle_key("Left"); interv._handle_key("Left"); interv._handle_key("Return")
     interv.reset()
     assert not interv.redo_requested and not interv._confirm_redo
+
+
+def test_start_as_human_takes_control_paused_from_the_first_step():
+    interv = MouseTeleopIntervention(env=object(), state_fn=lambda: _state(z=0.9))
+    interv.controller.target_z = 5.0                       # 이전 에피소드에서 남은 목표
+    interv.reset()
+    interv.start_as_human(earlier=[False, False, False])   # 저장된 앞 3스텝은 정책 구간
+    assert interv._paused and interv.num_triggers == 1     # 재현한 장면을 보고 [s]로 푼다
+    assert interv(3, {}) is not None                       # 이어받는 첫 스텝부터 사람 액션
+    assert interv.controller.target_z == pytest.approx(0.9)  # 현재 자세에서 이어받는다(튀지 않게)
+
+    interv._handle_key("b")                                # 저장된 앞부분으로 되감으면 그때의 모드(정책)로 돌아간다
+    assert interv.pop_rewind(4) == 0 and interv(0, {}) is None

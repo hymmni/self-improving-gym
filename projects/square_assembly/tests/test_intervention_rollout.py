@@ -162,3 +162,57 @@ def test_recorder_follows_the_sim_across_hard_resets_and_rewinds_to_it():
     assert [s[0] for s in states_ep] == list(range(8))  # 멈춘 옛 sim(-99)이 아니라 지금 sim
     assert [o["x"][0] for o in obs_ep] == list(range(8))
     assert len(result["actions"]) == 8
+
+
+def test_resume_continues_a_stored_prefix_and_can_rewind_into_it():
+    """저장된 에피소드의 앞 3스텝을 이어받아 step 3에서 시작하고, 그 앞부분의 step 1로도 되감을 수 있다."""
+    env, seen, histories = _CounterEnv(), [], []
+    rewinds = iter([None, None, 1])                      # 두 스텝 진행한 뒤(step 5 직전) step 1로
+
+    def pre_step(step, obs):
+        seen.append((step, obs["x"][0]))
+        t = next(rewinds, None)
+        if t is not None:
+            env.reset_to(t)
+        return t
+
+    def predict(history):
+        histories.append([o["x"][0] for o in history])
+        return np.full((4, 7), 5.0)
+
+    result = _run(env, predict_fn=predict, max_steps=6, reset_fn=lambda: env.reset_to(3), pre_step_fn=pre_step,
+                  resume={"obs": [{"x": np.array([float(t)])} for t in range(3)],
+                          "actions": np.ones((3, 7)), "modes": [0, 0, 0]})
+
+    assert seen == [(3, 3), (4, 4), (5, 5), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)]
+    assert histories == [[2, 3], [0, 1], [4, 5]]          # 히스토리도 저장된 앞부분에서 이어진다
+    assert result["actions"][:, 0].tolist() == [1, 5, 5, 5, 5, 5]   # step 0만 저장된 액션, 되감은 뒤는 새 액션
+    assert [o["x"][0] for o in result["obs"]] == [0, 1, 2, 3, 4, 5]
+
+
+def test_rewind_also_restores_the_gripper_command_ramp():
+    """robosuite 그리퍼는 명령을 내부에서 적분한다(current_action) — sim 상태에 없어서 따로 되돌려야 한다."""
+    from square_assembly.scripts.collect_square_scripted_intervention import make_recorder
+
+    env = _HardResetEnv()
+    grip = type("Grip", (), {"current_action": np.zeros(2)})()
+    env.env.robots = [type("Robot", (), {"arms": ["right"], "gripper": {"right": grip}})()]
+    real_step = env.step
+
+    def step(action):
+        grip.current_action = grip.current_action + 1.0      # 스텝마다 명령이 한 칸씩 쌓인다
+        return real_step(action)
+
+    env.step = step
+
+    pre_step, obs_ep, states_ep = make_recorder(env, _RewindAt(at=6, to=2), ["x"], [])
+    _run(env, max_steps=8, pre_step_fn=pre_step)
+    assert grip.current_action[0] == 8.0      # step 2로 되감으며 그때 값(2)으로 돌아가 2 -> 8. 안 되돌리면 6 -> 12
+
+
+def test_gripper_ramp_follows_the_binary_command_at_the_gripper_speed():
+    from square_assembly.scripts.collect_square_scripted_intervention import gripper_ramp
+    ramp = gripper_ramp([1, 1, 1, 1, 1, 1, -1], speed=0.2)
+    assert len(ramp) == 8                                     # ramp[t] = 액션 t를 넣기 직전 값
+    np.testing.assert_allclose([r[1] for r in ramp], [0, .2, .4, .6, .8, 1.0, 1.0, .8], atol=1e-9)
+    np.testing.assert_allclose([r[0] for r in ramp], [0, -.2, -.4, -.6, -.8, -1.0, -1.0, -.8], atol=1e-9)

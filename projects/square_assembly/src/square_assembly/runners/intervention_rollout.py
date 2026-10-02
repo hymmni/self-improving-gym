@@ -194,6 +194,7 @@ def collect_episode(
     print_diagnostics=True,
     pre_step_fn=None,
     reset_fn=None,
+    resume=None,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
 
@@ -214,6 +215,11 @@ def collect_episode(
     obs가 액션보다 한 칸 앞선다(2026-09-22까지의 수집기가 그랬다). 저장은 pre_step_fn에서 한다.
 
     reset_fn()이 주어지면 env.reset() 대신 불러 첫 obs를 받는다 — 저장해 둔 시작 상태에서 다시 모을 때.
+
+    resume={"obs": [...], "actions": [...], "modes": [...]}(길이 t0, obs는 env가 주는 형식)이면 저장된
+    에피소드의 앞 t0스텝을 이미 지나온 것으로 치고 step t0부터 이어서 모은다 — reset_fn이 step t0의 sim
+    상태를 되돌려 그 obs를 줘야 한다. 반환값엔 앞부분도 들어 있고, 되감기는 그 앞부분으로도 들어간다
+    (그 스텝에서 실행 중이던 청크는 모르므로 정책이 이어받으면 그 자리에서 새로 추론한다).
 
     pre_step_fn(step, obs_raw)는 매 스텝 액션을 고르기 직전, 반환 obs[step]과 같은 시점에
     불린다. None을 돌려주면 그대로 진행하고, 스텝 번호 t(< step)를 돌려주면 되감기다 — 호출부가
@@ -255,13 +261,26 @@ def collect_episode(
     # 얼마나 걸리는지 측정. async_infer 여부와 무관 - "끊김"이 merger/추론 문제가 아니라
     # 렌더링·물리 스텝 자체의 비용/변동성 때문일 가능성을 실측으로 확인하기 위함.
 
+    start = 0
+    if resume is not None and len(resume["obs"]):
+        if async_infer:
+            raise RuntimeError("async_infer에선 resume을 못 쓴다 — obs_provider의 스텝 번호가 0부터다")
+        start = len(resume["obs"])
+        past = [resume["obs"][0]] * (obs_horizon - 1) + list(resume["obs"])  # past[t:t+To] = step t의 obs 히스토리
+        for t in range(start):
+            obs_seq.append({key: _to_storage_obs(key, resume["obs"][t][key]) for key in obs_keys})
+            action_seq.append(np.asarray(resume["actions"][t], dtype=np.float32))
+            mode_seq.append(int(resume["modes"][t]))
+            ctx_seq.append((None, 0, tuple(past[t:t + obs_horizon])))
+        obs_history = deque((past + [obs_raw])[start:], maxlen=obs_horizon)
+
     async_ctx = None
     if async_infer:
         async_ctx = _start_async_inference(predict_fn, obs_horizon, merger_name, te_coeff)
         async_ctx["obs_provider"].put(0, obs_raw)
 
     try:
-        step = 0
+        step = start
         while max_steps is None or step < max_steps:
             if should_end_fn is not None and should_end_fn():
                 break

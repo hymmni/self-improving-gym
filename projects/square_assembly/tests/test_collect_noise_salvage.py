@@ -84,3 +84,30 @@ def test_drop_episode_removes_the_group_and_returns_its_start_state():
         s0, T, ok = drop_episode(data, "demo_4")
         assert "demo_4" not in data and T == 3 and ok
         np.testing.assert_array_equal(s0, [0.0, 1.0])
+
+
+# ---- --redo: 저장된 에피소드를 마지막 개입 시작 상태에서 다시 수집 ----
+
+def test_last_intervention_onset_is_the_first_step_of_the_last_human_run():
+    from square_assembly.scripts.collect_square_scripted_intervention import last_intervention_onset
+    assert last_intervention_onset(np.array([0, 0, -10, -10, 1, 1, 1])) == 4
+    assert last_intervention_onset(np.array([0, 1, 1, 0, -10, 1, 1])) == 5     # 개입이 두 번이면 마지막 것
+    assert last_intervention_onset(np.array([0, 0, 0])) is None                # 개입 없는 에피소드
+
+
+
+def test_reset_to_state_refreshes_the_arm_controller_after_restoring():
+    """env.reset()이 컨트롤러에 남긴 홈 자세 캐시를, 상태를 되돌린 **뒤에** 새로 읽게 해야 첫 스텝에 팔이 안 튄다."""
+    from square_assembly.scripts.collect_square_scripted_intervention import reset_to_state
+    log = []
+    ctrl = type("Ctrl", (), {"update": lambda self, force=False: log.append(("update", force))})()
+    robot = type("Robot", (), {"arms": ["right"],
+                               "composite_controller": type("CC", (), {"get_controller": lambda self, part: ctrl})()})()
+
+    class Env:
+        env = type("Raw", (), {"robots": [robot]})()
+        def reset(self): log.append("reset")
+        def reset_to(self, state): log.append(("reset_to", state["states"])); return "obs"
+
+    assert reset_to_state(Env(), 7) == "obs"
+    assert log == ["reset", ("reset_to", 7), ("update", True)]

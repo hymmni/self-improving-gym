@@ -278,6 +278,15 @@ class MouseTeleopIntervention:
         self.num_triggers = 0
         self.controller.reset()
 
+    def start_as_human(self, earlier=()):
+        """저장된 에피소드를 개입 시작 상태에서 다시 모을 때(수집기 --redo): reset() 뒤에 부르면 이어받는 첫
+        스텝부터 사람 제어로, 멈춘 채 시작한다. 재현한 장면을 보고 [s]로 풀면 그때의 자세에서 이어받는다.
+
+        earlier: 저장된 앞부분의 스텝별 사람 제어 여부 — 그 안으로 되감으면 그때의 모드로 돌아간다."""
+        self._active = self._paused = self._resync = True
+        self._modes = [bool(m) for m in earlier]
+        self.num_triggers = 1
+
     def should_end(self):
         return self._quit_requested or self.redo_requested
 
