@@ -6,8 +6,11 @@ DDPO-SF(`train_si.py`의 기본 경로)와의 관계: 로그확률 계산은 완
 배치를 몇 번 쓰느냐다.
 
   DDPO-SF : loss = -c * mean(R_j * logp_new)                    배치 1회 사용
-  DPPO    : loss = -mean(min(rho*A_j, clip(rho)*A_j)) + v*MSE   배치 여러 epoch 사용
-            rho = exp(logp_new - logp_old)
+  DPPO    : loss = -mean(min(rho*A_jk, clip_k(rho)*A_jk)) + v*MSE   배치 여러 epoch 사용
+            rho = exp(logp_new - logp_old),  A_jk = A_j * gamma_denoising^(n-1-k)
+
+로그확률의 축약도 다르다: DDPO-SF는 청크 전체 차원의 합(`ddpo.step_logp`), DPPO는 원소별로
+자른 뒤 실행한 스텝만 평균(`reduce_logp`). 디노이징 단계 k별 할인·클립 폭은 `denoising_weights`.
 
 왜 이 확장을 하는가(`phases/4-diffusion-si/step4.md`는 DDPO-SF를 고른 이유로 SI-EFM
 Algorithm 1이 deadly triad의 두 꼭짓점을 배제한다는 점을 든다 — DPPO는 그 둘을 다시
@@ -90,6 +93,32 @@ def clipped_surrogate(logp_new, logp_old, adv, clip_ratio):
             "approx_kl": float(((ratio - 1.0) - (logp_new - logp_old)).mean()),
         }
     return loss, info
+
+
+def reduce_logp(logp_elem, horizon):
+    """원소별 로그확률 (B, Tp, Da) -> PPO 비율에 쓰는 (B,).
+
+    From: irom-princeton/dppo model/diffusion/diffusion_ppo.py (PPODiffusion.loss)
+    원소별로 [-5, 2]에 자르고, 실제 실행한 앞 `horizon`스텝만 **평균**한다(합이 아니다).
+    평균이라 비율이 청크 차원 수(16x7)에 덜 민감해지고, 그래서 논문의 클립 폭 0.01이 성립한다 —
+    합으로 재면 같은 정책 변화에도 로그 비율이 차원 수만큼 커진다. 실행하지 않은 뒤쪽 스텝은
+    보상에 영향이 없어 그래디언트에 잡음만 보탠다.
+    """
+    return logp_elem.clamp(-5.0, 2.0)[:, :horizon].mean(dim=(1, 2))
+
+
+def denoising_weights(k, n, gamma_denoising, clip, clip_base, clip_rate):
+    """파인튜닝하는 n개 디노이징 단계 중 k번째(0=가장 노이즈 많음, n-1=마지막)의 (어드밴티지 할인, 클립 폭).
+
+    From: irom-princeton/dppo model/diffusion/diffusion_ppo.py (PPODiffusion.loss)
+    할인 = gamma_denoising^(n-1-k) — 노이즈가 많은 앞 단계일수록 최종 행동과의 관계가 흐려 덜 반영한다.
+    클립 폭은 clip_base(k=0)에서 clip(k=n-1)까지 지수적으로 넓어진다.
+    """
+    k = np.asarray(k, dtype=np.float32)
+    discount = gamma_denoising ** (n - 1 - k)
+    if n == 1:
+        return discount, np.full_like(k, clip)
+    return discount, clip_base + (clip - clip_base) * np.expm1(clip_rate * k / (n - 1)) / np.expm1(clip_rate)
 
 
 def denoising_step_filter(n_pairs_per_decision, ft_denoising_steps):

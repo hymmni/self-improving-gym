@@ -17,9 +17,13 @@ GraspCarry2D와의 핵심 차이는 "결정"의 단위다 — square task 정책
 (`phases/5-mani-sim-ddpo/step3.md` 참고).
 
 `log p(a|o,g)`는 연속 디퓨전이라 닫힌 형태가 없다 — `policies/diffusion/ddpo.py`(step 0)가
-역확산 100단계 각각을 가우시안 전이로 보고 단계별 로그확률의 합으로 대체한다(DDPO,
+역확산 단계 각각을 가우시안 전이로 보고 단계별 로그확률의 합으로 대체한다(DDPO,
 Black et al. 2023). 데이터 재사용이 없는 DDPO-SF(score function, 바닐라 REINFORCE)를
 쓰는 이유도 원본과 동일 — 논문의 on-policy 설계와 정확히 맞기 때문이다.
+
+샘플러는 수집기와 같은 DDIM `ddim_steps`(기본 10, eta=1)다 — 롤아웃과 로그확률이 같은 전이를
+쓰도록 `_bind_sampler`로 묶는다. `algo=dppo`는 여기에 DPPO(Ren et al. 2024)의 크리틱·PPO 클립·
+노이즈 하한·디노이징 할인을 얹는다(`policies/diffusion/dppo.py`).
 
 보상/성공 판정은 `policies/diffusion/dstg_reward.py`(step 2)가 감싼 얼려진
 관측-only STG 예측기(step 1)에서 나온다. 환경의 `is_success()`/`done`은 진단
@@ -41,6 +45,8 @@ import os
 import shutil
 import time
 from collections import deque
+from functools import partial
+from types import SimpleNamespace
 
 import hydra
 import numpy as np
@@ -53,7 +59,7 @@ from square_assembly.datasets.robomimic_dataset import RobomimicSequenceDataset
 from square_assembly.factory import registry
 from square_assembly.policies.diffusion import ddpo as ddpo_module
 from square_assembly.policies.diffusion.dstg_reward import DstgReward, calibrate_threshold
-from square_assembly.runners.rollout import _build_obs_batch
+from square_assembly.runners.rollout import _build_obs_batch, maybe_speed_up_inference
 from square_assembly.policies.diffusion import dppo as dppo_module
 from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_config, save_run_config
 from square_assembly.utils.task_utils import is_image_task, make_eval_env, task_obs_keys
@@ -248,8 +254,15 @@ def _save_checkpoint(policy, cfg, out_path, epoch, task_cfg, policy_cfg, policy_
 
 # ------------------------------------------------------------------------ main
 
+def _bind_sampler(eta, min_std):
+    """ddpo 함수들에 샘플러 설정(DDIM eta, 노이즈 하한)을 묶는다 — 롤아웃(`sample_with_trace`)과
+    업데이트(`step_logp*`)가 서로 다른 전이를 쓰면 로그확률이 조용히 틀리므로 한 곳에서만 정한다."""
+    return SimpleNamespace(**{name: partial(getattr(ddpo_module, name), eta=eta, min_std=min_std)
+                              for name in ("sample_with_trace", "step_logp", "step_logp_elem")})
+
+
 def _pair_logp_nograd(policy, ddpo_module, global_cond_all, xs_all, timesteps_all,
-                      j_idx, p_idx, batch_size, device):
+                      j_idx, p_idx, batch_size, device, horizon):
     """수집 시점 정책(=행동 정책)의 (결정, 디노이징-단계)별 로그확률. PPO 비율의 분모다.
 
     업데이트 전에 한 번만 재므로 첫 epoch의 비율은 정확히 1이 된다 — 그게 맞는지는
@@ -260,10 +273,10 @@ def _pair_logp_nograd(policy, ddpo_module, global_cond_all, xs_all, timesteps_al
         for start in range(0, len(j_idx), batch_size):
             sl = slice(start, start + batch_size)
             bj, bp = j_idx[sl], p_idx[sl]
-            lp = ddpo_module.step_logp(
+            lp = dppo_module.reduce_logp(ddpo_module.step_logp_elem(
                 policy.unet, policy.inference_scheduler, global_cond_all[bj].to(device),
                 xs_all[bj, bp].to(device), xs_all[bj, bp + 1].to(device),
-                timesteps_all[bp].to(device))
+                timesteps_all[bp].to(device)), horizon)
             out[sl] = lp.detach().cpu()
     return out
 
@@ -273,16 +286,20 @@ def _dppo_update(policy, ddpo_module, optimizer, critic, critic_optimizer, globa
                  cfg, device, it):
     """DPPO 업데이트 — 한 배치를 cfg.update_epochs번 재사용한다.
 
-    어드밴티지는 결정(=청크) 단위 GAE로 만들고, 한 결정의 디노이징 단계들은 그 값을
-    그대로 공유한다(dppo.py 참고). 크리틱은 정책과 별도 옵티마이저로 같은 배치에서 학습한다.
+    어드밴티지는 결정(=청크) 단위 GAE로 만들고, 한 결정의 디노이징 단계들은 그 값에 단계별
+    할인만 곱해 나눠 갖는다(dppo.py 참고). 크리틱은 정책과 별도 옵티마이저로 같은 배치에서 학습한다.
     """
     steps = dppo_module.denoising_step_filter(n_pairs_per_decision, cfg.get("ft_denoising_steps"))
     n_decisions = global_cond_all.shape[0]
     j_idx = np.repeat(np.arange(n_decisions), len(steps))
     p_idx = np.tile(steps, n_decisions)
+    k_idx = np.tile(np.arange(len(steps)), n_decisions)
+    discount, clip = dppo_module.denoising_weights(np.arange(len(steps)), len(steps), cfg.gamma_denoising,
+                                                   cfg.clip_ratio, cfg.clip_ratio_base, cfg.clip_ratio_rate)
+    horizon = cfg.policy.action_horizon   # 청크에서 실제 실행하는 앞쪽 스텝 수
 
     logp_old = _pair_logp_nograd(policy, ddpo_module, global_cond_all, xs_all, timesteps_all,
-                                 j_idx, p_idx, cfg.logp_batch, device)
+                                 j_idx, p_idx, cfg.logp_batch, device, horizon)
 
     # 결정별 V(o) -> 에피소드마다 끊어 GAE. 에피소드 경계를 무시하면 다음 에피소드의
     # 보상이 이번 에피소드 마지막 결정으로 새어든다.
@@ -304,14 +321,14 @@ def _dppo_update(policy, ddpo_module, optimizer, critic, critic_optimizer, globa
         perm = rng.permutation(len(j_idx))
         for b_i, start in enumerate(range(0, len(perm), cfg.logp_batch)):
             sl = perm[start:start + cfg.logp_batch]
-            bj, bp = j_idx[sl], p_idx[sl]
-            lp = ddpo_module.step_logp(
+            bj, bp, bk = j_idx[sl], p_idx[sl], k_idx[sl]
+            lp = dppo_module.reduce_logp(ddpo_module.step_logp_elem(
                 policy.unet, policy.inference_scheduler, global_cond_all[bj].to(device),
                 xs_all[bj, bp].to(device), xs_all[bj, bp + 1].to(device),
-                timesteps_all[bp].to(device))
-            adv_b = torch.as_tensor(adv_all[bj], dtype=torch.float32, device=device)
-            loss, info = dppo_module.clipped_surrogate(lp, logp_old[sl].to(device), adv_b,
-                                                       cfg.clip_ratio)
+                timesteps_all[bp].to(device)), horizon)
+            adv_b = torch.as_tensor(adv_all[bj] * discount[bk], dtype=torch.float32, device=device)
+            clip_b = torch.as_tensor(clip[bk], dtype=torch.float32, device=device)
+            loss, info = dppo_module.clipped_surrogate(lp, logp_old[sl].to(device), adv_b, clip_b)
             optimizer.zero_grad()
             loss.backward()
             if cfg.get("max_grad_norm"):
@@ -357,6 +374,13 @@ def main(cfg: DictConfig):
     policy.eval()  # VisionEncoder crop을 CenterCrop으로 고정(rollout.py/eval.py와 동일 관례) —
     # 학습 내내 이 모드를 유지한다(BatchNorm은 이미 GroupNorm으로 교체돼 있어 train/eval
     # 차이가 없고, RandomCrop 같은 확률적 augmentation만 이 플래그로 갈린다).
+    # 샘플러: 수집기와 같은 DDIM(기본 10스텝, eta=1). ddim_steps가 0/null이면 학습 때의 DDPM 그대로.
+    maybe_speed_up_inference(policy, cfg.get("ddim_steps") or None, eta=cfg.get("ddim_eta", 1.0))
+    eta = getattr(policy, "inference_step_kwargs", {}).get("eta", 1.0)
+    min_std = cfg.get("min_denoising_std") if cfg.algo == "dppo" else None
+    if eta <= 0 and not min_std:
+        raise ValueError("ddim_eta=0은 단계별 노이즈가 없어 로그확률이 정의되지 않는다 — eta>0으로 돌릴 것.")
+    ddpo_fns = _bind_sampler(eta, min_std)
     policy.encoders.requires_grad_(False)  # 이중 안전판 — collect 단계는 이미 no_grad로 감싸고
     # global_cond를 detach해서 저장하므로 인코더로 그래디언트가 흐를 경로 자체가 없지만,
     # DstgPredictor(step 1)와 같은 원칙으로 명시적으로도 얼려둔다.
@@ -412,13 +436,15 @@ def main(cfg: DictConfig):
         critic = dppo_module.Critic(cond_dim, hidden=tuple(cfg.critic_hidden)).to(device)
         critic_optimizer = torch.optim.Adam(critic.parameters(), lr=cfg.value_lr)
         logger.info(f"DPPO: critic cond_dim={cond_dim} update_epochs={cfg.update_epochs} "
-                    f"clip={cfg.clip_ratio} gae_lambda={cfg.gae_lambda} "
+                    f"clip={cfg.clip_ratio_base}~{cfg.clip_ratio} gae_lambda={cfg.gae_lambda} "
+                    f"gamma_denoising={cfg.gamma_denoising} min_denoising_std={min_std} "
                     f"ft_denoising_steps={cfg.get('ft_denoising_steps')}")
     generator = torch.Generator(device=device).manual_seed(cfg.seed0 + 1_000_000)
     env_seed_counter = cfg.seed0
 
     first_update_checked = False
-    n_pairs_per_decision = n_steps - 1
+    # 노이즈 하한이 있으면 마지막 단계도 확률적이라 로그확률이 있다. 없으면 결정론적이라 뺀다.
+    n_pairs_per_decision = n_steps if min_std else n_steps - 1
     os.makedirs(os.path.dirname(cfg.out) or ".", exist_ok=True)
 
     best_succ_rate, best_R_mean, best_it = -1.0, -np.inf, None
@@ -442,7 +468,7 @@ def main(cfg: DictConfig):
                 np.random.seed(env_seed_counter)  # robosuite 초기 배치 시퀀스 고정(eval.py와 동일 방식)
                 env_seed_counter += 1
                 decisions, env_success, n_env_steps = collect_episode_si(
-                    env, policy, ddpo_module, dstg_reward, normalizer, obs_keys, rgb_keys,
+                    env, policy, ddpo_fns, dstg_reward, normalizer, obs_keys, rgb_keys,
                     policy_cfg.obs_horizon, policy_cfg.action_horizon, policy_cfg.pred_horizon,
                     task_cfg.action_dim, cfg.max_steps, device, cfg.gamma, generator, cfg.termination,
                 )
@@ -469,12 +495,12 @@ def main(cfg: DictConfig):
         else:
             R_train = R_all
 
-        timesteps_all = policy.inference_scheduler.timesteps[:-1]  # (n_steps-1,), t=0 제외
+        timesteps_all = policy.inference_scheduler.timesteps[:n_pairs_per_decision]
         ppo_info = {}
 
         if cfg.algo == "dppo":
             losses, ppo_info = _dppo_update(
-                policy, ddpo_module, optimizer, critic, critic_optimizer, global_cond_all,
+                policy, ddpo_fns, optimizer, critic, critic_optimizer, global_cond_all,
                 xs_all, np.asarray(all_r, dtype=np.float32), ep_decision_counts,
                 timesteps_all, n_pairs_per_decision, cfg, device, it)
             if not first_update_checked:
@@ -503,7 +529,7 @@ def main(cfg: DictConfig):
                 if not first_update_checked:
                     encoders_before = {k: v.clone() for k, v in policy.encoders.state_dict().items()}
 
-                lp = ddpo_module.step_logp(policy.unet, policy.inference_scheduler, global_cond_b, x_in_b, x_out_b, t_b)
+                lp = ddpo_fns.step_logp(policy.unet, policy.inference_scheduler, global_cond_b, x_in_b, x_out_b, t_b)
                 loss = -cfg.reinforce_scale * (R_b * lp).mean()
 
                 optimizer.zero_grad()

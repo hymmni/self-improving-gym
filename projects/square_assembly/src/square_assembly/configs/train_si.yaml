@@ -13,8 +13,15 @@ algo: ddpo_sf              # ddpo_sf | dppo. ddpo_sf가 논문(SI-EFM Algorithm 
                            # 여러 번 재사용해 표본 효율을 얻는 대신 off-policy 재사용과
                            # 부트스트랩을 들여온다(policies/diffusion/dppo.py 참고).
 
-# --- algo=dppo 전용 ---
-clip_ratio: 0.2            # PPO 클립 폭
+ddim_steps: 10             # 추론 디노이징 스텝 수(DDIM). 0/null이면 학습 때의 DDPM 100 그대로.
+ddim_eta: 1.0              # 수집기(--ddim-steps/--ddim-eta)와 맞춘다. 0은 노이즈가 없어 확률을 못 잰다
+
+# --- algo=dppo 전용 (값은 DPPO 원본 cfg/robomimic/finetune/square/ft_ppo_diffusion_mlp_img.yaml) ---
+clip_ratio: 0.01           # PPO 클립 폭 — 마지막(가장 깨끗한) 디노이징 단계의 값. 로그확률을 합이 아니라
+clip_ratio_base: 0.001     # 평균으로 재므로(dppo.reduce_logp) 이렇게 작다. 첫 단계는 clip_ratio_base,
+clip_ratio_rate: 3         # 그 사이는 지수적으로 넓어진다
+gamma_denoising: 0.99      # 디노이징 할인 — 노이즈가 많은 앞 단계일수록 어드밴티지를 덜 반영
+min_denoising_std: 0.1     # 탐색 노이즈 하한(정규화된 행동 단위). 샘플링·로그확률 공통, 마지막 단계에도 적용
 update_epochs: 4           # 한 배치를 몇 번 재사용하는가. 이게 DDPO-SF 대비 유일한 이득원이다
 gae_lambda: 0.95
 value_coef: 0.5
@@ -27,7 +34,8 @@ statistic: mean            # mean | cvar (DstgReward에 그대로 전달)
 cvar_alpha: 0.8
 gamma: 0.9                 # 논문 기본값
 reinforce_scale: 5.0e-2    # 논문 c
-lr: 1.0e-6                 # 파인튜닝이라 사전학습 lr(1e-4)보다 훨씬 작게 — train.yaml의
+lr: 1.0e-6                 # (DPPO 원본의 이미지 정책 actor_lr은 1e-5 — algo=dppo로 돌릴 땐 재검토)
+                           # 파인튜닝이라 사전학습 lr(1e-4)보다 훨씬 작게 — train.yaml의
                             # system=apo 파인튜닝 lr(1e-6~1e-7 권장) 실측 근거를 그대로 따른다.
 termination: learned        # learned | env — 보상은 항상 d로만 만든다. 이 값은 "언제
                             # 에피소드를 끝내는가"만 바꾼다(phase 4 step 3과 동일 원칙).

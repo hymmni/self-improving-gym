@@ -113,3 +113,11 @@ deadly triad의 두 꼭짓점(off-policy 재사용, 부트스트랩)을 의도�
 로그에 남기고, `max_grad_norm=1.0`을 기본으로 둔다. `advantage_norm`은 DDPO-SF 경로에선 논문대로
 off가 기본이지만 DPPO 런에선 켠다(스모크 실측 adv_std=32). 두 알고리즘을 같은 스크립트·같은 지표
 아래 두었으므로, 어느 쪽이 실제로 나은지는 같은 예측기·같은 시작 정책으로 대조하면 된다.
+
+**갱신(2026-10-01)**: 샘플러를 수집기와 같은 DDIM 10(eta=1)으로 맞추고(`ddim_steps`/`ddim_eta`, 두 알고리즘
+공통 기본값. `ddpo.py`가 DDIM 전이도 계산), DPPO 경로를 원본 구현(irom-princeton/dppo)에 맞췄다 —
+탐색 노이즈 하한(`min_denoising_std`, 마지막 단계 포함), 디노이징 할인(`gamma_denoising`), 단계별 클립 폭
+(0.001~0.01). 로그확률은 더 이상 `step_logp`(청크 전체 차원의 합)를 공유하지 않는다: DPPO는 원소별로 자른 뒤
+실행한 스텝만 **평균**한다(`dppo.reduce_logp`). 클립 0.01은 이 평균을 전제로 한 값이라, 합으로 재던 이전
+0.2와 숫자만으로 비교할 수 없다. 원본과 여전히 다른 점: 얼린 인코더 위의 MLP 크리틱, 환경 1개, 크리틱 워밍업
+없음, STG 보상(환경 보상 아님). 근거·실측은 `experiments/2026-10-01_dppo-ddim-alignment.md`.
