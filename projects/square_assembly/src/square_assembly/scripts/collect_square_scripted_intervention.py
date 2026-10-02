@@ -35,6 +35,12 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
 'b'/←로 개입 이전까지 되감아 더 일찍 잡을 수 있고, 'r'이면 같은 배치로 처음부터(정책부터) 다시 한다.
 [q]는 그 에피소드를 건너뛴다. 성공으로 끝났을 때만 기존 에피소드를 새 것으로 바꾼다.
 
+정책 없이 사람 시연만 모으려면 `--mode mouse --human-only`: 체크포인트를 안 읽고(--base-ckpt 무시, task는
+configs/task/square.yaml) 에피소드마다 사람 제어로 멈춘 채 시작한다([s]로 시작, Tab은 안 먹는다). 모든 스텝이
+INTV로 라벨되고 attrs["sampler"]는 "human"이다.
+
+창이 작으면 `--zoom 1.5`(창 모드 배율)나 `--fullscreen`(실행 중 F11로 오간다)으로 키운다 — 다 그린 화면을 늘려 띄운다.
+
 화면은 --display-size 해상도로 따로 렌더해서 보여준다(학습/저장 데이터는 task의
 image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리). 480을 넘길 순 없다
 (_MAX_DISPLAY 참고).
@@ -293,7 +299,7 @@ def sampler_label(policy):
 
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False,
-        ddim_steps=10, ddim_eta=1.0, redo=None):
+        ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
     if mode != "mouse":
@@ -301,6 +307,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     if redo and (mode != "mouse" or overwrite):
         raise ValueError("--redo는 --mode mouse에서만, --overwrite 없이 쓴다")
+    if human_only and mode != "mouse":
+        raise ValueError("--human-only는 --mode mouse에서만 쓴다")
     if display_size > _MAX_DISPLAY:
         raise ValueError(
             f"--display-size는 {_MAX_DISPLAY} 이하여야 한다(요청 {display_size}) — "
@@ -316,17 +324,26 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    saved = load_run_config(base_ckpt)
-    task_cfg, policy_cfg, policy_name = saved.task, saved.policy, saved.policy_name
+    if human_only:   # 정책이 한 스텝도 안 움직인다 — 체크포인트 없이 task 설정만 읽는다
+        from omegaconf import OmegaConf
 
-    policy = registry.create_policy(policy_name, task_cfg, policy_cfg).to(device)
-    load_epoch_checkpoint(base_ckpt, policy, device)
-    policy.eval()
-    maybe_speed_up_inference(policy, ddim_steps or None, eta=ddim_eta)
-    sampler = sampler_label(policy)
+        task_cfg = OmegaConf.load(os.path.join(os.path.dirname(__file__), "..", "configs", "task", "square.yaml"))
+        policy = normalizer = None
+        obs_horizon = action_horizon = 1
+        sampler = "human"
+    else:
+        saved = load_run_config(base_ckpt)
+        task_cfg, policy_cfg, policy_name = saved.task, saved.policy, saved.policy_name
 
-    stats_path = os.path.join(os.path.dirname(base_ckpt), "normalization_stats.json")
-    normalizer = MinMaxNormalizer(load_stats(stats_path))
+        policy = registry.create_policy(policy_name, task_cfg, policy_cfg).to(device)
+        load_epoch_checkpoint(base_ckpt, policy, device)
+        policy.eval()
+        maybe_speed_up_inference(policy, ddim_steps or None, eta=ddim_eta)
+        sampler = sampler_label(policy)
+        obs_horizon, action_horizon = task_cfg.get("obs_horizon", policy_cfg.obs_horizon), policy_cfg.action_horizon
+
+        stats_path = os.path.join(os.path.dirname(base_ckpt), "normalization_stats.json")
+        normalizer = MinMaxNormalizer(load_stats(stats_path))
     obs_keys = task_obs_keys(task_cfg)
     rgb_keys = list(task_cfg.rgb_keys) if is_image_task(task_cfg) else []
     if camera not in rgb_keys:
@@ -340,7 +357,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     if mode == "mouse":
         interv = MouseTeleopIntervention(
             env, controller=MouseTeleopController(**(teleop or {})), map_size=display_size * len(shown),
-            window_name=window_name, quit_key=quit_key,
+            window_name=window_name, quit_key=quit_key, human_only=human_only, zoom=zoom, fullscreen=fullscreen,
         )
     else:
         interv = ScriptedFailureIntervention(
@@ -360,19 +377,19 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         track, noise = make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_ep, recover_render)
 
         def reset_fn():
-            obs = reset_to_state(env, start_state)
+            obs = env.reset() if start_state is None else reset_to_state(env, start_state)
             if resume is not None:
                 _gripper(env).current_action = grip_at_start
+            if resume is not None or human_only:   # 멈춘 채 시작한다 — 첫 스텝 전에 장면부터 띄운다
                 track(obs)
             return obs
 
         result = collect_episode(
-            env, policy, normalizer, obs_keys,
-            task_cfg.get("obs_horizon", policy_cfg.obs_horizon), policy_cfg.action_horizon, device,
+            env, policy, normalizer, obs_keys, obs_horizon, action_horizon, device,
             intervention_fn=interv, max_steps=max_steps, render=False, render_fn=track,
             pre_step_fn=pre_step, should_end_fn=interv.should_end, control_fps=control_fps,
             predict_fn=predict_fn, print_diagnostics=False,
-            reset_fn=None if start_state is None else reset_fn, resume=resume,
+            reset_fn=reset_fn, resume=resume,
         )
         return result, obs_ep, states_ep, noise
 
@@ -531,11 +548,13 @@ def main():
                          "(Tab=사람/정책 전환 ←=직전 전환점으로 s=일시정지, runners/mouse_teleop.py 참고)")
     ap.add_argument("--trigger-key", default="s", help="[oracle] 실패 판단 시 오라클에 넘기는 키")
     ap.add_argument("--kp", type=float, default=2.0, help="[mouse] xy P 게인")
-    ap.add_argument("--kd", type=float, default=0.0, help="[mouse] xy D 게인")
+    ap.add_argument("--kd", type=float, default=2.0, help="[mouse] xy D 게인(0이면 멈출 때 0.4~0.7cm 넘친다)")
     ap.add_argument("--pos-cap", type=float, default=1.0, help="[mouse] xy delta 상한(1.0=5cm/step)")
     ap.add_argument("--z-down", type=float, default=7.0, help="[mouse] Shift 내림 속도(cm/s, PH 시연 중앙값)")
     ap.add_argument("--z-up", type=float, default=18.0, help="[mouse] Ctrl 올림 속도(cm/s, 가속 뒤, PH 시연)")
     ap.add_argument("--yaw-step", type=float, default=5.0, help="[mouse] 휠 한 칸당 야우(도)")
+    ap.add_argument("--rot-cap", type=float, default=0.4,
+                    help="[mouse] 회전 액션 상한(0.4 = 최고 47도/s, 0.6 = 64도/s. 0.8부터는 위치가 5cm 넘게 밀린다)")
     ap.add_argument("--ddim-steps", type=int, default=10,
                     help="정책 추론을 DDIM N스텝으로(0=학습 그대로 DDPM 100). 2026-09-30 50ep 비교에서 성공률·실패 "
                          "유형 차이 없음, 청크 666→75ms. 에피소드마다 attrs['sampler']에 기록")
@@ -545,18 +564,25 @@ def main():
     ap.add_argument("--display-size", type=int, default=_MAX_DISPLAY,
                     help=f"화면 표시용 카메라 한 장의 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY}). "
                          "마우스 모드의 맵은 이 값 × 카메라 수")
+    ap.add_argument("--zoom", type=float, default=1.0,
+                    help="[mouse] 창을 이 배율로 늘려 띄운다(그리는 해상도는 그대로 — 조금 흐려진다)")
+    ap.add_argument("--fullscreen", action="store_true", help="[mouse] 전체화면으로 시작한다(F11로 오간다)")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
     ap.add_argument("--redo", nargs="+", default=None, metavar="demo_N",
                     help="[mouse] 저장된 에피소드들을 마지막 개입 시작 상태에서 이어받아 다시 수집한다"
                          "(성공했을 때만 교체. 새 에피소드는 모으지 않는다)")
+    ap.add_argument("--human-only", action="store_true",
+                    help="[mouse] 정책 없이 사람 시연만 모은다 — 체크포인트를 안 읽고(--base-ckpt 무시) 에피소드마다 "
+                         "사람 제어로 멈춘 채 시작한다([s]로 시작)")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
         mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta, redo=args.redo,
+        human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen,
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
-                    yaw_step=np.deg2rad(args.yaw_step)))
+                    yaw_step=np.deg2rad(args.yaw_step), rot_cap=args.rot_cap))
 
 
 if __name__ == "__main__":

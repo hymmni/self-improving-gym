@@ -93,7 +93,11 @@ def read_privileged_state(raw):
     # 나온다). 손잡이 site에 가장 가까운 박스가 손잡이 — 맨 뒤에 둔다.
     nut_boxes = sorted(box_footprints(sim, raw.obj_body_id[nut.name]),
                        key=lambda p: -np.linalg.norm(p.mean(axis=0) - handle[:2]))
+    robot = raw.robots[0]
     return {
+        # 손목(마지막) 관절의 (각도, 하한, 상한) rad — 텔레옵이 야우를 얼마나 더 돌릴 수 있는지 보여준다
+        "wrist": np.array([sim.data.qpos[robot._ref_joint_pos_indexes[-1]],
+                           *sim.model.jnt_range[robot._ref_joint_indexes[-1]]]),
         "grip": sim.data.site_xpos[grip_id].copy(),
         # 열: [손가락이 벌어지는 축, y, 접근 축] — x축이 손가락 축인 건 finger body 위치로 확인(2026-09-17)
         "R": sim.data.site_xmat[grip_id].reshape(3, 3).copy(),

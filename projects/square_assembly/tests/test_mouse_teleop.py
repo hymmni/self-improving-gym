@@ -154,6 +154,45 @@ def test_wheel_turns_yaw_target_about_world_z():
     assert c.action(_state())[5] == pytest.approx(-np.deg2rad(10.0) / 0.5)
 
 
+# 손목 관절 45도(Square 시작 자세), 범위 ±166도
+_WRIST = {"wrist": np.radians([45.0, -166.0, 166.0])}
+
+
+def test_wheel_stops_at_the_wrist_joint_range():
+    """손목 관절이 허용하는 만큼만 목표가 돈다(여유 3도). +야우는 관절을 −쪽으로 돌린다(2026-10-02 시뮬 실측)."""
+    st = {**_state(), **_WRIST}
+    c = MouseTeleopController(yaw_step=np.deg2rad(5.0))
+    c.take_over(st)
+    lo, hi = c.yaw_limits(st)
+    assert np.degrees([lo, hi]) == pytest.approx([-(166 - 45 - 3), 45 + 166 - 3])
+    assert not c.wheel(+10, limit=True)                      # +50도는 범위 안
+    assert c.wheel(-40, limit=True)                          # −150도는 못 간다 — 막혔다고 알려준다
+    assert c.target_yaw == pytest.approx(lo)
+    assert not c.wheel(-40) and np.degrees(c.target_yaw) == pytest.approx(-118 - 200)  # limit 없이는 자유
+
+
+def test_a_target_over_half_a_turn_ahead_keeps_turning_the_way_the_wheel_went():
+    """예전엔 가까운 쪽으로 돌아서, 목표가 180도 넘게 앞서면 반대로 돌다 손목 한계에 걸려 멈췄다."""
+    st = {**_state(), **_WRIST}
+    c = MouseTeleopController(yaw_step=np.deg2rad(5.0))
+    c.take_over(st)
+    c.wheel(+40, limit=True)                                 # +200도: 가까운 쪽(−160도)은 손목 한계 밖
+    assert c.action(st)[5] > 0
+
+
+def test_a_target_left_outside_the_range_is_pulled_to_the_nearest_reachable_angle():
+    """멈춘 동안 자유롭게 돌려둔 목표는 조종을 시작할 때 닿을 수 있는 같은 각(없으면 한계)으로 바뀐다."""
+    st = {**_state(), **_WRIST}
+    c = MouseTeleopController()
+    c.take_over(st)
+    c.target_yaw = np.radians(-150.0 - 360.0)                # = +210도, 한계(+208도) 바로 밖
+    c.action(st)
+    assert np.degrees(c.target_yaw) == pytest.approx(208.0)
+    c.target_yaw = np.radians(90.0 + 720.0)
+    c.action(st)
+    assert np.degrees(c.target_yaw) == pytest.approx(90.0)
+
+
 def test_gripper_follows_the_button_immediately():
     """robosuite가 부호만 보고 스스로 램프한다 — 여기서 램프하면 부호가 바뀔 때까지 0.5초 늦기만 한다."""
     c = MouseTeleopController()
@@ -223,6 +262,19 @@ def test_reset_clears_everything():
     interv.reset()
     assert interv(0, {}) is None and not interv._paused and not interv.should_end()
     assert interv.num_triggers == 0
+
+
+def test_human_only_starts_every_episode_in_human_control_and_never_hands_over():
+    """정책 없이 시연만 모을 때(수집기 --human-only): 첫 스텝부터 사람 제어로 멈춘 채 시작하고 Tab이 안 먹는다."""
+    interv = MouseTeleopIntervention(env=object(), state_fn=_state, human_only=True)
+    obs = {"robot0_gripper_qpos": np.array([0.04, -0.04])}
+    assert interv._paused and interv(0, obs).shape == (7,)
+    interv._handle_key("Tab")
+    assert interv(1, obs) is not None
+    interv._handle_key("r")          # 처음부터 다시 — 되감아도 사람 제어
+    assert interv.pop_rewind(2) == 0 and interv(0, obs) is not None
+    interv.reset()                   # 다음 에피소드
+    assert interv._paused and interv(0, obs) is not None
 
 
 def test_space_and_shift_move_z_for_as_long_as_they_are_held():
@@ -424,6 +476,28 @@ def test_cursor_only_follows_the_mouse_over_the_map():
     np.testing.assert_allclose(interv.controller.target_xy, interv.map.center, atol=1e-3)
 
 
+def test_enlarged_window_maps_the_pointer_back_to_canvas_pixels():
+    """창을 키우면(--zoom, 전체화면) 화면만 늘려 그린다 — 마우스 좌표는 배율로 나눠 원래 캔버스 좌표로 읽는다."""
+    pytest.importorskip("cv2")
+    interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960, zoom=2.0)
+    interv._compose([np.zeros((480, 480, 3), np.uint8)] * 2)
+    interv._handle_key("Tab")
+    interv._on_motion(2 * (480 + 480), 2 * 480)             # 늘어난 화면에서 맵 한가운데
+    np.testing.assert_allclose(interv.controller.target_xy, interv.map.center, atol=1e-3)
+
+
+def test_f11_asks_for_fullscreen_and_back():
+    interv = _make()
+    assert not interv._fullscreen
+    interv._on_key("F11", True)
+    assert interv._fullscreen
+    interv._on_key("F11", True)
+    assert not interv._fullscreen
+    interv._on_key("F11", True)
+    interv.reset()                                           # 다음 에피소드에도 창 상태는 그대로
+    assert interv._fullscreen
+
+
 def _paused_human():
     interv = MouseTeleopIntervention(env=object(), state_fn=_state)  # 그리퍼 (0, 0), 맵 480px = 0.8m
     interv._handle_key("Tab")
@@ -566,6 +640,58 @@ def test_wheel_is_plain_yaw_while_running():
     interv._handle_key("Tab")
     interv._on_wheel(+1)
     assert interv.controller.target_yaw == pytest.approx(interv.controller.yaw_step)
+
+
+def _limited():
+    return {**_map_state(), **_WRIST}
+
+
+def test_wheel_is_free_while_the_paused_cursor_is_loose_and_stops_at_the_limit_while_driving():
+    interv = MouseTeleopIntervention(env=object(), state_fn=_limited)
+    interv._handle_key("Tab")
+    for _ in range(40):                                      # 조종 중: −200도를 굴려도 한계(−118도)에서 멈추고
+        interv._on_wheel(-1)
+    assert np.degrees(interv.controller.target_yaw) == pytest.approx(-118.0)
+    assert interv._bump[1] == -1                             # 막힌 쪽을 기억한다(화면이 튕겨 보여준다)
+    interv._handle_key("s")                                  # 멈춤, 커서는 그리퍼에 안 붙음
+    for _ in range(40):
+        interv._on_wheel(-1)
+    assert np.degrees(interv.controller.target_yaw) == pytest.approx(-318.0)
+
+
+def test_the_snapped_twist_cannot_pass_the_limit_either():
+    interv = MouseTeleopIntervention(env=object(), state_fn=_limited)
+    interv._handle_key("Tab"); interv._handle_key("s")
+    interv._on_motion(*_px(interv, (0.02, 0.0)))
+    assert interv._snapped
+    for _ in range(200):                                     # 끈적임(35%)으로도 350도어치
+        interv._on_wheel(-1)
+    assert np.degrees(interv._yo) == pytest.approx(-118.0) and interv._bump[1] == -1
+
+
+def test_map_marks_the_camera_side_of_the_gripper():
+    """손목 카메라는 그리퍼 중심에서 손가락 축 −90도 쪽에 달렸다(2026-10-02 시뮬 실측) — 그쪽으로 빛줄기를 그린다."""
+    pytest.importorskip("cv2")
+    x, z = np.array([np.cos(np.pi / 4), np.sin(np.pi / 4), 0.0]), np.array([0.0, 0.0, -1.0])
+    state = {**_map_state(), "R": np.column_stack([x, np.cross(z, x), z])}  # 야우 45도 → 카메라는 −45도 쪽
+    interv = MouseTeleopIntervention(env=object(), state_fn=lambda: state, map_size=960)
+    img = interv._compose([np.zeros((480, 480, 3), np.uint8)] * 2)
+    at = lambda xy: img[interv.map.to_px(xy)[1], interv.map.to_px(xy)[0] + 480].astype(int)
+    assert at((0.02, -0.02))[2] > at((-0.02, 0.02))[2] + 30     # 카메라 쪽만 하늘색으로 밝다
+
+
+def test_limit_guide_is_drawn_only_when_the_human_holds_the_gripper():
+    pytest.importorskip("cv2")
+    frames = [np.zeros((480, 480, 3), np.uint8)] * 2
+    interv = MouseTeleopIntervention(env=object(), state_fn=_limited, map_size=960)
+    policy = interv._compose(frames)
+    interv._handle_key("Tab")
+    driving = interv._compose(frames)
+    ring = lambda img, yaw: img[tuple(np.array(interv.map.to_px(0.075 * np.array([np.sin(yaw), -np.cos(yaw)])))[::-1] + (0, 480))]
+    blocked = np.radians(208.0 + 17.0)                       # 못 가는 구간의 한가운데(카메라 방향 기준)
+    free = np.radians(100.0)                                 # 갈 수 있는 구간
+    assert (ring(policy, blocked) == ring(policy, free)).all()
+    assert ring(driving, blocked)[0] > ring(driving, free)[0] + 60  # 빨간 벽
 
 
 def test_events_that_left_before_the_warp_are_measured_from_the_old_spot():
