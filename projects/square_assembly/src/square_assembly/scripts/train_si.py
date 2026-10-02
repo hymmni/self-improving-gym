@@ -59,6 +59,7 @@ from square_assembly.datasets.robomimic_dataset import RobomimicSequenceDataset
 from square_assembly.factory import registry
 from square_assembly.policies.diffusion import ddpo as ddpo_module
 from square_assembly.policies.diffusion.dstg_reward import DstgReward, calibrate_threshold
+from square_assembly.policies.diffusion.vip_stg_reward import load_stg_reward
 from square_assembly.runners.rollout import _build_obs_batch, maybe_speed_up_inference
 from square_assembly.policies.diffusion import dppo as dppo_module
 from square_assembly.utils.checkpoints import load_epoch_checkpoint, load_run_config, save_run_config
@@ -394,7 +395,7 @@ def main(cfg: DictConfig):
     obs_keys = task_obs_keys(task_cfg)
     rgb_keys = list(task_cfg.rgb_keys) if is_image_task(task_cfg) else []
 
-    dstg_reward = DstgReward(cfg.dstg_ckpt, statistic=cfg.statistic, cvar_alpha=cfg.cvar_alpha, device=device)
+    dstg_reward = load_stg_reward(cfg.dstg_ckpt, normalizer, statistic=cfg.statistic, cvar_alpha=cfg.cvar_alpha, device=device)
 
     calib_dataset = RobomimicSequenceDataset(
         hdf5_path=cfg.calib_hdf5_path, obs_keys=dstg_reward.obs_keys, obs_horizon=dstg_reward.obs_horizon,
@@ -456,6 +457,18 @@ def main(cfg: DictConfig):
     # 있다(2026-08-11: 2D에서 이 로그가 없어 지난 iteration들의 성공길이 분포 등을 못
     # 구했던 문제의 재발 방지).
     stats_jsonl_path = os.path.join(os.path.dirname(cfg.out) or ".", "train_stats.jsonl")
+    wandb_run = None
+    if cfg.get("use_wandb", False):   # iteration마다 train_stats.jsonl과 같은 값(에피소드별 배열 제외)을 올린다
+        import wandb
+
+        wandb_run = wandb.init(
+            project=cfg.wandb_project, name=cfg.get("wandb_run_name"), group=cfg.get("wandb_group"),
+            mode=cfg.get("wandb_mode", "online"), dir=os.path.dirname(cfg.out) or ".", save_code=False,
+            settings=wandb.Settings(disable_git=True),
+            config={k: cfg.get(k) for k in (
+                "algo", "policy_ckpt", "dstg_ckpt", "iterations", "episodes_per_iter", "max_steps", "termination",
+                "lr", "gamma", "statistic", "advantage_norm", "ddim_steps", "ddim_eta", "min_denoising_std",
+                "update_epochs", "clip_ratio", "clip_ratio_base", "gae_lambda", "value_lr", "logp_batch", "seed0")})
 
     for it in range(1, cfg.iterations + 1):
         t_iter_start = time.time()
@@ -572,6 +585,8 @@ def main(cfg: DictConfig):
         }
         with open(stats_jsonl_path, "a") as f:
             f.write(json.dumps(stats_row) + "\n")
+        if wandb_run is not None:
+            wandb_run.log({k: v for k, v in stats_row.items() if v is not None and not isinstance(v, list)}, step=it)
 
         if not np.isfinite(R_all).all() or not np.isfinite(drift):
             raise RuntimeError(
@@ -595,6 +610,8 @@ def main(cfg: DictConfig):
             print(f"  [best 갱신] it={it} env_succ_rate={succ_rate:.1%} -> {best_out}", flush=True)
 
     env.env.close()
+    if wandb_run is not None:
+        wandb_run.finish()
 
     _save_checkpoint(policy, cfg, cfg.out, cfg.iterations, task_cfg, policy_cfg, policy_name, stats_path)
     logger.info(f"저장: {cfg.out} (+ run_config.yaml, normalization_stats.json)")
