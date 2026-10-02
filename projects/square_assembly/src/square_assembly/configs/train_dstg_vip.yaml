@@ -4,11 +4,14 @@
 
 cache_path: ???   # scripts/cache_vip_feats.py 산출물
 out: outputs/dstg_vip/predictor.pt
-num_bins_override: 501   # 기준선과 같은 bin 공간이어야 mae/nll을 그대로 비교할 수 있다
+num_bins_override: 256   # 라벨 0~255. 학습 라벨이 닿지 않는 먼 bin은 낯선 상태에서 확률이 새어 기댓값·표준편차를
+                         # 부풀린다(experiments/2026-10-01_stg-bins256.md). 더 먼 라벨은 마지막 bin("255 이상")으로 모은다.
 fail_bin: null           # 실패 롤아웃 데이터를 쓸 때만 설정(이번 실험은 PH 성공 데모만)
 label_horizon: null      # 설정하면 라벨이 '남은 스텝 수' 대신 '남은 비율 x 이 값' —
                          # 에피소드 길이 편차가 큰 텔레옵 데이터용. num_bins도 같이 줄여야 한다.
 train_demos_limit: null  # train 데모 수 상한(규모 곡선용). val 데모는 영향받지 않는다.
+train_rollout_limit: null  # 전문가 시연은 다 두고 롤아웃·개입 train 데모만 이 수로(0 = 시연만). mode_hdf5 필요.
+train_rollout_kind: all    # all | no_intervention(개입 데모는 전부 빼고, 개입 없이 성공한 롤아웃 중에서만 고른다)
 mode_hdf5: null          # action_mode를 읽어올 원본 hdf5 — preintv 처리를 쓸 때만 필요
 preintv: none            # PREINTV 프레임 처리: none(그대로) | drop(train에서 제외) |
                          # flat(구간 내내 같은 라벨 = 진전 0) | rise(스텝마다 +1 = 후퇴) | anchor(끊김 없는 rise, stg_labels.py)

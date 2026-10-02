@@ -309,3 +309,44 @@ def test_agentview_rejects_missing_ambiguous_or_misaligned_camera_metadata(tmp_p
         f.attrs["meta"] = json.dumps({"rgb_keys": keys})
     with pytest.raises(ValueError, match="camera|rgb_keys"):
         DinoFeatureWindows(cache, 2, obs_parts="agentview")
+
+
+def test_rollout_limit_keeps_every_expert_demo_and_nests_across_sizes():
+    """전문가 시연만(A) vs 롤아웃·개입을 n개 더한 것(B) 비교용 — 시연은 늘 다 남고, n이 커지면 남는 집합이 포함 관계다."""
+    from square_assembly.scripts.train_dstg_vip import rollout_demos_to_drop
+    modes = {f"demo_{i}": np.full(5, -1) for i in range(3)}              # 전문가 시연
+    modes.update({f"demo_{i}": np.array([0, 0, 1, 1, 1]) for i in range(3, 7)})   # 개입 성공
+    modes.update({f"demo_{i}": np.zeros(5, dtype=int) for i in range(7, 9)})      # 무개입 성공
+    names, rollouts = list(modes), {f"demo_{i}" for i in range(3, 9)}
+
+    assert rollout_demos_to_drop(names, modes, 0, seed=0) == rollouts                # A: 시연만
+    kept = [rollouts - rollout_demos_to_drop(names, modes, n, seed=0) for n in (2, 4, 6)]
+    assert [len(k) for k in kept] == [2, 4, 6] and kept[0] < kept[1] < kept[2]
+    assert rollout_demos_to_drop(names, modes, 99, seed=0) == set()
+
+
+def test_rollout_limit_can_keep_only_no_intervention_rollouts():
+    """시연 + 사람 개입 없이 성공한 롤아웃만 — 개입 데모는 limit와 무관하게 전부 빠진다."""
+    from square_assembly.scripts.train_dstg_vip import rollout_demos_to_drop
+    modes = {f"demo_{i}": np.full(5, -1) for i in range(3)}
+    modes.update({f"demo_{i}": np.array([0, -10, 1, 1, 1]) for i in range(3, 7)})   # 개입 성공
+    modes.update({f"demo_{i}": np.zeros(5, dtype=int) for i in range(7, 10)})       # 무개입 성공
+    names, intv, clean = list(modes), {f"demo_{i}" for i in range(3, 7)}, {f"demo_{i}" for i in range(7, 10)}
+
+    drop = rollout_demos_to_drop(names, modes, 2, seed=0, kind="no_intervention")
+    assert intv <= drop and len(clean - drop) == 2
+    assert rollout_demos_to_drop(names, modes, 99, seed=0, kind="no_intervention") == intv
+
+
+def test_clamp_labels_folds_long_remaining_steps_into_the_last_bin(tmp_path):
+    """num_bins보다 먼 라벨은 마지막 bin("그 이상")으로 모이고, 바뀐 샘플을 알려 준다 — 나머지는 그대로."""
+    cache = tmp_path / "feats.h5"
+    _write_fake_cache(cache, lengths=[6, 3])
+    dataset = DinoFeatureWindows(cache, obs_horizon=2)
+    before = dataset.labels().copy()
+
+    clamped = dataset.clamp_labels(num_bins=4)
+
+    assert clamped.tolist() == (before >= 4).tolist() and clamped.sum() == 2
+    assert dataset.labels().tolist() == np.minimum(before, 3).tolist()
+    assert dataset[int(np.flatnonzero(clamped)[0])][1] == 3

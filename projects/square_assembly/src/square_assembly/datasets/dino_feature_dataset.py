@@ -132,6 +132,12 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         """(N,) int64 — num_bins 결정과 로깅용."""
         return self._labels
 
+    def clamp_labels(self, num_bins):
+        """num_bins-1보다 먼 라벨을 마지막 bin("그 이상")으로 모은다. 바뀐 샘플의 (N,) bool을 돌려준다."""
+        over = self._labels >= num_bins
+        self._labels = np.minimum(self._labels, num_bins - 1)
+        return over
+
     def sample_modes(self):
         """(N,) int64 — 샘플별 action_mode(mode_hdf5가 없으면 전부 ROLLOUT 취급)."""
         import numpy as _np

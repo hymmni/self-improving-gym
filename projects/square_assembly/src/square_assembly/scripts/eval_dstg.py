@@ -487,6 +487,7 @@ def _collect_cached(predictor_path, cache_path, source_hdf5, device, batch_size,
     train_idx, val_idx, val_demos = dataset.split_indices(val_fraction, split_seed)
     print(f"val {len(val_demos)} demos / {len(val_idx)} samples", flush=True)
 
+    dataset.clamp_labels(int(ckpt["num_bins"]))  # 학습 때와 같게: 마지막 bin = "그 이상"
     labels = dataset.labels()[val_idx]
     demo = np.array([dataset.samples[i][0] for i in val_idx])
     t = np.array([dataset.samples[i][1] for i in val_idx])

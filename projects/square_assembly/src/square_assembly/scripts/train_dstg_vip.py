@@ -181,6 +181,22 @@ def _log_curve(run, row):
     run.log(payload, step=row["epoch"])
 
 
+def rollout_demos_to_drop(train_demos, modes, limit, seed, kind="all"):
+    """전문가 시연(전 프레임 DEMO)은 다 두고, 정책 롤아웃·개입 데모는 limit개만 남길 때 버릴 데모 이름들.
+
+    kind="no_intervention"이면 사람 개입이 있는 데모는 전부 버리고, 개입 없이 성공한 롤아웃 중에서만 고른다.
+    같은 seed면 limit가 커질 때 남는 집합이 포함 관계다(같은 순열의 앞부분) — 규모 곡선에서 "n개 더"가
+    정말로 앞의 것에 데모를 더한 것이 된다.
+    """
+    from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV
+    if kind not in ("all", "no_intervention"):
+        raise ValueError(f"train_rollout_kind는 all 또는 no_intervention이다: {kind}")
+    rollouts = sorted(n for n in train_demos if not (np.asarray(modes[n]) == LABEL_DEMO).all())
+    pool = [n for n in rollouts if kind == "all" or not (np.asarray(modes[n]) == LABEL_INTV).any()]
+    order = np.random.RandomState(seed).permutation(len(pool))
+    return set(rollouts) - {pool[i] for i in order[:int(limit)]}
+
+
 @hydra.main(config_path="../configs", config_name="train_dstg_vip", version_base=None)
 def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
@@ -262,6 +278,13 @@ def main(cfg: DictConfig):
         keep = {pool[i] for i in rng.permutation(len(pool))[: int(limit)]}
         train_idx = [i for i in train_idx if dataset.samples[i][0] in keep]
         n_train_demos = len(keep)
+    # train_rollout_limit: 전문가 시연은 다 두고 롤아웃·개입 데모만 그 수로 줄인다(0 = 시연만).
+    # "시연만 vs 롤아웃을 더한 것, 얼마나 더해야 충분한가"를 같은 held-out 위에서 잰다.
+    if cfg.get("train_rollout_limit") is not None:
+        drop = rollout_demos_to_drop(set(dataset.frames) - set(val_demos), dataset.modes,
+                                     cfg.train_rollout_limit, cfg.split_seed, cfg.get("train_rollout_kind", "all"))
+        train_idx = [i for i in train_idx if dataset.samples[i][0] not in drop]
+        n_train_demos = len({dataset.samples[i][0] for i in train_idx})
     logger.info(
         f"episode split: train={n_train_demos} demos/{len(train_idx)} samples, "
         f"val={n_val_demos} demos/{len(val_idx)} samples"
@@ -275,10 +298,11 @@ def main(cfg: DictConfig):
     max_label = int(labels.max())
     if cfg.get("num_bins_override"):
         num_bins = int(cfg.num_bins_override)
-        if num_bins <= max_label:
-            raise ValueError(
-                f"num_bins_override({num_bins})가 실제 관측된 최대 라벨({max_label})보다 "
-                f"작거나 같다 — 라벨이 잘린다."
+        if num_bins <= max_label:   # 마지막 bin = "num_bins-1 스텝 이상"
+            over = dataset.clamp_labels(num_bins)
+            logger.warning(
+                f"최대 라벨 {max_label} > num_bins-1 = {num_bins - 1}: {int(over.sum())}프레임"
+                f"(train {int(over[train_idx].sum())})의 라벨을 마지막 bin으로 모았다."
             )
     else:
         num_bins = max_label + 1
