@@ -39,7 +39,14 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
 configs/task/square.yaml) 에피소드마다 사람 제어로 멈춘 채 시작한다([s]로 시작, Tab은 안 먹는다). 모든 스텝이
 INTV로 라벨되고 attrs["sampler"]는 "human"이다.
 
-창이 작으면 `--zoom 1.5`(창 모드 배율)나 `--fullscreen`(실행 중 F11로 오간다)으로 키운다 — 다 그린 화면을 늘려 띄운다.
+창이 작으면 최대화 버튼을 누르거나 테두리를 끌어 키운다 — 다 그린 화면을 창에 맞춰 늘려 띄운다. `--zoom 1.5`는 처음 창 크기,
+`--fullscreen`은 전체화면으로 시작(실행 중 F11로 오간다).
+
+`--stg-ckpt <predictor.pt>`면 맵 오른쪽에 STG 예측 패널이 붙는다(화면 전체가 21:9가 되는 폭) — 축 하나(가로 스텝,
+세로 남은 스텝)에 이번 에피소드의 기댓값 곡선과, 세로축에 붙인 지금 스텝의 분포 막대를 겹쳐 그린다(render_demo_video와
+같은 배치). 매 스텝 정책이 볼 obs 창으로 예측기를 한 번 돌리고, 창 아래 체크박스로 분포 막대·기댓값 곡선을 켜고 끈다.
+되감으면 곡선도 그 스텝에서 잘린다. VIP 예측기는 사전학습 가중치(~/.vip)를 읽으므로 컨테이너에서는
+`-e HOME=/workspace/outputs/.model_cache`로 띄운다(DOCKER.md §6-1).
 
 화면은 --display-size 해상도로 따로 렌더해서 보여준다(학습/저장 데이터는 task의
 image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아서 분리). 480을 넘길 순 없다
@@ -132,8 +139,26 @@ def wait_for_render_recovery(env, camera_name, display_size, sleep_fn=time.sleep
     print("  렌더 복구됨", flush=True)
 
 
-def make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_ep, wait_for_recovery):
+def make_stg_fn(reward, normalizer, device):
+    """STG 예측기(load_stg_reward) -> fn(obs_ep, obs_raw): 다음 스텝에 정책이 볼 obs 창(저장된 앞 프레임 + 지금 obs,
+    collect_episode의 obs_history와 같다)에서 남은 스텝 분포(bin별 확률)."""
+    from square_assembly.runners.rollout import _build_obs_batch
+
+    H = reward.obs_horizon
+
+    def fn(obs_ep, obs_raw):
+        hist = (list(obs_ep[-(H - 1):]) if H > 1 else []) + [obs_raw]
+        hist = [hist[0]] * (H - len(hist)) + hist   # 에피소드 첫 스텝: 지금 obs로 채운다(collect_episode와 같이)
+        batch = _build_obs_batch(hist, reward.obs_keys, reward.rgb_keys, normalizer, device, extra_obs_fn=None)
+        with torch.no_grad():
+            return torch.softmax(reward.predictor(batch), dim=-1)[0].cpu().numpy()
+
+    return fn
+
+
+def make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_ep, wait_for_recovery, stg=None):
     """collect_episode의 render_fn — 저장될 obs의 렌더 노이즈를 감시하고 화면을 그린다.
+    stg(make_stg_fn)가 있으면 그 obs의 STG 분포를 창에 넘긴다(set_stg).
 
     연속 3프레임 노이즈면, 되감기를 지원하는 개입 장치(마우스)는 에피소드를 살린다: 렌더가 회복될
     때까지 기다린 뒤 노이즈 직전의 정상 스텝으로 되감고 일시정지한다. 그사이 저장된 노이즈 프레임
@@ -159,6 +184,8 @@ def make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_e
             interv.rewind_to(noise["last_clean"])
             noise["streak"] = 0
             return True
+        if stg is not None:
+            interv.set_stg(idx, stg(obs_ep, obs_raw))
         # 저장/학습은 obs의 84픽셀 그대로, 화면만 따로 고해상도로 렌더한다.
         frames = {c: env.render(mode="rgb_array", height=display_size, width=display_size, camera_name=c)
                   for c in display_cameras}
@@ -299,7 +326,7 @@ def sampler_label(policy):
 
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False,
-        ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False):
+        ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False, stg_ckpt=None):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
     if mode != "mouse":
@@ -307,8 +334,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     if redo and (mode != "mouse" or overwrite):
         raise ValueError("--redo는 --mode mouse에서만, --overwrite 없이 쓴다")
-    if human_only and mode != "mouse":
-        raise ValueError("--human-only는 --mode mouse에서만 쓴다")
+    if (human_only or stg_ckpt) and mode != "mouse":
+        raise ValueError("--human-only, --stg-ckpt는 --mode mouse에서만 쓴다")
     if display_size > _MAX_DISPLAY:
         raise ValueError(
             f"--display-size는 {_MAX_DISPLAY} 이하여야 한다(요청 {display_size}) — "
@@ -349,6 +376,15 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     if camera not in rgb_keys:
         raise ValueError(f"--camera {camera}는 task.rgb_keys {rgb_keys}에 없다")
 
+    stg = stg_bins = None
+    if stg_ckpt:  # VIP 예측기는 lowdim 정규화를 풀어 쓰므로 통계는 아무 정책 것이나 같다. ResNet 예측기는 제 정책 것
+        from square_assembly.policies.diffusion.vip_stg_reward import load_stg_reward
+
+        stats = lambda ckpt: MinMaxNormalizer(load_stats(os.path.join(os.path.dirname(ckpt), "normalization_stats.json")))
+        reward = load_stg_reward(stg_ckpt, normalizer or stats(base_ckpt), device=device)
+        stg = make_stg_fn(reward, stats(reward.policy_ckpt_path or base_ckpt), device)
+        stg_bins = reward.num_bins
+
     env = wait_for_renderer(lambda: make_eval_env(task_cfg), camera, display_size)
     # 마우스 모드는 모든 카메라(--camera가 맨 위)를 맵 왼쪽에 쌓아 보여주고, 맵은 그 높이 합만큼 키운다.
     shown = [camera] + [k for k in rgb_keys if k != camera] if mode == "mouse" else [camera]
@@ -358,6 +394,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         interv = MouseTeleopIntervention(
             env, controller=MouseTeleopController(**(teleop or {})), map_size=display_size * len(shown),
             window_name=window_name, quit_key=quit_key, human_only=human_only, zoom=zoom, fullscreen=fullscreen,
+            stg_bins=stg_bins,
         )
     else:
         interv = ScriptedFailureIntervention(
@@ -374,7 +411,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         """에피소드 하나를 돌린다. start_state가 있으면 그 sim 상태에서 시작한다. stored·resume(--redo)이면
         저장된 앞부분을 이어받고, 첫 스텝 전에 되돌린 장면을 먼저 띄운다(멈춘 채 시작했으면 거기서 기다린다)."""
         pre_step, obs_ep, states_ep = make_recorder(env, interv, obs_keys, rgb_keys, stored)
-        track, noise = make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_ep, recover_render)
+        track, noise = make_noise_tracker(env, interv, camera, display_cameras, display_size, obs_ep, recover_render, stg)
 
         def reset_fn():
             obs = env.reset() if start_state is None else reset_to_state(env, start_state)
@@ -565,7 +602,7 @@ def main():
                     help=f"화면 표시용 카메라 한 장의 렌더 해상도(저장 데이터와 무관, 최대 {_MAX_DISPLAY}). "
                          "마우스 모드의 맵은 이 값 × 카메라 수")
     ap.add_argument("--zoom", type=float, default=1.0,
-                    help="[mouse] 창을 이 배율로 늘려 띄운다(그리는 해상도는 그대로 — 조금 흐려진다)")
+                    help="[mouse] 처음 창 크기(캔버스의 몇 배). 실행 중엔 최대화·테두리 끌기로 바꾼다 — 화면이 창에 맞춰 늘어난다")
     ap.add_argument("--fullscreen", action="store_true", help="[mouse] 전체화면으로 시작한다(F11로 오간다)")
     ap.add_argument("--control-fps", type=float, default=20.0, help="사람이 볼 수 있는 속도로 페이싱(0=최대 속도)")
     ap.add_argument("--redo", nargs="+", default=None, metavar="demo_N",
@@ -574,13 +611,15 @@ def main():
     ap.add_argument("--human-only", action="store_true",
                     help="[mouse] 정책 없이 사람 시연만 모은다 — 체크포인트를 안 읽고(--base-ckpt 무시) 에피소드마다 "
                          "사람 제어로 멈춘 채 시작한다([s]로 시작)")
+    ap.add_argument("--stg-ckpt", default=None,
+                    help="[mouse] STG 예측기 체크포인트(VIP·ResNet) — 맵 오른쪽에 실시간 예측 패널을 띄운다(저장 데이터와 무관)")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
     args = ap.parse_args()
     run(args.base_ckpt, args.episodes, args.max_steps, args.out, args.camera,
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
         mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta, redo=args.redo,
-        human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen,
+        human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen, stg_ckpt=args.stg_ckpt,
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step), rot_cap=args.rot_cap))
 

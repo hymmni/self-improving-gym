@@ -486,6 +486,13 @@ def test_enlarged_window_maps_the_pointer_back_to_canvas_pixels():
     np.testing.assert_allclose(interv.controller.target_xy, interv.map.center, atol=1e-3)
 
 
+def test_picture_fills_whatever_size_the_window_is():
+    """창은 늘 크기를 바꿀 수 있다(최대화 버튼) — 화면은 창에 들어가는 가장 큰 배율로 늘린다."""
+    interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960, zoom=1.5)
+    assert interv._fit((1440, 960), (2880, 2000)) == pytest.approx(2.0)   # 최대화: 좁은 쪽에 맞춘다
+    assert interv._fit((1440, 960), (1, 1)) == pytest.approx(1.5)         # 창이 아직 안 떴으면 --zoom
+
+
 def test_f11_asks_for_fullscreen_and_back():
     interv = _make()
     assert not interv._fullscreen
@@ -854,3 +861,105 @@ def test_start_as_human_takes_control_paused_from_the_first_step():
 
     interv._handle_key("b")                                # 저장된 앞부분으로 되감으면 그때의 모드(정책)로 돌아간다
     assert interv.pop_rewind(4) == 0 and interv(0, {}) is None
+
+
+def _stg_interv():
+    interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960, stg_bins=512)
+    p = np.zeros(512)
+    p[100:120] = 1 / 20
+    for t in range(30):
+        interv.set_stg(t, p)
+    return interv
+
+
+def test_stg_panel_sits_right_of_the_map():
+    pytest.importorskip("cv2")
+    canvas = _stg_interv()._compose([np.zeros((480, 480, 3), np.uint8)] * 2)
+    assert canvas.shape == (960, 2240, 3)                  # 패널이 남는 폭을 채워 화면 전체가 21:9(사용자 모니터)
+
+
+def test_stg_curve_restarts_from_a_rewound_step_and_resets_each_episode():
+    interv = _stg_interv()
+    p = np.zeros(512)
+    p[10] = 1.0
+    interv.set_stg(12, p)                                  # 되감은 뒤 step 12부터 다시
+    assert len(interv._stg) == 13 and interv._stg[-1][0] == pytest.approx(10.0)
+    interv.set_stg(15, p)                                  # 첫 그림이 늦게 와도(정책 모드는 step 1부터) 자리를 맞춘다
+    assert len(interv._stg) == 16 and interv._stg[14] is None
+    interv.reset()
+    assert interv._stg == [] and interv._stg_probs is None
+
+
+def test_each_stg_toggle_draws_its_own_part():
+    pytest.importorskip("cv2")
+    interv = _stg_interv()
+    frames = [np.zeros((480, 480, 3), np.uint8)] * 2
+    panel = lambda: interv._compose(frames)[:, 1440:].astype(int)
+    full = panel()
+    for k in interv.stg_show:
+        interv.stg_show[k] = False
+        assert (panel() != full).any(), k                   # 끄면 그 부분이 사라진다
+        interv.stg_show[k] = True
+    for k in interv.stg_show:
+        interv.stg_show[k] = False
+    blank = panel()                                         # 다 끄면 축만 — 막대·곡선·점선 색이 하나도 없다
+    for col in ((70, 120, 190), (46, 204, 113), (255, 190, 50)):
+        assert not (blank == col).all(-1).any(), col
+
+
+def test_pointer_over_the_stg_panel_does_not_move_the_target():
+    pytest.importorskip("cv2")
+    interv = _stg_interv()
+    interv._compose([np.zeros((480, 480, 3), np.uint8)] * 2)
+    interv.controller.target_xy = None
+    interv._on_motion(1440 + 100, 480)
+    assert interv.controller.target_xy is None
+
+
+def test_stg_bars_lie_along_the_steps_to_go_axis():
+    """영상 코드(render_demo_video)처럼 분포는 세로축(남은 스텝)에 붙은 가로 막대 — 남은 스텝이 클수록 위에 그린다."""
+    pytest.importorskip("cv2")
+    rows = []
+    for at in (20, 120):
+        interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960, stg_bins=512)
+        interv.stg_show.update(mean=False)
+        p = np.full(512, 1e-6)                              # 실제 분포처럼 아주 작은 꼬리도 깔린다
+        p[at] = 1.0
+        interv.set_stg(0, p / p.sum())
+        panel = interv._compose([np.zeros((480, 480, 3), np.uint8)] * 2)[:, 1440:].astype(int)
+        blue = np.argwhere((np.abs(panel - (70, 120, 190)).sum(-1) < 10))
+        rows.append(blue[:, 0].mean())
+    assert rows[1] < rows[0] - 100                         # 120 막대가 20 막대보다 훨씬 위
+
+
+def _stg_panel_after(n, e=100.0, at=None, **show):
+    interv = MouseTeleopIntervention(env=object(), state_fn=_map_state, map_size=960, stg_bins=512)
+    interv.stg_show.update(show)
+    p = np.exp(-0.5 * ((np.arange(512) - (at if at is not None else e)) / 4.0) ** 2)  # 폭 있는 봉우리
+    p /= p.sum()
+    for t in range(n):
+        interv.set_stg(t, p)
+        interv._stg[t] = (e, False)
+    return interv._compose([np.zeros((480, 480, 3), np.uint8)] * 2)[:, 1440:].astype(int)
+
+
+def test_stg_x_axis_ends_at_the_current_step():
+    """얼마나 걸릴지 모르니 가로축은 지금 스텝까지 — 곡선 끝이 늘 오른쪽 끝에 온다."""
+    pytest.importorskip("cv2")
+    ends = [np.argwhere((_stg_panel_after(n) == (46, 204, 113)).all(-1))[:, 1].max() for n in (30, 300)]
+    assert abs(ends[0] - ends[1]) <= 2 and ends[0] > 800 - 40
+
+
+def test_stg_y_axis_spans_the_predictor_bins_whatever_the_values():
+    """세로축은 예측기의 마지막 bin까지 고정 — 예측값이 커지거나 작아져도 같은 남은 스텝은 같은 높이."""
+    pytest.importorskip("cv2")
+    rows = [np.argwhere((_stg_panel_after(10, e=e, at=20) == (70, 120, 190)).all(-1))[:, 0].mean() for e in (60.0, 400.0)]
+    assert rows[0] == rows[1]
+
+
+def test_stg_distribution_is_drawn_as_bars_only():
+    """분포는 막대로만 — 막대 끝을 잇는 선은 없다(축 안에는 바탕색과 막대색뿐)."""
+    pytest.importorskip("cv2")
+    panel = _stg_panel_after(10, at=20, mean=False)
+    inside = panel[100:900, 60:-20].reshape(-1, 3)
+    assert {tuple(c) for c in np.unique(inside, axis=0)} == {(30, 33, 36), (70, 120, 190)}

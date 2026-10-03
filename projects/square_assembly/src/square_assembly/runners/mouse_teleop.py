@@ -112,6 +112,7 @@ from square_assembly.runners.square_oracle import (
 # 손목 카메라(robot0_eye_in_hand)는 그리퍼 중심에서 5.8cm, 손가락 축에서 −90도 쪽에 달려 수직 아래를 본다
 # (2026-10-02 시뮬 실측: 그리퍼 site 좌표 [−1.1, 5.8, −8.7]cm, site +y = 야우 − 90도). 그쪽에 놓인 것이 화면에 잡힌다.
 _GUIDE_R = 0.075   # 손목 한계 가이드 고리의 반지름(m) — 카메라 표시 바로 바깥
+_STG_ASPECT = 21 / 9  # STG 패널을 붙인 화면 전체의 가로:세로 — 사용자 모니터(21:9)를 꽉 채우게 패널이 남는 폭을 쓴다
 
 
 def _cam_dir(yaw):
@@ -288,10 +289,14 @@ class MouseTeleopIntervention:
         map_size: 맵 한 변 픽셀. 왼쪽 카메라 열(위에서부터 세로로 쌓음)도 이 높이로 맞춘다.
         map_extent: 맵이 덮는 월드 폭(m). 테이블 한 변이 0.8m.
         state_fn: 테스트용 — sim 상태 dict를 돌려주는 함수(None이면 read_privileged_state).
-        zoom: 창 모드에서 화면을 이 배율로 늘려 띄운다. fullscreen이면 전체화면으로 시작한다(F11로 오간다) — 화면에
-            꽉 차는 배율로 늘린다. 그리는 해상도는 그대로 두고 다 그린 화면만 늘린다(조금 흐려진다): 맵을 큰 해상도로
-            직접 그리면 한 장에 13ms(960) → 54ms(2160)라 20Hz 스텝을 못 지킨다(2026-10-02 실측, 늘리기는 17ms).
+        zoom: 처음 띄울 창 크기(캔버스의 몇 배). 창은 늘 크기를 바꿀 수 있고(최대화 버튼, 테두리 끌기) 화면은 창에
+            들어가는 가장 큰 배율로 늘린다. fullscreen이면 전체화면으로 시작한다(F11로 오간다). 그리는 해상도는 그대로
+            두고 다 그린 화면만 늘린다(조금 흐려진다): 맵을 큰 해상도로 직접 그리면 한 장에 13ms(960) → 54ms(2160)라
+            20Hz 스텝을 못 지킨다(2026-10-02 실측, 늘리기는 17ms).
         human_only: 정책 없이 사람만 조작한다 — 에피소드마다 사람 제어로 멈춘 채 시작하고 Tab(정책에 넘기기)을 무시한다.
+        stg_bins: STG 예측기의 bin 수 — 주면 맵 오른쪽에 예측 패널(화면 전체가 _STG_ASPECT가 되는 폭, 세로축 = 0 ~
+            마지막 bin)을 붙인다. 값은 수집기가 set_stg로 넣고, 창 아래 띠의 체크박스(stg_show)로 분포 막대·기댓값 곡선을
+            따로 켜고 끈다.
         키 인자들은 Tk keysym이다("Tab", "Left", 소문자 한 글자).
     """
 
@@ -303,11 +308,14 @@ class MouseTeleopIntervention:
                  back_key="b", restart_key="r", back_steps=20, state_fn=None,
                  snap_radius=0.025, field_radius=0.045, pull_rate=16.0, snap_hz=7.0, snap_zeta=0.65,
                  hold_gain=0.35, hold_tau=0.2, break_dist=0.045, pop_dist=0.012, human_only=False,
-                 zoom=1.0, fullscreen=False):
+                 zoom=1.0, fullscreen=False, stg_bins=None):
         self.raw = getattr(env, "env", env)
         self.human_only = human_only
+        self.stg_bins = stg_bins
+        self.stg_show = {"bars": True, "mean": True}  # 분포 막대 / 기댓값 곡선
+        self._bar = None           # 체크박스 띠(Tk) — 화면 배율을 잴 때 그 높이를 뺀다
         self.zoom, self._fullscreen = zoom, fullscreen
-        self._z = zoom             # 지금 화면 배율(창 모드 = zoom, 전체화면 = 화면에 맞춘 값) — 마우스 좌표를 이걸로 나눈다
+        self._z = zoom             # 지금 화면 배율(창 크기에 맞춘 값, 처음엔 zoom) — 마우스 좌표를 이걸로 나눈다
         self.controller = controller or MouseTeleopController()
         table = getattr(self.raw, "table_offset", None)
         self.map = TopDownMap(table[:2] if table is not None else (0.0, 0.0), map_extent, map_size)
@@ -342,6 +350,8 @@ class MouseTeleopIntervention:
         self._toast = None         # (글, 사라질 시각)
         self._bump = (-np.inf, 0)  # (손목 한계에 막힌 시각, 막힌 방향 ±1) — 화면이 튕겨 보여준다
         self._wheel_t = -np.inf    # 마지막으로 휠을 굴린 시각 — 가이드를 잠깐 진하게
+        self._stg = []             # 스텝별 (STG 기댓값, 사람 제어 여부) — 그림이 없던 스텝은 None
+        self._stg_probs = None     # 지금 스텝의 STG 분포
         self._release_grab()
         self.num_triggers = 0
         self.controller.reset()
@@ -403,6 +413,14 @@ class MouseTeleopIntervention:
         self._resync = True
         self._rewound = (step, t)
         return t
+
+    def set_stg(self, step, probs):
+        """step에서 정책이 볼 장면의 STG 분포(bin = 남은 스텝)를 받는다. 곡선은 step에서 잘라 다시 잇는다(되감기)."""
+        probs = np.asarray(probs, dtype=float)
+        del self._stg[step:]
+        self._stg += [None] * (step - len(self._stg))
+        self._stg.append((float(probs @ np.arange(len(probs))), self._active))
+        self._stg_probs = probs
 
     def _last_switch_before(self, step):
         """step보다 앞에서 가장 가까운 모드 전환점(새 모드의 첫 스텝). 없으면 0."""
@@ -491,10 +509,18 @@ class MouseTeleopIntervention:
         root = tk.Tk()
         root.tk.call("tk", "useinputmethods", False)  # ibus-hangul이 Shift+Space를 가져가지 않게(모듈 docstring)
         root.title(self.window_name)
-        root.resizable(False, False)  # 창 = 캔버스 크기 고정 — 늘리면 빈 여백만 생긴다
-        root.configure(bg="black")
+        root.configure(bg="black")    # 창 크기는 자유(최대화 버튼) — 화면을 창에 맞춰 늘린다(render)
+        if self.stg_bins:  # STG 패널에 그릴 것 — 화면 밖 아래 띠에 둬서 클릭이 그리퍼(좌클릭)로 새지 않게
+            self._bar = tk.Frame(root, bg="black")
+            self._bar.pack(side="bottom", fill="x")
+            tk.Label(self._bar, text="STG", bg="black", fg="white").pack(side="left", padx=8)
+            for key, text in (("bars", "distribution bars"), ("mean", "expected curve")):
+                var = tk.BooleanVar(value=self.stg_show[key])
+                tk.Checkbutton(self._bar, text=text, variable=var, takefocus=0, bg="black", fg="white",
+                               selectcolor="black", activebackground="black", activeforeground="white",
+                               command=lambda k=key, v=var: self.stg_show.__setitem__(k, v.get())).pack(side="left")
         view = tk.Label(root, bd=0, highlightthickness=0)
-        view.pack(expand=True)        # 전체화면에서 남는 자리는 검게, 화면은 가운데
+        view.pack(expand=True)        # 비율이 안 맞아 남는 자리는 검게, 화면은 가운데
         c = self.controller
 
         view.bind("<Motion>", lambda e: self._on_motion(e.x, e.y))
@@ -535,7 +561,7 @@ class MouseTeleopIntervention:
         if self._suppress_motion:  # 우리가 포인터를 옮기며 Tk가 바로 부르는 합성 이벤트
             return
         x, y = x / self._z, y / self._z  # 늘린 화면의 좌표 -> 캔버스 좌표
-        if x < self._map_x0:
+        if not self._map_x0 <= x < self._map_x0 + self.map.size:  # 카메라 열, STG 패널
             self._cur, self._prev_px = None, None
             return
         pos = np.array([x, y], dtype=float)
@@ -692,15 +718,16 @@ class MouseTeleopIntervention:
         frames = frame if isinstance(frame, (list, tuple, dict)) else [frame]
         while True:
             arr = self._compose(frames)
+            if self._photo is None:  # 첫 장: 창 크기 = 캔버스 x zoom. 그 뒤로는 창 크기(최대화·전체화면)에 화면을 맞춘다
+                self._root.geometry(f"{round(arr.shape[1] * self.zoom)}x{round(arr.shape[0] * self.zoom)}")
+                self._root.update()
             if self._fullscreen != self._full_applied:
-                # 크기 고정 창은 전체화면 요청을 무시하는 창 관리자가 있다 — 전체화면 동안만 고정을 푼다
-                self._root.resizable(self._fullscreen, self._fullscreen)
                 self._root.attributes("-fullscreen", self._fullscreen)
                 self._root.update()
                 self._full_applied = self._fullscreen
-            # 전체화면이면 화면에 꽉 차게. 전환 직후 한두 장은 창 크기가 아직 안 바뀌어 있을 수 있다 — 다음 장에 맞춰진다
-            self._z = (min(self._root.winfo_width() / arr.shape[1], self._root.winfo_height() / arr.shape[0])
-                       if self._fullscreen else self.zoom)
+            # 크기가 바뀐 직후 한두 장은 창 크기가 아직 안 바뀌어 있을 수 있다 — 다음 장에 맞춰진다
+            bar_h = self._bar.winfo_height() if self._bar is not None else 0
+            self._z = self._fit(arr.shape[1::-1], (self._root.winfo_width(), self._root.winfo_height() - bar_h))
             if self._z != 1.0:
                 arr = cv2.resize(arr, (round(arr.shape[1] * self._z), round(arr.shape[0] * self._z)),
                                  interpolation=cv2.INTER_LINEAR)
@@ -715,6 +742,12 @@ class MouseTeleopIntervention:
                     or self._back or self._restart or self._switches):
                 return not (self._quit_requested or self.redo_requested)
             self._pump(0.02)
+
+    def _fit(self, canvas_wh, window_wh):
+        """창에 들어가는 가장 큰 화면 배율. 창이 아직 안 떴으면(1x1) zoom."""
+        if min(window_wh) <= 1:
+            return self.zoom
+        return min(window_wh[0] / canvas_wh[0], window_wh[1] / canvas_wh[1])
 
     def _compose(self, frames):
         """[카메라들(위에서부터) | 맵] RGB 캔버스. 카메라 한 장의 높이 = 맵 높이 / 카메라 수.
@@ -747,7 +780,10 @@ class MouseTeleopIntervention:
             modal = Image.new("RGBA", img.size, (0, 0, 0, 0))
             self._draw_redo_dialog(ImageDraw.Draw(modal), x0, S, k)
             img = Image.alpha_composite(img, modal)
-        return np.asarray(img.convert("RGB"))
+        out = np.asarray(img.convert("RGB"))
+        if self.stg_bins:  # HUD가 안 덮는 칸이라 반투명 합성(캔버스 전체에 들면 4ms 더) 뒤에 붙인다
+            out = np.concatenate([out, self._draw_stg(S, round(S * _STG_ASPECT) - x0 - S)], axis=1)
+        return out
 
     def _draw_redo_dialog(self, d, x0, S, k):
         """←← 확인창: 화면을 어둡게 하고 가운데에 '이전 에피소드를 다시 모을까'."""
@@ -935,6 +971,62 @@ class MouseTeleopIntervention:
         for a, fill, r in ((y, col + (255,), 6 * k), (t, (255, 255, 255, 255), 4.5 * k)):
             px = np.array(P(a))
             d.ellipse((*(px - r), *(px + r)), fill=fill, outline=(20, 22, 26, 255), width=max(1, round(k)))
+
+    def _draw_stg(self, S, W):
+        """STG 패널(높이 S, 폭 W) RGB — 축 하나에 겹쳐 그린다(render_demo_video의 패널과 같은 배치).
+        가로 = 스텝, 세로 = 남은 스텝. 기댓값 곡선(색 = 사람/정책)과 지금 기댓값 점선, 그리고 지금 스텝의 분포를
+        세로축에 붙인 가로 막대(bin 묶음 확률, 가장 긴 막대 = 축 폭의 40%)로 깐다.
+        가로축은 지금 스텝까지(얼마나 걸릴지 모르니 실시간으로 늘린다), 세로축은 0 ~ 예측기의 마지막 bin."""
+        from PIL import Image, ImageDraw
+        from square_assembly.runners import teleop_hud as hud
+
+        k, show = S / 960, self.stg_show
+        img = Image.new("RGB", (W, S), (30, 33, 36))
+        d = ImageDraw.Draw(img)
+        d.line((0, 0, 0, S), fill=(12, 13, 16), width=max(2, round(4 * k)))  # 맵과의 경계
+        f = hud.font(round(12 * k))
+        pts = [(t, *v) for t, v in enumerate(self._stg) if v is not None] if show["mean"] else []
+        p = self._stg_probs if show["bars"] else None
+        nbin = self.stg_bins
+        top = nbin - 1                        # 세로축 끝 = 마지막 bin(남은 스텝)
+        xmax = max(len(self._stg) - 1, 1)     # 가로축 끝 = 지금 스텝
+        x0, x1, y0, y1 = 44 * k, W - 14 * k, 40 * k, S - 44 * k
+        X = lambda t: x0 + t / xmax * (x1 - x0)
+        Y = lambda v: y1 - min(v, top) / top * (y1 - y0)
+        L = lambda pr, mx: x0 + pr / max(mx, 1e-12) * 0.4 * (x1 - x0)   # 분포 길이(가로)
+
+        d.rectangle((x0, y0, x1, y1), outline=(70, 74, 80))
+        d.text((x0, y0 - 8 * k), "steps to go", font=hud.font(round(14 * k), True), fill=hud.TEXT, anchor="ls")
+        for v in (0, xmax // 2, xmax):
+            d.text((X(v), y1 + 5 * k), str(v), font=f, fill=hud.DIM, anchor="mt")
+        d.text((x1, y1 + 20 * k), "step", font=f, fill=hud.DIM, anchor="rt")
+        for v in (0, top // 2, top):
+            d.text((x0 - 5 * k, Y(v)), str(v), font=f, fill=hud.DIM, anchor="rm")
+
+        if p is not None:  # 지금 스텝의 분포 막대 — 세로 위치 = 남은 스텝
+            q = np.zeros(nbin)
+            m = min(nbin, len(p))
+            q[:m] = p[:m]
+            nb = 100   # 512 bin을 그대로 그리면 줄무늬만 보여서 묶는다
+            bars = np.bincount(np.arange(nbin) * nb // nbin, weights=q, minlength=nb)
+            for i, b in enumerate(bars):
+                if L(b, bars.max()) >= x0 + 2:   # 1픽셀도 안 되는 꼬리는 건너뛴다
+                    d.rectangle((x0 + 1, Y((i + 1) * nbin / nb), L(b, bars.max()), Y(i * nbin / nb)), fill=(70, 120, 190))
+
+        w = max(2, round(2 * k))
+        for (ta, ea, _), (tb, eb, hb) in zip(pts, pts[1:]):
+            if tb == ta + 1:
+                d.line((X(ta), Y(ea), X(tb), Y(eb)), fill=hud.HUMAN if hb else hud.POLICY, width=w)
+        if pts:
+            t, e, h = pts[-1]
+            for xx in np.arange(x0, x1, 10 * k):  # 지금 기댓값 — 축 끝까지 그어 분포 봉우리와 견준다
+                d.line((xx, Y(e), min(xx + 5 * k, x1), Y(e)), fill=hud.PAUSED, width=max(1, round(1.5 * k)))
+            r = 4 * k
+            d.ellipse((X(t) - r, Y(e) - r, X(t) + r, Y(e) + r), fill=hud.TEXT)
+            low = Y(e) > y1 - 24 * k   # 점이 늘 오른쪽 끝이라 왼쪽에, 바닥 근처면 눈금 숫자와 안 겹치게 위로
+            d.text((X(t) - 8 * k, Y(e) + (-6 if low else 6) * k), f"{e:.0f}", font=hud.font(round(13 * k), True),
+                   fill=hud.TEXT, anchor="rb" if low else "rt")
+        return np.asarray(img)
 
     def _draw_map(self, s):
         """맵 도형(격자·peg·너트·그리퍼)만 cv2로 BGR에 그린다 — 글씨·게이지는 _draw_hud."""
