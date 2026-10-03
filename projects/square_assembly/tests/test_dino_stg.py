@@ -338,6 +338,19 @@ def test_rollout_limit_can_keep_only_no_intervention_rollouts():
     assert rollout_demos_to_drop(names, modes, 99, seed=0, kind="no_intervention") == intv
 
 
+def test_rollout_limit_can_keep_only_intervention_rollouts():
+    """시연 + 사람 개입 데모만 — 개입 없이 성공한 롤아웃은 limit와 무관하게 전부 빠진다."""
+    from square_assembly.scripts.train_dstg_vip import rollout_demos_to_drop
+    modes = {f"demo_{i}": np.full(5, -1) for i in range(3)}
+    modes.update({f"demo_{i}": np.array([0, -10, 1, 1, 1]) for i in range(3, 7)})   # 개입 성공
+    modes.update({f"demo_{i}": np.zeros(5, dtype=int) for i in range(7, 10)})       # 무개입 성공
+    names, intv, clean = list(modes), {f"demo_{i}" for i in range(3, 7)}, {f"demo_{i}" for i in range(7, 10)}
+
+    drop = rollout_demos_to_drop(names, modes, 2, seed=0, kind="intervention")
+    assert clean <= drop and len(intv - drop) == 2
+    assert rollout_demos_to_drop(names, modes, 99, seed=0, kind="intervention") == clean
+
+
 def test_clamp_labels_folds_long_remaining_steps_into_the_last_bin(tmp_path):
     """num_bins보다 먼 라벨은 마지막 bin("그 이상")으로 모이고, 바뀐 샘플을 알려 준다 — 나머지는 그대로."""
     cache = tmp_path / "feats.h5"
@@ -350,3 +363,55 @@ def test_clamp_labels_folds_long_remaining_steps_into_the_last_bin(tmp_path):
     assert clamped.tolist() == (before >= 4).tolist() and clamped.sum() == 2
     assert dataset.labels().tolist() == np.minimum(before, 3).tolist()
     assert dataset[int(np.flatnonzero(clamped)[0])][1] == 3
+
+
+def test_learning_curves_also_work_on_every_frame_without_success_tails(tmp_path):
+    """전처리 없이(성공-tail 선택 없이) 전 프레임으로 학습해도 epoch별 곡선과 최저 val 모델을 남긴다 — 다른 조건과 같은 기준으로 epoch을 고르게."""
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[0, 0, 1, 1, 1, 1])
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"),
+                                    record_curves=True, num_epochs=1, batch_size=2, device="cpu", num_bins_override=8))
+    train_dstg_vip.main.__wrapped__(cfg)
+    ck = torch.load(tmp_path / "best_predictor.pt", weights_only=False)
+    assert ck["n_train_samples"] == 4 * 6 and not ck["success_tail_only"]   # 개입 전 프레임까지 전부 학습
+
+
+def test_success_tail_can_start_at_the_first_onset(tmp_path):
+    """개입이 두 번인 성공(두 번째는 되감아 짧게 친 교정)은 첫 개입 시작부터 쓸 수 있다 — 무개입·시연·실패는 그대로."""
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[8, 4, 4, 4], success=[True, True, True, False])
+    with h5py.File(source, "w") as f:
+        for name, modes in {"demo_0": [0, 1, 1, 0, 0, 1, 1, 0], "demo_1": [-1] * 4, "demo_2": [0] * 4,
+                            "demo_3": [0] * 4}.items():
+            f.create_dataset(f"data/{name}/action_mode", data=modes)
+    ds = DinoFeatureWindows(cache, 2, fail_bin=99, mode_hdf5=source)
+    assert ds.retain_success_tails(list(range(20)), first=True) == list(range(1, 16))
+    assert ds.history_starts["demo_0"] == 1
+
+
+def test_training_uses_the_same_first_onset_for_train_and_validation(tmp_path):
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[0, 1, 0, 1, 1, 1])   # 개입 시작 1, 3
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"),
+                                    record_curves=True, success_tail_only=True, success_tail_from="first",
+                                    num_epochs=1, batch_size=2, device="cpu", num_bins_override=8))
+    train_dstg_vip.main.__wrapped__(cfg)
+    ck = torch.load(tmp_path / "best_predictor.pt", weights_only=False)
+    assert set(ck["train_history_starts"].values()) == {1} and ck["success_tail_from"] == "first"
+    import json
+    row = json.loads((tmp_path / "learning_curve.json").read_text())["rows"][0]
+    assert row["val_retained"]["n"] == 5 and row["val_excluded_prefix"]["n"] == 1   # 검증 데모 1개: 프레임 1~5 / 0

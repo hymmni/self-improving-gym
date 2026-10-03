@@ -185,14 +185,16 @@ def rollout_demos_to_drop(train_demos, modes, limit, seed, kind="all"):
     """전문가 시연(전 프레임 DEMO)은 다 두고, 정책 롤아웃·개입 데모는 limit개만 남길 때 버릴 데모 이름들.
 
     kind="no_intervention"이면 사람 개입이 있는 데모는 전부 버리고, 개입 없이 성공한 롤아웃 중에서만 고른다.
+    kind="intervention"이면 그 반대 — 개입 없이 성공한 롤아웃을 전부 버리고 개입 데모 중에서만 고른다.
     같은 seed면 limit가 커질 때 남는 집합이 포함 관계다(같은 순열의 앞부분) — 규모 곡선에서 "n개 더"가
     정말로 앞의 것에 데모를 더한 것이 된다.
     """
     from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV
-    if kind not in ("all", "no_intervention"):
-        raise ValueError(f"train_rollout_kind는 all 또는 no_intervention이다: {kind}")
+    if kind not in ("all", "no_intervention", "intervention"):
+        raise ValueError(f"train_rollout_kind는 all, no_intervention, intervention 중 하나다: {kind}")
     rollouts = sorted(n for n in train_demos if not (np.asarray(modes[n]) == LABEL_DEMO).all())
-    pool = [n for n in rollouts if kind == "all" or not (np.asarray(modes[n]) == LABEL_INTV).any()]
+    pool = [n for n in rollouts
+            if kind == "all" or (np.asarray(modes[n]) == LABEL_INTV).any() == (kind == "intervention")]
     order = np.random.RandomState(seed).permutation(len(pool))
     return set(rollouts) - {pool[i] for i in order[:int(limit)]}
 
@@ -205,11 +207,12 @@ def main(cfg: DictConfig):
     pair_stride = int(cfg.get("pair_stride", 8))
     modality_dropout = float(cfg.get("modality_dropout", 0.0))
     success_tail_only = bool(cfg.get("success_tail_only", False))
+    success_tail_from = cfg.get("success_tail_from", "last")
+    if success_tail_from not in ("first", "last"):
+        raise ValueError(f"success_tail_from는 first 또는 last다: {success_tail_from}")
     record_curves = bool(cfg.get("record_curves", False))
     if cfg.get("use_wandb", False) and not record_curves:
         raise ValueError("use_wandb requires record_curves=true")
-    if record_curves and not success_tail_only:
-        raise ValueError("record_curves currently requires success_tail_only for comparable train/val regions")
     if success_tail_only and (cfg.get("label_horizon") is not None
                               or cfg.get("preintv", "none") != "none"
                               or cfg.get("train_modes") or int(cfg.get("preintv_weight") or 1) != 1):
@@ -242,7 +245,7 @@ def main(cfg: DictConfig):
 
     if success_tail_only:
         before = len(train_idx)
-        train_idx = dataset.retain_success_tails(train_idx)
+        train_idx = dataset.retain_success_tails(train_idx, first=success_tail_from == "first")
         n_train_demos = len({dataset.samples[i][0] for i in train_idx})
         logger.info(f"success_tail_only: train samples {before} -> {len(train_idx)}")
 
@@ -331,7 +334,8 @@ def main(cfg: DictConfig):
         os.makedirs(os.path.dirname(cfg.out), exist_ok=True)
         wandb_config = {k: cfg.get(k) for k in ("seed", "split_seed", "num_epochs", "batch_size", "lr",
                        "weight_decay", "obs_horizon", "obs_parts", "label_horizon",
-                       "preintv", "success_tail_only", "gauss_sigma", "pair_weight", "modality_dropout")}
+                       "preintv", "success_tail_only", "success_tail_from", "gauss_sigma", "pair_weight",
+                       "modality_dropout")}
         wandb_config["head_hidden"] = list(cfg.head_hidden)
         wandb_run = wandb.init(
             project=cfg.wandb_project, entity=cfg.get("wandb_entity"),
@@ -357,12 +361,12 @@ def main(cfg: DictConfig):
     curves, best_state, best_row = [], None, None
     if record_curves:
         os.makedirs(os.path.dirname(cfg.out), exist_ok=True)
+        from square_assembly.datasets.stg_labels import success_tail_start
         val_starts, cohorts = {}, {}
         for name in val_demos:
             mode = dataset.modes[name]
             human = mode == 1
-            onsets = np.flatnonzero(human & ~np.r_[False, human[:-1]])
-            val_starts[name] = int(onsets[-1]) if len(onsets) else 0
+            val_starts[name] = success_tail_start(mode, success_tail_from == "first")
             cohorts[name] = "intervention_tail" if human.any() else "expert" if (mode == -1).all() else "policy_success"
 
     for epoch in range(cfg.num_epochs):
@@ -423,6 +427,7 @@ def main(cfg: DictConfig):
         "split_seed": cfg.split_seed,
         "train_modes": list(cfg.train_modes) if cfg.get("train_modes") else None,
         "success_tail_only": success_tail_only,
+        "success_tail_from": success_tail_from,
         "train_history_starts": {n: s for n, s in dataset.history_starts.items()
                                  if n in {dataset.samples[i][0] for i in train_idx}},
         "n_train_samples": len(train_idx),

@@ -130,6 +130,7 @@ def test_success_tail_uses_last_human_onset_and_keeps_prefix_out_of_history():
 
     assert success_tail_start(np.array([0, 1, 1, 0, -10, 1, 1, 0])) == 5  # 개입 두 번 — 마지막 시작
     assert success_tail_start(np.zeros(4, int)) == 0                      # 무개입 성공은 전부
+    assert success_tail_start(np.array([0, 1, 1, 0, -10, 1, 1, 0]), first=True) == 1   # 첫 개입부터
 
     class Base:  # obs 창 = 프레임 [t-1, t] (To=2)
         def __getitem__(self, t):

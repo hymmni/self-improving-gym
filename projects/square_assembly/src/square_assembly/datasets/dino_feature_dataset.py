@@ -153,13 +153,14 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         val_idx = [i for i, (n, _) in enumerate(self.samples) if n in val_demos]
         return train_idx, val_idx, val_demos
 
-    def retain_success_tails(self, indices):
-        """Keep successful full demos/rollouts or the tail from the final human onset.
+    def retain_success_tails(self, indices, first=False):
+        """Keep successful full demos/rollouts or the tail from the final human onset (first=True: the first onset).
 
         Only retained training histories are clamped; held-out trajectories stay intact.
         Original action_mode and labels are never rewritten.
         """
         from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
+        from square_assembly.datasets.stg_labels import success_tail_start
 
         starts = {}
         for name in sorted({self.samples[i][0] for i in indices}):
@@ -169,9 +170,7 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
             if mode is None or len(mode) != self.lengths[name] or not np.isin(
                     mode, [LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT]).all():
                 raise ValueError(f"{name}: complete valid action_mode is required for success tails")
-            human = mode == LABEL_INTV
-            onsets = np.flatnonzero(human & ~np.r_[False, human[:-1]])
-            starts[name] = int(onsets[-1]) if len(onsets) else 0
+            starts[name] = success_tail_start(mode, first)
         kept = [i for i in indices if self.samples[i][0] in starts
                 and self.samples[i][1] >= starts[self.samples[i][0]]]
         if not kept:

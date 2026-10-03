@@ -11,7 +11,7 @@ label_horizon: null      # 설정하면 라벨이 '남은 스텝 수' 대신 '�
                          # 에피소드 길이 편차가 큰 텔레옵 데이터용. num_bins도 같이 줄여야 한다.
 train_demos_limit: null  # train 데모 수 상한(규모 곡선용). val 데모는 영향받지 않는다.
 train_rollout_limit: null  # 전문가 시연은 다 두고 롤아웃·개입 train 데모만 이 수로(0 = 시연만). mode_hdf5 필요.
-train_rollout_kind: all    # all | no_intervention(개입 데모는 전부 빼고, 개입 없이 성공한 롤아웃 중에서만 고른다)
+train_rollout_kind: all    # all | no_intervention(개입 데모는 전부 빼고, 개입 없이 성공한 롤아웃 중에서만 고른다) | intervention(그 반대)
 mode_hdf5: null          # action_mode를 읽어올 원본 hdf5 — preintv 처리를 쓸 때만 필요
 preintv: none            # PREINTV 프레임 처리: none(그대로) | drop(train에서 제외) |
                          # flat(구간 내내 같은 라벨 = 진전 0) | rise(스텝마다 +1 = 후퇴) | anchor(끊김 없는 rise, stg_labels.py)
@@ -23,6 +23,7 @@ pair_stride: 8          # endpoints must both belong to retained training frames
 modality_dropout: 0.0   # total probability; half vision-only masking, half lowdim-only masking
 train_modes: null        # 학습에 쓸 프레임 종류(demo/rollout/intv/preintv). null이면 전부(val은 언제나 전부)
 success_tail_only: false # 성공 시연/무개입 rollout 전체, 개입 성공은 마지막 개입 시작 이후만
+success_tail_from: last  # last | first — 개입이 여러 번인 성공의 tail 시작(first: 두 번째 개입을 되감아 짧게 친 교정으로 볼 때, r0v9). 검증 구간도 같은 규칙
 record_curves: false     # 성공-tail 실험의 epoch별 train/val MAE/NLL/k8 및 최소 val MAE 모델 저장
 use_wandb: false
 wandb_project: square_assembly
