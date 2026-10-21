@@ -318,7 +318,11 @@ class MouseTeleopIntervention:
         self._z = zoom             # 지금 화면 배율(창 크기에 맞춘 값, 처음엔 zoom) — 마우스 좌표를 이걸로 나눈다
         self.controller = controller or MouseTeleopController()
         table = getattr(self.raw, "table_offset", None)
-        self.map = TopDownMap(table[:2] if table is not None else (0.0, 0.0), map_extent, map_size)
+        center = table[:2] if table is not None else (0.0, 0.0)
+        if hasattr(self.raw, "bin1_pos"):  # PickPlace(Can): 두 상자(y −0.5~0.53)와 오른쪽 z 게이지가 안 겹치게
+            center, map_extent = (self.raw.bin1_pos[:2] + self.raw.bin2_pos[:2]) / 2, max(map_extent, 1.25)
+        self.map = TopDownMap(center, map_extent, map_size)
+        self.map_extent = map_extent
         self.window_name = window_name
         self.back_steps = back_steps
         self.keys = {toggle_key: "toggle", switch_key: "last_switch",
@@ -851,9 +855,10 @@ class MouseTeleopIntervention:
         d.rounded_rectangle((gx0, top, gx1, bot), radius=(gx1 - gx0) / 2, fill=(255, 255, 255, 28),
                             outline=(255, 255, 255, 70), width=1)
         d.rounded_rectangle((gx0, zy, gx1, bot), radius=(gx1 - gx0) / 2, fill=mode_col + (190,))
-        py = z_to_py(0.95)
+        mark_z, mark_label = s.get("z_mark", (0.95, "peg"))
+        py = z_to_py(mark_z)
         d.line((gx0 - 6 * k, py, gx1 + 6 * k, py), fill=(64, 196, 196, 255), width=max(2, round(3 * k)))
-        d.text((gx0 - 10 * k, py), "peg", font=hud.font(round(12 * k)), fill=(64, 196, 196), anchor="rm")
+        d.text((gx0 - 10 * k, py), mark_label, font=hud.font(round(12 * k)), fill=(64, 196, 196), anchor="rm")
         d.rounded_rectangle((gx0 - 4 * k, zy - 4 * k, gx1 + 4 * k, zy + 4 * k), radius=4 * k, fill=(255, 255, 255, 255))
         d.text((gx0 - 10 * k, zy), f"{s['grip'][2]:.2f}", font=hud.font(round(13 * k), True), fill=hud.TEXT,
                anchor="rm")
@@ -1037,7 +1042,8 @@ class MouseTeleopIntervention:
         c = self.controller
 
         # 테이블(맵 전체 폭 = table 한 변)과 10cm 격자
-        for k in np.arange(-0.4, 0.41, 0.1):
+        h = np.ceil(self.map_extent * 5) / 10  # 맵 반폭을 덮는 10cm 격자(밖으로 나간 선은 안 보인다)
+        for k in np.arange(-h, h + 0.01, 0.1):
             px, _ = m.to_px((0.0, m.center[1] + k))
             _, py = m.to_px((m.center[0] + k, 0.0))
             cv2.line(img, (px, 0), (px, S), (54, 50, 46), 1, cv2.LINE_AA)
@@ -1049,6 +1055,8 @@ class MouseTeleopIntervention:
             hull = cv2.convexHull(np.array([m.to_px(p) for p in pts], dtype=np.int32))
             cv2.fillConvexPoly(img, hull, color, cv2.LINE_AA)
 
+        if "target" in s:  # Can 목표 칸 — 벽보다 옅게
+            fill(s["target"], (90, 90, 40))
         for pts in s["peg_boxes"]:
             fill(pts, (196, 196, 64))
         *ring, handle = s["nut_boxes"]

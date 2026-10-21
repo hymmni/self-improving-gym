@@ -3,6 +3,7 @@
 docs/plan.md M0 확정 결과 참고: ObsUtils 초기화가 env 생성 전에 필요, MUJOCO_GL=egl 권장(오프스크린 렌더).
 """
 
+import numpy as np
 import robomimic.utils.obs_utils as ObsUtils
 from robomimic.envs.env_robosuite import EnvRobosuite
 
@@ -58,6 +59,46 @@ def make_lowdim_env(env_name, robots, obs_keys, render=False, renderer="mjviewer
         env.env.has_renderer = True
         env.env.renderer = renderer
     return env
+
+
+def rot6d_to_matrix(d6):
+    """rot6d(회전행렬 앞 두 행, pytorch3d 규약 — DP RotationTransformer) -> 회전행렬."""
+    b1 = d6[:3] / np.linalg.norm(d6[:3])
+    b2 = d6[3:6] - (b1 @ d6[3:6]) * b1
+    b2 = b2 / np.linalg.norm(b2)
+    return np.stack([b1, b2, np.cross(b1, b2)])
+
+
+class AbsRot6dActionEnv:
+    """정책 액션(월드 절대 목표 pos3 + rot6d + gripper1, DP 규약)을 지금 손끝 자세 기준 OSC delta 액션으로 바꿔 넘긴다.
+
+    robosuite OSC(delta, goal_update_mode="achieved", input_ref_frame="world")의 목표는 지금 자세 + scale*delta라서,
+    |목표 - 지금|이 한 스텝 범위(5cm, 0.5rad) 안이면 absolute 컨트롤러와 같은 목표가 된다 — DP의 절대 액션 자체가
+    delta 시연을 이 식으로 바꾼 것이다. 범위 밖이면 잘린다(input 클립과 같다). env를 delta로 두는 이유: 사람
+    개입(마우스 텔레옵)·PH 시연·우리 정책이 모두 delta라 한 에피소드에 섞어 기록할 수 있다.
+    7차원 액션(사람·0 액션)은 그대로 통과. 실제로 넣은 7차원 액션은 last_action(수집기가 기록한다).
+    """
+
+    def __init__(self, env):
+        self._env = env
+        self.last_action = None
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    def step(self, action):
+        from scipy.spatial.transform import Rotation
+
+        action = np.asarray(action, dtype=np.float64)
+        if action.shape[-1] == 10:
+            ctrl = self._env.env.robots[0].part_controllers["right"]
+            ctrl.update(force=True)
+            scale = np.abs(ctrl.output_max - ctrl.output_min) / np.abs(ctrl.input_max - ctrl.input_min)
+            drot = Rotation.from_matrix(rot6d_to_matrix(action[3:9]) @ ctrl.ref_ori_mat.T).as_rotvec()
+            delta = np.concatenate([action[:3] - ctrl.ref_pos, drot]) / scale
+            action = np.concatenate([np.clip(delta, -1.0, 1.0), action[9:]])
+        self.last_action = action.astype(np.float32)
+        return self._env.step(action)
 
 
 def make_image_env(env_name, robots, lowdim_keys, rgb_keys, camera_names, image_size=84, gripper_types=None, env_kwargs=None):

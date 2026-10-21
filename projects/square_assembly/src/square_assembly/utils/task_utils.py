@@ -200,6 +200,9 @@ def make_eval_env(task_cfg, render=False, renderer="mjviewer", image_size_overri
             gripper_types=gripper_types, env_kwargs=env_kwargs,
         )
         _burn_first_episode(env)
+        if task_cfg.get("abs_rot6d_action", False):
+            from square_assembly.envs.robomimic.factory import AbsRot6dActionEnv
+            env = AbsRot6dActionEnv(env)
         return env
     from square_assembly.envs.robomimic.factory import make_lowdim_env
     return make_lowdim_env(task_cfg.env_name, task_cfg.robots, list(task_cfg.obs_keys),

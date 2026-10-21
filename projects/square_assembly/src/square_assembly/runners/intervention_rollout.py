@@ -322,6 +322,8 @@ def collect_episode(
 
             t_step0 = time.time()
             obs_raw, _reward, done, _info = env.step(action)
+            if getattr(env, "last_action", None) is not None:
+                action_seq[-1] = env.last_action  # AbsRot6dActionEnv: 정책의 절대 액션 대신 실제로 넣은 delta를 기록
             step_times_ms.append((time.time() - t_step0) * 1000.0)
             obs_history.append(obs_raw)
             step += 1

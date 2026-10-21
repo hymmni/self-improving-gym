@@ -79,21 +79,14 @@ def box_footprints(sim, body_id):
             if m.geom_group[g] == 0 and m.geom_type[g] == 6]  # 6 = mjGEOM_BOX
 
 
-def read_privileged_state(raw):
-    """sim에서 그리퍼/너트/핸들/peg 상태를 한 번에 읽는다(오라클·텔레옵 맵 공용).
+def _circle(center, r, n=24):
+    a = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    return np.stack([center[0] + r * np.cos(a), center[1] + r * np.sin(a)], axis=1)
 
-    인덱스는 robosuite가 env 생성 시 잡아둔 것 그대로 쓴다. 매 호출마다 새로 읽으므로
-    env.reset() 뒤에도 안전하다.
-    """
-    sim = raw.sim
-    nut = raw.nuts[getattr(raw, "nut_id", 0)]
-    grip_id = raw.robots[0].eef_site_id[raw.robots[0].arms[0]]
-    handle = sim.data.site_xpos[sim.model.site_name2id(nut.important_sites["handle"])].copy()
-    # 너트 = 사각 고리 박스 4개 + 손잡이 박스 1개(3.2cm 폭, 고리 벽 속까지 들어가 있고 밖으로 3.6cm
-    # 나온다). 손잡이 site에 가장 가까운 박스가 손잡이 — 맨 뒤에 둔다.
-    nut_boxes = sorted(box_footprints(sim, raw.obj_body_id[nut.name]),
-                       key=lambda p: -np.linalg.norm(p.mean(axis=0) - handle[:2]))
-    robot = raw.robots[0]
+
+def _robot_state(raw):
+    sim, robot = raw.sim, raw.robots[0]
+    grip_id = robot.eef_site_id[robot.arms[0]]
     return {
         # 손목(마지막) 관절의 (각도, 하한, 상한) rad — 텔레옵이 야우를 얼마나 더 돌릴 수 있는지 보여준다
         "wrist": np.array([sim.data.qpos[robot._ref_joint_pos_indexes[-1]],
@@ -101,11 +94,58 @@ def read_privileged_state(raw):
         "grip": sim.data.site_xpos[grip_id].copy(),
         # 열: [손가락이 벌어지는 축, y, 접근 축] — x축이 손가락 축인 건 finger body 위치로 확인(2026-09-17)
         "R": sim.data.site_xmat[grip_id].reshape(3, 3).copy(),
+    }
+
+
+def read_pickplace_state(raw):
+    """PickPlace(Can) 버전 — 텔레옵 맵·높이 규칙이 쓰는 키를 Square와 같은 이름으로 채운다(2026-10-07, Can 트랙).
+
+    "nut" = 집을 물체(캔) 중심, "nut_boxes" = [캔 윤곽(원)](마지막 = 밝게 칠하는 손잡이 자리라 캔 전체가 밝다),
+    "peg_boxes" = 두 상자의 벽(바닥판은 빼고 group 0 박스), "target" = 캔 목표 칸, "z_mark" = 상자 벽 윗면.
+    """
+    sim, m = raw.sim, raw.sim.model
+    obj = raw.objects[raw.object_id]
+    can = sim.data.body_xpos[raw.obj_body_id[obj.name]].copy()
+    r = max(float(m.geom_size[g][0]) for g in np.flatnonzero(m.geom_bodyid == raw.obj_body_id[obj.name])
+            if m.geom_group[g] == 0)
+    walls = []  # 바닥판(두께 2cm)은 빼고 벽만
+    for name in ("bin1", "bin2"):
+        for g in np.flatnonzero(m.geom_bodyid == m.body(name).id):
+            if m.geom_group[g] == 0 and m.geom_type[g] == 6 and m.geom_size[g][2] > 0.03:
+                walls.append((sim.data.geom_xpos[g] + (_BOX_CORNERS * m.geom_size[g])
+                              @ sim.data.geom_xmat[g].reshape(3, 3).T)[:, :2])
+    tx, ty = raw.target_bin_placements[raw.object_id][:2]
+    hx, hy = raw.bin_size[0] / 4, raw.bin_size[1] / 4  # 목표 칸 = 상자 2를 4등분한 한 칸
+    target = np.array([[tx - hx, ty - hy], [tx + hx, ty - hy], [tx + hx, ty + hy], [tx - hx, ty + hy]])
+    top = max(float(sim.data.geom_xpos[g][2] + m.geom_size[g][2]) for g in np.flatnonzero(m.geom_bodyid == m.body("bin1").id)
+              if m.geom_group[g] == 0 and m.geom_type[g] == 6)
+    return {**_robot_state(raw), "nut": can, "handle": can, "nut_boxes": [_circle(can, r)],
+            "peg_boxes": walls, "target": target, "z_mark": (top, "bin")}
+
+
+def read_privileged_state(raw):
+    """sim에서 그리퍼/너트/핸들/peg 상태를 한 번에 읽는다(오라클·텔레옵 맵 공용). PickPlace(Can)면 read_pickplace_state.
+
+    인덱스는 robosuite가 env 생성 시 잡아둔 것 그대로 쓴다. 매 호출마다 새로 읽으므로
+    env.reset() 뒤에도 안전하다.
+    """
+    if not hasattr(raw, "nuts"):
+        return read_pickplace_state(raw)
+    sim = raw.sim
+    nut = raw.nuts[getattr(raw, "nut_id", 0)]
+    handle = sim.data.site_xpos[sim.model.site_name2id(nut.important_sites["handle"])].copy()
+    # 너트 = 사각 고리 박스 4개 + 손잡이 박스 1개(3.2cm 폭, 고리 벽 속까지 들어가 있고 밖으로 3.6cm
+    # 나온다). 손잡이 site에 가장 가까운 박스가 손잡이 — 맨 뒤에 둔다.
+    nut_boxes = sorted(box_footprints(sim, raw.obj_body_id[nut.name]),
+                       key=lambda p: -np.linalg.norm(p.mean(axis=0) - handle[:2]))
+    return {
+        **_robot_state(raw),
         "nut": sim.data.body_xpos[raw.obj_body_id[nut.name]].copy(),
         "handle": handle,
         "peg": sim.data.body_xpos[raw.peg1_body_id].copy(),
         "nut_boxes": nut_boxes,
         "peg_boxes": box_footprints(sim, raw.peg1_body_id),
+        "z_mark": (0.95, "peg"),
     }
 
 
