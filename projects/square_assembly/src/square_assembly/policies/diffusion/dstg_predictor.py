@@ -7,6 +7,10 @@ robomimic square PH 데모(~50개)는 STG 예측기 전용 ResNet18을 처음부
 STG bin을 예측하는 작은 MLP 헤드만 새로 학습시킨다(사용자 결정 — phases/5-mani-sim-ddpo/step1.md).
 
 액션은 입력에 없다 — 논문 식(1) `d(o,g) := E[steps-to-go | o, g]`는 관측(+목표)만 받는다.
+
+train_encoder=True면 비전 인코더(policy.encoders)도 같이 학습한다(풀 파인튜닝, 2026-09-23) — 정책
+행동용으로 학습된 특징이 개입 직전의 몇 mm 어긋남을 담지 않는지 보려는 실험. 정책 본체(unet)는
+그대로 얼려 둔다. 그 가중치는 predictor.pt에 "encoder"로 저장되고 DstgReward가 다시 얹는다.
 """
 
 import torch
@@ -29,14 +33,17 @@ class DstgPredictor(nn.Module):
     액션은 입력에 없다(논문 식(1) 그대로).
     """
 
-    def __init__(self, frozen_policy, num_bins, head_hidden=(256, 256)):
+    def __init__(self, frozen_policy, num_bins, head_hidden=(256, 256), train_encoder=False):
         super().__init__()
         self.frozen_policy = frozen_policy
+        self.train_encoder = train_encoder
         # requires_grad_(False) + forward()의 torch.no_grad() 이중 안전판(아래) — 인코더가
         # STG 헤드 학습으로 오염되지 않게 한다(step 0의 test_chain_logp_gradient_flows_to_unet_only
         # 와 같은 원칙).
         self.frozen_policy.requires_grad_(False)
         self.frozen_policy.eval()
+        if train_encoder:
+            self.frozen_policy.encoders.requires_grad_(True)
 
         global_cond_dim = _global_cond_dim(frozen_policy)
         layers = []
@@ -51,6 +58,6 @@ class DstgPredictor(nn.Module):
         """obs: DiffusionPolicyImage._encode가 받는 것과 같은 형식(dict of tensors).
         반환: (B, num_bins) logits.
         """
-        with torch.no_grad():
+        with torch.set_grad_enabled(self.train_encoder and torch.is_grad_enabled()):
             global_cond = self.frozen_policy.get_global_cond(obs)
         return self.head(global_cond)

@@ -1,0 +1,570 @@
+r"""학습된 STG 예측기를 강화학습 없이 직접 평가한다.
+
+**왜 MAE/NLL만으론 부족한가**: SI-EFM이 실제로 쓰는 건 d(o)의 절대값이 아니라 (1) 한 스텝
+차분 `r_t = d(o_t) - d(o_{t+1})`(식 2)의 부호·일관성과 (2) 성공 판정 임계값(식 3)이다.
+평균오차가 작아도 프레임마다 d가 들쭉날쭉하면 차분은 부호가 뒤집히는 잡음이 되고, 그 보상으로
+REINFORCE를 돌리면 정책이 망가진다 — MAE는 이 실패 모드를 못 본다. 그래서 여기서는 보상으로서의
+품질을 직접 잰다(RL을 돌리는 건 최종 확인이지 측정 도구가 아니다 — 몇 시간이 걸리고, REINFORCE
+분산 때문에 "정책이 안 늘었다"가 보상 탓인지 RL 하이퍼파라미터 탓인지 구분이 안 된다).
+
+성공 데모에서 참 steps-to-go는 매 스텝 정확히 1씩 줄기 때문에 **이상적인 보상은 항상 +1**이다.
+이 사실이 아래 지표들의 기준선이다.
+
+| 지표 | 의미 | 이상값 |
+|---|---|---|
+| `mae` / `nll` | 학습 때와 같은 적합도(참고용) | 0 |
+| `reward_sign_acc` | r_t > 0인 transition 비율 — 부호가 맞는가 | 1.0 |
+| `reward_mae` | \|r_t − (이상적 스텝당 감소)\|의 평균 | 0 |
+| `reward_snr` | 에피소드 내 mean(r)/std(r) 중앙값 — 신호 대 잡음 | 클수록 좋음 |
+| `spearman` | 에피소드 내 d와 참 라벨의 순위상관 중앙값 | 1.0 |
+| `preintv_auroc` | 사람이 곧 개입한 상태(PREINTV)를 평범한 ROLLOUT보다 나쁘게 보는가 | 참라벨 AUROC에 근접 |
+| `success_f1` | d ≤ s로 성공 시점을 잡을 때의 최고 F1 | 1.0 |
+
+`preintv_auroc`는 참 라벨로 계산한 값(`preintv_auroc_oracle`)을 같이 낸다 — PREINTV 프레임은
+원래 끝까지 남은 스텝이 많으므로 라벨만으로도 어느 정도 갈리기 때문이다. 예측값이 그 상한에
+얼마나 근접하는지로 읽어야 하고, 단독 절대값으로 읽으면 안 된다.
+
+사용:
+    python -m square_assembly.scripts.eval_dstg \
+        --predictor outputs/dstg/square_r0/predictor.pt \
+        --hdf5 data/square_demo50_mouse50.hdf5
+    python -m square_assembly.scripts.eval_dstg \
+        --predictor outputs/dstg_vip/square_r0/predictor.pt \
+        --cache data/square_demo50_mouse50.vip.h5
+"""
+
+import argparse
+import json
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from scipy.stats import rankdata, spearmanr
+
+_MIN_EPISODE_LEN = 3  # 순위상관·차분을 낼 수 있는 최소 길이
+
+
+def auroc(pos, neg):
+    """pos 값이 neg보다 클 확률(Mann-Whitney U). 한쪽이 비면 nan."""
+    pos, neg = np.asarray(pos, float), np.asarray(neg, float)
+    if len(pos) == 0 or len(neg) == 0:
+        return float("nan")
+    ranks = rankdata(np.concatenate([pos, neg]))
+    return float((ranks[: len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
+
+
+def best_f1(score, label):
+    """score <= s로 양성을 예측할 때 F1이 최대인 s와 그 지표들."""
+    label = np.asarray(label, bool)
+    if not label.any():
+        return {"success_f1": float("nan"), "success_precision": float("nan"),
+                "success_recall": float("nan"), "success_threshold": float("nan")}
+    best = {"success_f1": -1.0}
+    for s in np.linspace(float(score.min()), float(score.max()), 400):
+        pred = score <= s
+        tp = float((pred & label).sum())
+        prec = tp / max(pred.sum(), 1)
+        rec = tp / label.sum()
+        f1 = 2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0
+        if f1 > best["success_f1"]:
+            best = {"success_f1": f1, "success_precision": prec, "success_recall": rec,
+                    "success_threshold": float(s)}
+    return best
+
+
+_STRIDES = (1, 2, 5, 8, 10, 20)
+_SMOOTHS = (1, 5, 10, 20, 40, 80, 160)
+_ALPHAS = (1.0, 0.5, 0.3, 0.2, 0.1, 0.05)
+
+
+def trailing_mean(x, window):
+    """인과적 이동평균 — 시점 t의 값은 t까지의 최근 window개 평균이다.
+
+    중심 이동평균을 쓰지 않는 이유: 롤아웃 중 결정 t의 보상은 그 청크가 끝난 직후에
+    계산되므로 미래 d를 볼 수 없다. 평가에서만 되는 방식으로 재면 RL에서 재현이 안 된다.
+    """
+    if window <= 1:
+        return x
+    c = np.concatenate([[0.0], np.cumsum(x, dtype=np.float64)])
+    idx = np.arange(len(x))
+    lo = np.maximum(0, idx - window + 1)
+    return ((c[idx + 1] - c[lo]) / (idx + 1 - lo)).astype(x.dtype)
+
+
+def ema(x, alpha):
+    """1차 저역통과(지수이동평균). alpha=1이면 원본 그대로.
+
+    박스카 이동평균과 달리 오래된 표본이 갑자기 빠지지 않고 가중치가 지수로 줄어든다.
+    같은 잡음 감소를 더 짧은 군지연으로 얻을 수 있는지가 관심사다 —
+    박스카 W의 군지연은 (W-1)/2, 이쪽은 (1-alpha)/alpha다.
+    """
+    if alpha >= 1.0:
+        return x
+    out = np.empty_like(x, dtype=np.float64)
+    acc = x[0]
+    for i, v in enumerate(x):
+        acc = alpha * v + (1.0 - alpha) * acc
+        out[i] = acc
+    return out.astype(x.dtype)
+
+
+def reward_metrics(d, label, demo, t, stride=1, smooth=1, alpha=1.0):
+    """에피소드 안에서 시간순으로 이어붙여 r_t = d_t - d_{t+stride}의 품질을 잰다.
+
+    stride>1은 인접 프레임이 거의 같아 보이는 문제를 피한다 — 신호(참 감소량)는 stride에
+    비례해 커지는데 d의 추정 잡음은 그대로라, 잡음에 묻힌 보상이 stride를 키우면 살아나는지
+    여기서 바로 보인다.
+    """
+    signs, errs, snrs, rhos = [], [], [], []
+    for name in np.unique(demo):
+        m = demo == name
+        order = np.argsort(t[m], kind="mergesort")
+        d_ep, label_ep = d[m][order], label[m][order]
+        if len(d_ep) < max(_MIN_EPISODE_LEN, stride + 1):
+            continue
+        d_ep = ema(trailing_mean(d_ep, smooth), alpha)
+        # 이상적인 스텝당 보상은 참 라벨의 차분 그 자체다 — 라벨이 남은 스텝 수면 항상 +1,
+        # 남은 비율 x H로 정규화했으면 H/(L-1)이다. 하드코딩하면 정규화 라벨에서 틀린 값을 잰다.
+        r = d_ep[:-stride] - d_ep[stride:]
+        ideal = label_ep[:-stride] - label_ep[stride:]
+        # 참 변화량이 0인 transition(라벨 해상도가 낮아 인접 프레임이 같은 칸에 떨어질 때)은
+        # 부호를 물을 대상이 아니다 — 연속값인 d가 정확히 0 차분을 낼 수는 없으므로, 세면
+        # 맞히는 게 불가능한 문제를 정확도에 섞는 꼴이 된다. 라벨이 '남은 스텝 수'면 ideal은
+        # 항상 1이라 이 마스크는 전부 True이고 예전 계산과 같은 값이 나온다.
+        nz = ideal != 0
+        signs.append((r[nz] > 0) == (ideal[nz] > 0))
+        errs.append(np.abs(r - ideal))
+        snrs.append(r.mean() / r.std() if r.std() > 1e-9 else np.inf)
+        rhos.append(spearmanr(d_ep, label_ep).statistic)
+    signs = [x for x in signs if len(x)]
+    if not signs:
+        return {}
+    return {
+        "reward_sign_acc": float(np.concatenate(signs).mean()),
+        "reward_mae": float(np.concatenate(errs).mean()),
+        "reward_snr": float(np.median(snrs)),
+        "spearman": float(np.median(rhos)),
+        "n_episodes": len(signs),
+    }
+
+
+def reward_by_mode(d, label, demo, t, mode, stride):
+    """transition이 시작하는 프레임의 action_mode별 평균 보상.
+
+    "성공 데모면 참 steps-to-go가 매 스텝 1씩 준다"는 건 그 궤적을 따라간다는 뜻일 뿐,
+    상태의 가치가 매 스텝 1씩 좋아진다는 뜻이 아니다. 사람이 헛손질한 구간에서는 남은
+    비용이 오히려 늘고, 제대로 된 예측기라면 거기서 보상이 음수여야 한다. PREINTV(사람이
+    곧 개입한 = 정책이 헛짓을 하던 구간)에서 보상이 다른 구간보다 낮게 나오는지가
+    예측기가 그걸 잡아내는지에 대한 직접 증거다.
+    """
+    rs, ms, ids = [], [], []
+    for name in np.unique(demo):
+        m = demo == name
+        order = np.argsort(t[m], kind="mergesort")
+        d_ep, mode_ep, lab_ep = d[m][order], mode[m][order], label[m][order]
+        if len(d_ep) < stride + 1:
+            continue
+        rs.append(d_ep[:-stride] - d_ep[stride:])
+        ms.append(mode_ep[:-stride])
+        ids.append(lab_ep[:-stride] - lab_ep[stride:])
+    if not rs:
+        return {}
+    r, mo, ideal = np.concatenate(rs), np.concatenate(ms), np.concatenate(ids)
+    from square_assembly.datasets.labels import (LABEL_DEMO, LABEL_INTV, LABEL_PREINTV,
+                                                 LABEL_ROLLOUT)
+    names = {LABEL_DEMO: "demo", LABEL_ROLLOUT: "rollout", LABEL_INTV: "intv",
+             LABEL_PREINTV: "preintv"}
+    out = {}
+    for v in np.unique(mo):
+        sel = (mo == v) & (ideal != 0)
+        out[names.get(int(v), str(int(v)))] = {
+            "mean_reward": float(r[mo == v].mean()),
+            "sign_acc": float(((r[sel] > 0) == (ideal[sel] > 0)).mean()) if sel.any() else None,
+            "n": int((mo == v).sum()),
+        }
+    return out
+
+
+def segment_metrics(d, label, demo, t, mode):
+    """연속된 action_mode 구간을 통째로 놓고 (시작 - 끝) 보상을 잰다.
+
+    구간 안의 개별 스텝은 비최적일 수 있어도, 사람이 개입해 수정을 마친 구간이라면 시작에서
+    끝으로 갈 때는 순 진전이 있어야 한다 — 즉 구간 단위 보상은 양수가 정답이다. 스텝 단위
+    부호 정확도가 이 구간에서 낮은 게 예측기 탓인지, 애초에 스텝 단위로 물을 게 아니어서인지
+    가르는 지표다.
+    """
+    from square_assembly.datasets.labels import (LABEL_DEMO, LABEL_INTV, LABEL_PREINTV,
+                                                 LABEL_ROLLOUT)
+    names = {LABEL_DEMO: "demo", LABEL_ROLLOUT: "rollout", LABEL_INTV: "intv",
+             LABEL_PREINTV: "preintv"}
+    out = {}
+    for v, name in names.items():
+        rs, ideals, lens = [], [], []
+        for ep in np.unique(demo):
+            m = demo == ep
+            order = np.argsort(t[m], kind="mergesort")
+            d_ep, mode_ep, lab_ep = d[m][order], mode[m][order], label[m][order]
+            idx = np.flatnonzero(mode_ep == v)
+            if len(idx) < 2:
+                continue
+            brk = np.flatnonzero(np.diff(idx) > 1)          # 연속 구간 경계
+            starts = np.concatenate([[idx[0]], idx[brk + 1]])
+            ends = np.concatenate([idx[brk], [idx[-1]]])
+            for a, b in zip(starts, ends):
+                if b <= a:
+                    continue
+                rs.append(d_ep[a] - d_ep[b])
+                ideals.append(lab_ep[a] - lab_ep[b])
+                lens.append(b - a)
+        if not rs:
+            continue
+        rs, ideals, lens = np.array(rs), np.array(ideals), np.array(lens)
+        # 구간 길이가 14~178프레임으로 제각각이라, 크기를 비교하려면 프레임당으로 나눠야 한다.
+        out[name] = {"n_segments": len(rs), "median_len": float(np.median(lens)),
+                     "sign_acc": float((rs > 0).mean()), "mean_reward": float(rs.mean()),
+                     "mean_ideal": float(ideals.mean()),
+                     # 라벨이 퍼센트면 보상 단위도 퍼센트다. 참값으로 나누면 다시 STG 스텝
+                     # 단위가 된다 — 원본 라벨에선 참값이 프레임당 정확히 1스텝이므로,
+                     # 이 값이 곧 "프레임당 몇 스텝 나아갔다고 보는가"다.
+                     "reward_steps_per_frame": float((rs / ideals).mean()),
+                     "reward_per_frame": float((rs / lens).mean()),
+                     "ideal_per_frame": float((ideals / lens).mean()),
+                     "reward_per_frame_std": float((rs / lens).std())}
+    return out
+
+
+def residual_structure(d, label, demo, t, lags=(1, 5, 10, 20, 50)):
+    """예측 오차 e_t = d_t - label_t가 프레임마다 독립으로 떠는 잡음인지, 느리게 끌려가는
+    편향인지 가른다.
+
+    RL의 리턴은 보상을 합치므로 **독립인** 떨림은 상쇄된다(gamma=1이면 망원경처럼 접혀
+    d_0 - d_T만 남는다). 하지만 인접 프레임은 거의 같아 보여 오차도 같이 움직일 수 있고,
+    그렇게 상관된 오차는 아무리 합쳐도 안 사라진다. 어느 쪽인지가 "떨림은 리턴에서 상쇄되니
+    괜찮다"가 성립하는지를 정한다.
+
+    - step_noise_std: 이웃 차분에서 뽑은 독립 성분의 크기, std(e_t - e_{t+1})/sqrt(2)
+    - residual_std: 에피소드 평균을 뺀 전체 오차 크기
+    - independent_fraction: 분산 기준 독립 성분의 비중. 1에 가까우면 상쇄되고, 0에
+      가까우면 오차가 통째로 끌려다녀 리턴에도 그대로 남는다.
+    """
+    es, diffs, acf = [], [], {k: [] for k in lags}
+    for name in np.unique(demo):
+        m = demo == name
+        order = np.argsort(t[m], kind="mergesort")
+        e = d[m][order] - label[m][order]
+        if len(e) < max(lags) + 2:
+            continue
+        e = e - e.mean()                      # 에피소드 단위 상수 오프셋은 보상에 안 나타난다
+        es.append(e)
+        diffs.append(np.diff(e))
+        denom = float(np.dot(e, e))
+        for k in lags:
+            acf[k].append(float(np.dot(e[:-k], e[k:]) / denom) if denom > 1e-12 else np.nan)
+    if not es:
+        return {}
+    resid_var = float(np.concatenate(es).var())
+    step_var = float(np.concatenate(diffs).var()) / 2.0   # 독립이면 diff 분산은 2배가 된다
+    return {
+        "residual_std": float(np.sqrt(resid_var)),
+        "step_noise_std": float(np.sqrt(step_var)),
+        "independent_fraction": float(step_var / resid_var) if resid_var > 1e-12 else float("nan"),
+        "autocorr": {str(k): float(np.nanmedian(acf[k])) for k in lags},
+    }
+
+
+def time_only_baseline(label, demo, t):
+    """관측을 전혀 안 보고 프레임 인덱스만으로 내는 예측 — 귀무가설.
+
+    이게 필요한 이유: `reward_sign_acc`는 "d가 줄었는가"를 묻는데, 참 라벨은 정의상 항상
+    줄어든다. 그래서 t에 대해 단조감소하기만 하면 관측을 아예 안 봐도 점수가 1.0에 가깝게
+    나온다 — 창을 넓히면 잡음이 지워져 그 자명한 해에 수렴할 뿐이다. 예측기의 점수는
+    이 귀무가설을 얼마나 넘느냐로만 읽어야 한다.
+
+    구현: 프레임 인덱스 t별 라벨 평균을, 그 에피소드 자신은 빼고(leave-one-episode-out)
+    낸다. 자기 라벨을 써서 만들면 귀무가설이 오라클이 되어 불공정하게 세진다.
+    """
+    sums, counts = {}, {}
+    for ti, li in zip(t, label):
+        k = int(ti)
+        sums[k] = sums.get(k, 0.0) + float(li)
+        counts[k] = counts.get(k, 0) + 1
+    out = np.empty(len(t), dtype=np.float64)
+    for i, (ti, li, ep) in enumerate(zip(t, label, demo)):
+        k = int(ti)
+        n = counts[k] - 1
+        out[i] = (sums[k] - float(li)) / n if n > 0 else float(li)
+    return out
+
+
+def evaluate(d, nll, label, demo, t, mode):
+    """수집된 배열 -> 지표 dict. 순수 numpy라 시뮬레이터·GPU 없이 테스트할 수 있다."""
+    out = {"n_samples": int(len(d)),
+           "mae": float(np.abs(d - label).mean()),
+           "nll": float(np.mean(nll))}
+    out.update(reward_metrics(d, label, demo, t))
+    # 보상을 몇 스텝 간격으로 읽느냐에 따라 품질이 어떻게 변하는지 — stride 1이 잡음이어도
+    # stride가 커지며 살아나면 예측기가 아니라 "1스텝 차분"이 문제라는 뜻이다.
+    out["by_stride"] = {
+        str(k): {n: v for n, v in reward_metrics(d, label, demo, t, stride=k).items()
+                 if n in ("reward_sign_acc", "reward_snr")}
+        for k in _STRIDES
+    }
+    # 이동평균(W) x 보상 간격(k) 격자. 둘 다 "창을 넓히는" 수단이지만 방식이 다르다 —
+    # k는 신호를 키우고 W는 잡음을 줄인다. 어느 쪽이 실제로 효율적인지는 재봐야 안다.
+    # LPF(지수이동평균). 군지연을 같이 적어야 박스카와 공정하게 비교된다.
+    out["by_ema"] = {
+        f"{a:g}": {"group_delay": (1.0 - a) / a if a < 1 else 0.0,
+                   **{str(k): {n: v for n, v in
+                               reward_metrics(d, label, demo, t, stride=k, alpha=a).items()
+                               if n in ("reward_sign_acc", "reward_snr")}
+                      for k in (1, 20)}}
+        for a in _ALPHAS
+    }
+    # 귀무가설: 관측을 안 보고 프레임 인덱스만 쓴 예측. 같은 격자로 같이 낸다.
+    d_null = time_only_baseline(label, demo, t)
+    out["null_time_only"] = {
+        "mae": float(np.abs(d_null - label).mean()),
+        "by_smooth": {str(w): {str(k): reward_metrics(d_null, label, demo, t, stride=k,
+                                                      smooth=w).get("reward_sign_acc")
+                               for k in (1, 8, 20)}
+                      for w in _SMOOTHS},
+        "by_segment": (segment_metrics(d_null, label, demo, t, mode) if mode is not None else {}),
+        "spearman": reward_metrics(d_null, label, demo, t).get("spearman"),
+    }
+    out["by_smooth"] = {
+        str(w): {str(k): {n: v for n, v in
+                          reward_metrics(d, label, demo, t, stride=k, smooth=w).items()
+                          if n in ("reward_sign_acc", "reward_snr")}
+                 for k in (1, 5, 20)}
+        for w in _SMOOTHS
+    }
+    out.update(best_f1(d, label == 0))
+    out["residual"] = residual_structure(d, label, demo, t)
+    if mode is not None:
+        from square_assembly.datasets.labels import LABEL_PREINTV, LABEL_ROLLOUT
+        pre, roll = mode == LABEL_PREINTV, mode == LABEL_ROLLOUT
+        out["preintv_auroc"] = auroc(d[pre], d[roll])
+        out["preintv_auroc_oracle"] = auroc(label[pre], label[roll])
+        out["n_preintv"] = int(pre.sum())
+        out["reward_by_mode"] = {str(k): reward_by_mode(d, label, demo, t, mode, k) for k in (1, 8, 20)}
+        out["by_segment"] = segment_metrics(d, label, demo, t, mode)
+    return out
+
+
+def _ckpt_meta(path):
+    """예측기 체크포인트에서 라벨 관련 메타만 꺼낸다(state_dict는 안 건드림)."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    return {k: v for k, v in ckpt.items() if k != "state_dict"}
+
+
+def closed_gripper_metrics(d, label, gripper, threshold=0.002):
+    """Fully closed fingers are a proxy for empty grasp; use unnormalized joint positions.
+
+    This also includes valid empty states before grasping/after placing, so report modes
+    and nonterminal frames separately instead of calling every closed frame a drop.
+    """
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError("closed threshold must be finite and positive")
+    closed = np.max(np.abs(gripper), axis=-1) <= threshold
+    error = np.asarray(d)[closed] - np.asarray(label)[closed]
+    return {"n": int(closed.sum()),
+            "mae_steps": float(np.abs(error).mean()) if len(error) else None,
+            "bias_steps": float(error.mean()) if len(error) else None,
+            "underestimate_fraction": float((error < 0).mean()) if len(error) else None}
+
+
+def step_diagnostics(arrays, source_hdf5, label_horizon, closed_threshold=0.002):
+    """Compare checkpoints in actual step units, keeping the same original countdown target."""
+    import h5py
+
+    d, _, _, demo, t, mode = arrays
+    with h5py.File(source_hdf5, "r") as f:
+        grips = {n: np.asarray(f["data"][n]["obs/robot0_gripper_qpos"]) for n in set(demo)}
+        lengths = {n: len(f["data"][n]["actions"]) for n in set(demo)}
+    for name, length in lengths.items():
+        if len(grips[name]) < length or not np.array_equal(np.sort(t[demo == name]), np.arange(length)):
+            raise ValueError(f"{name}: source actions and evaluated frames are misaligned")
+    spans = np.array([lengths[n] - 1 for n in demo], float)
+    raw_label = spans - t
+    d_steps = d * spans / label_horizon if label_horizon is not None else d
+    gripper = np.array([grips[n][ti] for n, ti in zip(demo, t)])
+    out = {"mae_steps": float(np.abs(d_steps - raw_label).mean()),
+           "reward_k8": reward_metrics(d_steps, raw_label, demo, t, stride=8),
+           "closed_threshold": closed_threshold,
+           "closed_gripper": closed_gripper_metrics(d_steps, raw_label, gripper, closed_threshold)}
+    nonterminal = raw_label > 8
+    out["closed_nonterminal"] = closed_gripper_metrics(
+        d_steps[nonterminal], raw_label[nonterminal], gripper[nonterminal], closed_threshold)
+    if mode is not None:
+        from square_assembly.datasets.labels import LABEL_PREINTV, LABEL_ROLLOUT, LABEL_INTV
+        out["closed_by_mode"] = {}
+        for name, value in [("preintv", LABEL_PREINTV), ("rollout", LABEL_ROLLOUT), ("intv", LABEL_INTV)]:
+            m = mode == value
+            out["closed_by_mode"][name] = closed_gripper_metrics(
+                d_steps[m], raw_label[m], gripper[m], closed_threshold)
+    return out
+
+
+def _collect_baseline(predictor_path, hdf5_path, device, batch_size, val_fraction, split_seed,
+                      probs_out=None):
+    """기준선(정책 ResNet 특징) 예측기 — RobomimicSequenceDataset 경로.
+
+    probs_out에 리스트를 주면 프레임별 카테고리컬 분포도 배치 단위로 담아준다
+    (영상 렌더처럼 기댓값 말고 분포 전체가 필요한 쪽에서 쓴다)."""
+    import os
+
+    from square_assembly.datasets.normalization import MinMaxNormalizer, load_stats
+    from square_assembly.datasets.robomimic_dataset import RobomimicSequenceDataset
+    from square_assembly.policies.diffusion.dstg_reward import DstgReward
+    from square_assembly.datasets.stg_labels import build_labels
+    from square_assembly.scripts.train_dstg import _episode_split
+    from square_assembly.utils.checkpoints import load_run_config
+    from square_assembly.utils.task_utils import is_image_task
+    from torch.utils.data import DataLoader, Subset
+
+    reward = DstgReward(predictor_path, device=device)
+    task_cfg = load_run_config(reward.policy_ckpt_path).task
+    stats = load_stats(os.path.join(os.path.dirname(reward.policy_ckpt_path),
+                                    "normalization_stats.json"))
+    dataset = RobomimicSequenceDataset(
+        hdf5_path=hdf5_path, obs_keys=reward.obs_keys, obs_horizon=reward.obs_horizon,
+        pred_horizon=1, normalizer=MinMaxNormalizer(stats),
+        rgb_keys=task_cfg.rgb_keys if is_image_task(task_cfg) else (),
+        hdf5_cache_mode="low_dim",
+    )
+    _, val_idx, _, n_val_demos = _episode_split(dataset, val_fraction, split_seed)
+    modes = dataset.get_action_mode_first_frame()[val_idx]
+    pairs = [dataset._demo_id_and_index_in_demo(i) for i in val_idx]
+    # 라벨은 예측기가 학습된 단위로 만들어야 한다 — 퍼센트로 학습한 예측기를 스텝 라벨에
+    # 대고 재면 mae도 보상 크기도 전부 단위 비율만큼 부풀어 오른다(2026-09-21에 실제로 그랬다).
+    # preintv 재작성은 학습 때만 쓰는 것이므로 여기선 참 라벨 그대로 둔다(캐시 경로와 동일).
+    seq = dataset._seq_dataset
+    demos = sorted({n for n, _ in pairs})
+    lengths = {n: seq.hdf5_file[f"data/{n}/actions"].shape[0] for n in demos}
+    labels, _ = build_labels([n for n, _ in pairs], [t for _, t in pairs], lengths,
+                             {n: True for n in demos},
+                             label_horizon=_ckpt_meta(predictor_path).get("label_horizon"))
+    print(f"val {n_val_demos} demos / {len(val_idx)} samples", flush=True)
+
+    d_all, nll_all = [], []
+    # RobomimicSequenceDataset은 time_to_success를 안 실어준다(train_dstg.py의 _LabeledWindow가
+    # 얹는 것) — shuffle=False라 배치 순서가 val_idx 순서와 같으므로 위에서 뽑아둔 labels를 잘라 쓴다.
+    label_t, offset = torch.from_numpy(np.asarray(labels)).long(), 0
+    loader = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False)
+    with torch.no_grad():
+        for b_i, batch in enumerate(loader):
+            obs = {k: v.to(device) for k, v in batch["obs"].items()}
+            logits = reward.predictor(obs)
+            y = label_t[offset:offset + logits.shape[0]].to(device)
+            offset += logits.shape[0]
+            probs = F.softmax(logits, -1)
+            if probs_out is not None:
+                probs_out.append(probs.cpu().numpy().astype(np.float16))
+            d_all.append((probs * reward.bin_vals).sum(-1).cpu().numpy())
+            nll_all.append(F.cross_entropy(logits, y, reduction="none").cpu().numpy())
+            if b_i % 20 == 0:
+                print(f"  배치 {b_i + 1}/{len(loader)}", flush=True)
+    return (np.concatenate(d_all), np.concatenate(nll_all), labels,
+            np.array([p[0] for p in pairs]), np.array([p[1] for p in pairs]), modes)
+
+
+def _collect_cached(predictor_path, cache_path, source_hdf5, device, batch_size,
+                    val_fraction, split_seed, probs_out=None):
+    """DINO/VIP 예측기 — 미리 구운 특징 캐시 경로(DinoFeatureWindows).
+
+    probs_out은 _collect_baseline과 같다 — 리스트를 주면 분포를 배치 단위로 담아준다."""
+    import h5py
+    from square_assembly.datasets.dino_feature_dataset import DinoFeatureWindows
+    from square_assembly.policies.diffusion.dino_stg_predictor import load_checkpoint
+    from torch.utils.data import DataLoader, Subset
+
+    head, ckpt = load_checkpoint(predictor_path, device)
+    dataset = DinoFeatureWindows(cache_path, int(ckpt["obs_horizon"]), fail_bin=ckpt.get("fail_bin"),
+                                 label_horizon=ckpt.get("label_horizon"),
+                                 obs_parts=ckpt.get("obs_parts", "all"))
+    dataset.apply_frame_stats(np.asarray(ckpt["frame_mean"], np.float32),
+                              np.asarray(ckpt["frame_std"], np.float32))
+    train_idx, val_idx, val_demos = dataset.split_indices(val_fraction, split_seed)
+    print(f"val {len(val_demos)} demos / {len(val_idx)} samples", flush=True)
+
+    dataset.clamp_labels(int(ckpt["num_bins"]))  # 학습 때와 같게: 마지막 bin = "그 이상"
+    labels = dataset.labels()[val_idx]
+    demo = np.array([dataset.samples[i][0] for i in val_idx])
+    t = np.array([dataset.samples[i][1] for i in val_idx])
+    modes = None
+    if source_hdf5:  # 캐시엔 action_mode가 없어서 원본 hdf5에서 프레임별로 읽어온다
+        with h5py.File(source_hdf5, "r") as f:
+            per_demo = {n: np.asarray(f["data"][n]["action_mode"]) for n in set(demo.tolist())
+                        if "action_mode" in f["data"][n]}
+        if per_demo:
+            modes = np.array([per_demo[n][min(ti, len(per_demo[n]) - 1)] if n in per_demo else 0
+                              for n, ti in zip(demo, t)])
+
+    bins = torch.arange(int(ckpt["num_bins"]), dtype=torch.float32, device=device)
+    d_all, nll_all = [], []
+    loader = DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False)
+    with torch.no_grad():
+        for x, y in loader:
+            logits = head(x.to(device))
+            y = y.to(device).long()
+            probs = F.softmax(logits, -1)
+            if probs_out is not None:
+                probs_out.append(probs.cpu().numpy().astype(np.float16))
+            d_all.append((probs * bins).sum(-1).cpu().numpy())
+            nll_all.append(F.cross_entropy(logits, y, reduction="none").cpu().numpy())
+    return np.concatenate(d_all), np.concatenate(nll_all), labels, demo, t, modes
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--predictor", required=True, help="train_dstg*.py가 저장한 predictor.pt")
+    ap.add_argument("--hdf5", default=None, help="기준선 예측기용 학습 데이터셋")
+    ap.add_argument("--cache", default=None, help="DINO/VIP 예측기용 특징 캐시(.h5)")
+    ap.add_argument("--source-hdf5", default=None,
+                    help="[--cache일 때] action_mode를 읽어올 원본 hdf5(PREINTV 지표용)")
+    ap.add_argument("--val-fraction", type=float, default=0.2, help="학습 때와 같은 값이어야 held-out이다")
+    ap.add_argument("--split-seed", type=int, default=0, help="학습 때와 같은 값이어야 held-out이다")
+    ap.add_argument("--batch-size", type=int, default=64)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--closed-threshold", type=float, default=0.002,
+                    help="fully closed finger threshold in raw joint units (empty-grasp proxy)")
+    ap.add_argument("--out", default=None, help="지표를 JSON으로 저장할 경로")
+    ap.add_argument("--by-source", action="store_true",
+                    help="[--hdf5일 때] held-out을 병합 출처(demo attrs['source'])별로도 나눠 잰다 — 망각/적응 구분")
+    args = ap.parse_args()
+
+    if bool(args.hdf5) == bool(args.cache):
+        ap.error("--hdf5(기준선) 또는 --cache(DINO/VIP) 중 정확히 하나를 줘야 한다")
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    if args.hdf5:
+        arrays = _collect_baseline(args.predictor, args.hdf5, device, args.batch_size,
+                                   args.val_fraction, args.split_seed)
+    else:
+        arrays = _collect_cached(args.predictor, args.cache, args.source_hdf5, device,
+                                 args.batch_size, args.val_fraction, args.split_seed)
+
+    metrics = evaluate(*arrays)
+    source_hdf5 = args.hdf5 or args.source_hdf5
+    if source_hdf5:
+        metrics["step_units"] = step_diagnostics(
+            arrays, source_hdf5, _ckpt_meta(args.predictor).get("label_horizon"), args.closed_threshold)
+    if args.by_source and args.hdf5:
+        import os
+
+        import h5py
+        demo = arrays[3]
+        with h5py.File(args.hdf5, "r") as f:
+            src_of = {n: os.path.basename(str(f["data"][n].attrs.get("source", "?"))) for n in set(demo.tolist())}
+        src = np.array([src_of[n] for n in demo])
+        metrics["by_source"] = {s: evaluate(*(a[src == s] if a is not None else None for a in arrays))
+                                for s in np.unique(src)}
+    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+    if args.out:
+        with open(args.out, "w") as f:
+            json.dump(metrics, f, indent=2, ensure_ascii=False)
+        print(f"saved: {args.out}")
+
+
+if __name__ == "__main__":
+    main()

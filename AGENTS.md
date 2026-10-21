@@ -20,7 +20,7 @@ AGENTS.md 자체는 특정 기술 스택을 전제하지 않는다 — 실제 �
 
 ## 📝 개발 프로세스
 - **기본 워크플로우 — 직접 세션 협업**: 새 설계나 구현 방향은 먼저 사용자와 논의해 확정한 뒤 진행한다. 작업 도중 설계 판단이 필요한 지점(접근 방식 선택, 시도가 실패했을 때의 다음 방향, 결과 해석)마다 먼저 확인받고, 사용자 모르게 재설계하지 않는다. 결과가 기대와 다르게 나오면 "안 됐다"로 뭉개지 말고, 무엇을 어떻게 시도했고 왜 그렇게 판단했는지 구체적으로 보고해 사용자가 직접 검증할 수 있게 한다.
-- **`scripts/execute.py` (보조 도구, 예외적 사용)**: 설계가 이미 사용자와 합의되어 여러 task로 기계적으로 쪼갤 수 있는 작업에만 쓴다. 실행 방식은 3단계 티어(평소=인터랙티브 task별 승인 / 바쁨=`--checkpoint-every N` / 급함=플랜 전체 무인 실행)로 나뉜다 — 어떤 티어를 쓸지도 실행 전에 사용자와 먼저 논의한다. 상세 워크플로우는 `harness` 스킬(`.Codex/skills/harness/SKILL.md`) 참고.
+- **`scripts/execute.py` (보조 도구, 예외적 사용)**: 설계가 이미 사용자와 합의되어 여러 task로 기계적으로 쪼갤 수 있는 작업에만 쓴다. 실행 방식은 3단계 티어(평소=인터랙티브 task별 승인 / 바쁨=`--checkpoint-every N` / 급함=플랜 전체 무인 실행)로 나뉜다 — 어떤 티어를 쓸지도 실행 전에 사용자와 먼저 논의한다. 상세 워크플로우는 `harness` 스킬(`.claude/skills/harness/SKILL.md` — Codex도 이 파일을 읽으면 된다) 참고.
 - **Commit Message**: Scoped Conventional Commits 사용. **커밋 메시지(제목·본문)는 영어로 작성**한다. 괄호 안에 수정된 모듈 영역(`policy`, `env`, `data`, `config`, `harness` 등 베이스라인 이름이나 모듈)을 명시하고, **제목은 명사형이 아닌 서술형(동사 중심 문장)으로** 작성하며, **반드시 본문에 글머리기호(`-`)를 사용한 멀티라인 상세 설명을 추가**하라. 예시:
   ```
   feat(policy): add diffusion head to transformer backbone
@@ -56,11 +56,11 @@ python3 scripts/execute.py docs/superpowers/plans/<file>.md --model sonnet
 연구/데이터 수집·시각화 스크립트(`watch_*.py`, `record_*.py`, `drive_*.py` 등) 전체 목록과 옵션은 `COMMANDS.md`를 참고하라. 아래는 하네스 자체의 메타 스크립트다.
 - `python scripts/execute.py <plan.md> [--model MODEL] [--checkpoint-every N] [--push]` # 클로드의 자가 교정 실행 (하네스 내부용, 예외적 사용 — 위 개발 프로세스 참고)
 - `python scripts/merge_to_main.py <feat-branch> [--push]` # feature 브랜치를 main에 병합 (pull→rebase→`--no-ff`)
-- `python scripts/scheduler.py {--time HH:MM | --in 2h30m} [--resume <id> | --cmd "..."] --prompt "..."` # 지정 시각에 Codex/명령 실행 (외부 터미널용)
+- `python scripts/scheduler.py {--time HH:MM | --in 2h30m} [--resume <id> | --cmd "..."] --prompt "..."` # 지정 시각에 Claude/Codex 세션 또는 명령 실행 (외부 터미널용)
 - `python scripts/sync_remote.py {push|pull} user@host:/절대/경로/레포루트 [--only data,checkpoints,...] [--project 이름] [--dry-run] [--delete]` # SSH 원격 서버와 data/checkpoints/outputs/results 동기화 (rsync, 보통 호스트에서 실행 — ADR-002)
 
 ### ⏰ 세션 연속 규칙
-리밋을 넘겨 이어가려면 `scripts/scheduler.py`로 리셋 시각에 재실행을 예약한다. **추측해서 시각을 자동계산하지 않는다** — 리셋 시각이 필요하면 `Codex -p "/usage"`로 공식값을 조회한다.
+리밋을 넘겨 이어가려면 `scripts/scheduler.py`로 리셋 시각에 재실행을 예약한다. **추측해서 시각을 자동계산하지 않는다** — 리셋 시각이 필요하면 공식값을 조회한다(Claude는 `claude -p "/usage"`, Codex는 해당 CLI의 사용량 조회).
 
 **클로드가 직접 실행하지 마라.** `scheduler.py`는 지금 세션이 끝난 뒤(리밋으로 종료된 뒤)에도 살아있어야 하는 예약이라, 클로드가 지금 세션의 Bash 툴로 띄우면 세션 종료 시 함께 죽어 의미가 없다 — 실행할 명령어만 제시하고, **사용자가 자신의 터미널에서 직접 실행**하게 하라.
 

@@ -109,6 +109,8 @@ class DstgReward:
         predictor = DstgPredictor(frozen_policy, ckpt["num_bins"],
                                    head_hidden=tuple(ckpt["head_hidden"])).to(device)
         predictor.head.load_state_dict(ckpt["model"])
+        if "encoder" in ckpt:  # 인코더까지 파인튜닝한 예측기(train_dstg encoder_lr)
+            predictor.frozen_policy.encoders.load_state_dict(ckpt["encoder"])
 
         self.policy_ckpt_path = policy_ckpt_path
         self.obs_keys = list(ckpt["obs_keys"])
@@ -118,7 +120,7 @@ class DstgReward:
 
     @classmethod
     def _from_predictor(cls, predictor, num_bins, statistic="mean", cvar_alpha=0.8,
-                         threshold=None, device="cpu"):
+                         threshold=None, device="cpu", bin_values=None):
         """테스트 전용 대안 생성자 — 무거운 policy_ckpt/run_config 로딩 없이 이미 만든
         (작은 랜덤) DstgPredictor를 직접 감싼다(square_assembly/tests/test_dstg_reward.py).
         """
@@ -127,10 +129,10 @@ class DstgReward:
         self.obs_keys = None
         self.obs_horizon = None
         self.rgb_keys = None
-        self._init_common(predictor, num_bins, statistic, cvar_alpha, threshold, device)
+        self._init_common(predictor, num_bins, statistic, cvar_alpha, threshold, device, bin_values)
         return self
 
-    def _init_common(self, predictor, num_bins, statistic, cvar_alpha, threshold, device):
+    def _init_common(self, predictor, num_bins, statistic, cvar_alpha, threshold, device, bin_values=None):
         if statistic not in ("mean", "cvar"):
             raise ValueError(f"statistic must be 'mean' or 'cvar', got {statistic!r}")
         self.device = torch.device(device)
@@ -141,7 +143,9 @@ class DstgReward:
         self.statistic = statistic
         self.cvar_alpha = cvar_alpha
         self.threshold = threshold
-        self.bin_vals = torch.arange(self.num_bins, dtype=torch.float32, device=self.device)
+        # bin_values: train_dstg_vip bin_scheme uniform/log 체크포인트가 저장한 bin별 스텝 값. 없으면 bin 번호 = 스텝.
+        self.bin_vals = (torch.tensor(bin_values, dtype=torch.float32, device=self.device) if bin_values is not None
+                         else torch.arange(self.num_bins, dtype=torch.float32, device=self.device))
 
     @torch.no_grad()
     def d(self, obs):

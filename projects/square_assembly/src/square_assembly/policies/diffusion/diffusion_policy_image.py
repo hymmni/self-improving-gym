@@ -183,5 +183,6 @@ class DiffusionPolicyImage(nn.Module):
         self.inference_scheduler.set_timesteps(self.num_inference_steps, device=device)
         sample = torch.randn((b, self.pred_horizon, self.action_dim), device=device)
         for t in self.inference_scheduler.timesteps:
-            sample = self.inference_scheduler.step(self.unet(sample, t, global_cond), t, sample).prev_sample
+            sample = self.inference_scheduler.step(self.unet(sample, t, global_cond), t, sample,
+                                                   **getattr(self, "inference_step_kwargs", {})).prev_sample
         return sample

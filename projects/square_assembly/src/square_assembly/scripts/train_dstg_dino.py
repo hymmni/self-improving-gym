@@ -19,6 +19,7 @@ import logging
 import os
 
 import h5py
+import numpy as np
 import hydra
 import torch
 import torch.nn.functional as F
@@ -61,7 +62,12 @@ def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
 
-    dataset = DinoFeatureWindows(cfg.cache_path, cfg.obs_horizon, fail_bin=cfg.get("fail_bin"))
+    dataset = DinoFeatureWindows(cfg.cache_path, cfg.obs_horizon, fail_bin=cfg.get("fail_bin"),
+                             label_horizon=cfg.get("label_horizon"),
+                             mode_hdf5=cfg.get("mode_hdf5"),
+                             preintv=cfg.get("preintv", "none"),
+                             preintv_len=cfg.get("preintv_len"),
+                             obs_parts=cfg.get("obs_parts", "all"))
     with h5py.File(cfg.cache_path, "r") as f:
         cache_meta = json.loads(f.attrs["meta"])
     logger.info(f"cache={cfg.cache_path} meta={cache_meta}")
@@ -69,6 +75,39 @@ def main(cfg: DictConfig):
     train_idx, val_idx, val_demos = dataset.split_indices(cfg.val_fraction, cfg.split_seed)
     n_val_demos = len(val_demos)
     n_train_demos = len(dataset.frames) - n_val_demos
+
+    if cfg.get("train_modes"):
+        from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
+        keep = {"demo": LABEL_DEMO, "rollout": LABEL_ROLLOUT, "intv": LABEL_INTV, "preintv": LABEL_PREINTV}
+        keep_ids = {keep[m] for m in cfg.train_modes}
+        sample_modes = dataset.sample_modes()
+        before = len(train_idx)
+        train_idx = [i for i in train_idx if sample_modes[i] in keep_ids]
+        logger.info(f"train_modes={list(cfg.train_modes)}: train 샘플 {before} -> {len(train_idx)}")
+
+    if cfg.get("preintv") == "drop":
+        drop = set(dataset.preintv_indices())
+        before = len(train_idx)
+        train_idx = [i for i in train_idx if i not in drop]
+        logger.info(f"preintv=drop: train 샘플 {before} -> {len(train_idx)}")
+
+    # PREINTV 오버샘플링 — train_dstg.py와 같다(인덱스 복제, val은 그대로).
+    w = int(cfg.get("preintv_weight") or 1)
+    if w > 1:
+        pre = set(dataset.preintv_indices())
+        extra = [i for i in train_idx if i in pre] * (w - 1)
+        train_idx = train_idx + extra
+        logger.info(f"preintv_weight={w}: train 샘플 +{len(extra)} -> {len(train_idx)}")
+
+    # train_demos_limit: val 데모는 그대로 두고 train 데모만 줄인다 — 같은 held-out 위에서
+    # "데이터가 더 있으면 나아지는가"를 재는 규모 곡선용.
+    limit = cfg.get("train_demos_limit")
+    if limit and int(limit) < n_train_demos:
+        pool = sorted(set(dataset.frames) - set(val_demos))
+        rng = np.random.RandomState(cfg.split_seed)
+        keep = {pool[i] for i in rng.permutation(len(pool))[: int(limit)]}
+        train_idx = [i for i in train_idx if dataset.samples[i][0] in keep]
+        n_train_demos = len(keep)
     logger.info(
         f"episode split: train={n_train_demos} demos/{len(train_idx)} samples, "
         f"val={n_val_demos} demos/{len(val_idx)} samples"
@@ -127,6 +166,11 @@ def main(cfg: DictConfig):
         "head_hidden": list(cfg.head_hidden),
         "obs_horizon": cfg.obs_horizon,
         "fail_bin": cfg.get("fail_bin"),
+        "label_horizon": cfg.get("label_horizon"),
+        "preintv": cfg.get("preintv", "none"),
+        "preintv_weight": cfg.get("preintv_weight"),
+        "preintv_len": cfg.get("preintv_len"),
+        "obs_parts": cfg.get("obs_parts", "all"),
         "frame_mean": frame_mean,
         "frame_std": frame_std,
         "cache_path": os.path.abspath(cfg.cache_path),

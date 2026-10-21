@@ -335,6 +335,9 @@ python -m square_assembly.scripts.train_si \
 | `statistic` | `mean` (`mean`\|`cvar`) | DstgReward 집계 방식 |
 | `termination` | `learned` (`learned`\|`env`) | 에피소드 종료 판정 기준(보상은 항상 d로만 계산) |
 | `lr` | 1e-6 | 파인튜닝이라 사전학습 lr(1e-4)보다 훨씬 작게 |
+| `ddim_steps` / `ddim_eta` | 10 / 1.0 | 롤아웃·로그확률에 쓰는 샘플러(수집기 `--ddim-steps`와 맞춤). `ddim_steps=0`이면 DDPM 100. eta=0은 불가 |
+| `algo` | `ddpo_sf` (`ddpo_sf`\|`dppo`) | `dppo`면 크리틱·PPO 클립·배치 재사용(ADR-009) |
+| `clip_ratio` / `clip_ratio_base` / `gamma_denoising` / `min_denoising_std` | 0.01 / 0.001 / 0.99 / 0.1 | `algo=dppo` 전용, DPPO 원본 값. 클립 폭(마지막/첫 디노이징 단계), 디노이징 할인, 탐색 노이즈 하한 |
 | `out` | (필수, `???`) | 저장 경로 |
 
 매 iteration `env_succ_rate` 갱신 시 `<out>_best.pt`로 best-so-far 별도 저장, `train_stats.jsonl`에 iteration별 통계 로그.

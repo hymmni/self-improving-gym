@@ -60,6 +60,11 @@ def merge(sources, out, env_args_from=None, only_success=True):
                         else np.full(T, LABEL_DEMO, dtype=np.int64)
                     )
                     grp.create_dataset("action_mode", data=modes)
+                    # 시뮬레이터 상태가 있으면 같이 옮긴다 — 병합본만 남겨도 되감아 렌더할 수 있게.
+                    if "states" in demo:
+                        grp.create_dataset("states", data=np.asarray(demo["states"]))
+                    if "model_file" in demo.attrs:
+                        grp.attrs["model_file"] = demo.attrs["model_file"]
                     obs_out = grp.create_group("obs")
                     for obs_key in demo["obs"].keys():
                         obs_out.create_dataset(

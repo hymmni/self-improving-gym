@@ -126,3 +126,88 @@ def test_chain_logp_gradient_flows_to_unet_only():
     assert any(p.grad is not None and torch.any(p.grad != 0) for p in policy.unet.parameters())
     for p in policy.encoders.parameters():
         assert p.grad is None
+
+
+# ---------------------------------------------------------------- DDIM(eta>0) 전이·노이즈 하한
+
+def _use_ddim(policy, steps=5, eta=1.0):
+    from square_assembly.runners.rollout import maybe_speed_up_inference
+    maybe_speed_up_inference(policy, steps, eta=eta)
+    return policy
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_trace_matches_predict_action_chunk_with_ddim_eta1(seed):
+    policy = _use_ddim(_make_policy())
+    obs = _make_obs()
+
+    torch.manual_seed(seed)
+    action_ref = policy.predict_action_chunk(obs)
+
+    with torch.no_grad():
+        global_cond = policy.get_global_cond(obs)
+    shape = (obs["state"].shape[0], policy.pred_horizon, policy.action_dim)
+    generator = torch.Generator(device=DEVICE).manual_seed(seed)
+    action_trace, xs = sample_with_trace(
+        policy.unet, policy.inference_scheduler, global_cond, shape, DEVICE, generator=generator
+    )
+
+    assert torch.allclose(action_trace, action_ref, atol=1e-5)
+    assert xs.shape == (policy.num_inference_steps + 1, *shape)
+
+
+def test_ddim_transition_matches_empirical_distribution():
+    from square_assembly.policies.diffusion.ddpo import _transition
+    policy = _use_ddim(_make_policy())
+    scheduler = policy.inference_scheduler
+    scheduler.set_timesteps(policy.num_inference_steps, device=DEVICE)
+    t = scheduler.timesteps[1]
+
+    torch.manual_seed(42)
+    x_in = 3.0 * torch.randn(1, policy.pred_horizon, policy.action_dim)
+    eps = torch.randn_like(x_in)
+    a_t = scheduler.alphas_cumprod[t]
+    x0 = (x_in - (1 - a_t).sqrt() * eps) / a_t.sqrt()
+    assert (x0.abs() > 1).any(), "x0 clip이 걸려야 DDPM posterior 공식과 구별된다"
+
+    generator = torch.Generator(device=DEVICE).manual_seed(123)
+    outs = torch.cat([scheduler.step(eps, t, x_in, eta=1.0, generator=generator).prev_sample for _ in range(8000)])
+
+    mean, std = _transition(scheduler, x_in, eps, t.expand(1))
+    assert torch.allclose(outs.mean(dim=0), mean[0], atol=0.08)
+    assert ((outs.std(dim=0) - std.item()).abs() / std.item() < 0.1).all()
+
+
+def test_min_std_floors_every_step_and_gives_the_last_step_a_logp():
+    from square_assembly.policies.diffusion.ddpo import _transition
+    policy = _use_ddim(_make_policy())
+    scheduler = policy.inference_scheduler
+    scheduler.set_timesteps(policy.num_inference_steps, device=DEVICE)
+    x = torch.randn(1, policy.pred_horizon, policy.action_dim)
+    eps = torch.randn_like(x)
+
+    raw = [_transition(scheduler, x, eps, t.expand(1))[1].item() for t in scheduler.timesteps]
+    floored = [_transition(scheduler, x, eps, t.expand(1), min_std=0.1)[1].item() for t in scheduler.timesteps]
+    assert raw[-1] == 0.0                                    # 마지막 단계는 원래 결정적 — 로그확률이 없다
+    assert floored == pytest.approx([max(s, 0.1) for s in raw])
+
+    with torch.no_grad():
+        global_cond = policy.get_global_cond(_make_obs(batch_size=1))
+        _, xs = sample_with_trace(policy.unet, scheduler, global_cond, x.shape, DEVICE, min_std=0.1)
+        lp = step_logp(policy.unet, scheduler, global_cond, xs[-2], xs[-1], scheduler.timesteps[-1].expand(1), min_std=0.1)
+    assert torch.isfinite(lp).all()
+    assert not torch.equal(xs[-1], _transition(scheduler, xs[-2], policy.unet(xs[-2], scheduler.timesteps[-1], global_cond),
+                                               scheduler.timesteps[-1].expand(1))[0])   # 마지막 단계에도 노이즈가 들어갔다
+
+
+def test_min_std_keeps_the_final_action_inside_the_normalized_range():
+    policy = _use_ddim(_make_policy())
+    scheduler = policy.inference_scheduler
+    scheduler.set_timesteps(policy.num_inference_steps, device=DEVICE)
+    with torch.no_grad():
+        global_cond = policy.get_global_cond(_make_obs(batch_size=16))
+    generator = torch.Generator(device=DEVICE).manual_seed(0)
+    action, xs = sample_with_trace(policy.unet, scheduler, global_cond, (16, policy.pred_horizon, policy.action_dim),
+                                   DEVICE, generator=generator, min_std=0.1)
+    assert action.abs().max() <= scheduler.config.clip_sample_range   # 마지막 단계 노이즈가 범위 밖으로 밀어내면 안 된다
+    assert torch.equal(xs[-1], action)                                # 로그확률은 실제 실행한(자른) 행동으로 잰다

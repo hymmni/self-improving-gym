@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 
-def maybe_speed_up_inference(policy, deploy_num_inference_steps):
+def maybe_speed_up_inference(policy, deploy_num_inference_steps, eta=0.0):
     """실시간/라이브 뷰어용 추론 가속(원래 collect.py 전용이었다가 2026-07-27 공용으로 이동
     - eval.py의 render=true 뷰어도 옛날 rollout_policy()의 동기 청크 계산(DDPM 100-step,
     청크당 ~500ms) 그대로라 collect.py가 겪었던 것과 똑같이 끊겨서 여기로 옮겨 재사용).
@@ -29,6 +29,9 @@ def maybe_speed_up_inference(policy, deploy_num_inference_steps):
     DDIM으로 바꿔치기한다(DDIM은 DDPM으로 학습된 모델에 재학습 없이 그대로 적용 가능한 결정론적
     샘플러 - low_dim 정책이 이미 이 조합을 기본으로 씀). deploy_num_inference_steps=None이면
     아무 것도 안 바꿈(기존 동작 그대로).
+
+    eta: DDIM의 단계별 노이즈 비율. 0이면 결정적(DP 논문 실로봇 설정), 1이면 단계마다 DDPM과 같은 크기의
+    노이즈가 들어가 단계별 확률이 정의된다 — DDPO(RL)는 그 확률이 필요해서 수집·RL을 같은 샘플러로 맞추려면 1.
 
     실측 배경: Transport 이미지 정책(DDPM 100-step)의 청크 계산이 평균 513ms 걸려 pred_horizon
     (16스텝) x control_fps(20Hz) 예산인 800ms의 64%를 먹어치웠고, 순차 요청(비파이프라인)
@@ -45,8 +48,9 @@ def maybe_speed_up_inference(policy, deploy_num_inference_steps):
         prediction_type="epsilon",
     )
     policy.num_inference_steps = deploy_num_inference_steps
+    policy.inference_step_kwargs = {"eta": float(eta)}
     print(
-        f"[추론 가속] 추론 스케줄러를 DDIM({deploy_num_inference_steps} step)으로 교체 "
+        f"[추론 가속] 추론 스케줄러를 DDIM({deploy_num_inference_steps} step, eta={eta})으로 교체 "
         f"(학습 가중치·성공률 평가용 DDPM {train_cfg.num_train_timesteps}-step은 그대로)"
     )
 

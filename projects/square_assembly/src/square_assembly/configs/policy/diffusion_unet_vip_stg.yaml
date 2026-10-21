@@ -1,0 +1,32 @@
+# 공유 백본(VIP ResNet50) DP + STG 헤드 — policies/diffusion/diffusion_policy_stg.py, policy_name=diffusion_stg.
+# UNet·스케줄러·horizon은 기본 정책(checkpoints/square_base_policy/run_config.yaml)과 같다.
+name: diffusion_unet_vip_stg
+obs_horizon: 2
+pred_horizon: 16
+action_horizon: 8
+down_dims: [512, 1024, 2048]
+kernel_size: 5
+n_groups: 8
+diffusion_step_embed_dim: 128
+num_train_timesteps: 100
+beta_schedule: squaredcos_cap_v2
+num_inference_steps: 100
+crop_hw: [76, 76]
+
+vip_pretrained: true
+# ① 예측기(PH50 + r0v9 + r0v10, split0) 체크포인트 — 카메라별 VIP 특징 평균·표준편차를 여기서 읽는다.
+vip_stats_ckpt: outputs/stg_ph50_r0v9_r0v10_20261005/split0/best_predictor.pt
+vip_size: 224
+vip_frozen_stages: [conv1, bn1, layer1, layer2]   # layer3·layer4·fc만 미세조정(사용자 결정 B, 2026-10-07)
+vip_grad_checkpoint: false  # true면 ResNet 층마다 활성값을 버리고 역전파 때 재계산 — 224px 전체 미세조정이 24GB에서 OOM(2026-10-19)
+
+stg:
+  num_bins: 512
+  weight: ???              # λ 최종값 — 스모크에서 두 손실이 인코더에 주는 그래디언트 크기를 재서 정한다
+  warmup_epochs: 530       # SADP처럼 학습 앞 절반 동안 0 -> weight 선형
+  encoder_lr_scale: 0.1    # 인코더 lr = lr x 0.1 (DP 문헌 권장, train.yaml system.encoder_lr_scale 주석)
+  bc_batch: 64             # 기본 정책 batch
+  stg_batch: 64
+  val_fraction: 0.2        # ① split과 같다(검증 50 데모)
+  split_seed: 0
+  stats_from: projects/square_assembly/checkpoints/square_base_policy/normalization_stats.json

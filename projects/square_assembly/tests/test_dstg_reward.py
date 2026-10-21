@@ -92,3 +92,12 @@ def test_frozen():
     for before, after in zip(params_before, params_after):
         torch.testing.assert_close(before, after)
         assert not after.requires_grad
+
+
+def test_d_uses_saved_bin_values():
+    """log bin 예측기는 bin 번호가 아니라 체크포인트에 저장된 bin 값(스텝)으로 기댓값을 낸다."""
+    values = [0.0, 1.0, 3.0, 7.0, 15.0]
+    reward = DstgReward._from_predictor(_make_reward(num_bins=5).predictor, 5, bin_values=values, device=DEVICE)
+    obs = _make_obs(batch_size=3)
+    probs = torch.softmax(reward.predictor(obs), dim=-1)
+    assert torch.allclose(reward.d(obs), (probs * torch.tensor(values, device=DEVICE)).sum(-1))

@@ -85,7 +85,13 @@ class DiffusionTrainer:
         init_stats_path = (
             os.path.join(os.path.dirname(init_from), "normalization_stats.json") if init_from else None
         )
-        if init_stats_path and cfg.get("inherit_init_stats", True) and os.path.exists(init_stats_path):
+        # 공유 백본 DP + STG 헤드(policy.stg, diffusion_policy_stg.py): 정규화 통계를 기본 정책 것으로 고정한다 —
+        # BC 데이터가 기본 정책과 같아야 비교가 되는데, 병합 데이터(롤아웃 포함)로 다시 재면 범위가 바뀐다.
+        stg_cfg = cfg.policy.get("stg", None)
+        if stg_cfg is not None and stg_cfg.get("stats_from"):
+            stats = load_stats(stg_cfg.stats_from)
+            logger.info(f"정규화 통계 고정(policy.stg.stats_from): {stg_cfg.stats_from}")
+        elif init_stats_path and cfg.get("inherit_init_stats", True) and os.path.exists(init_stats_path):
             stats = load_stats(init_stats_path)
             logger.info(f"정규화 통계 승계: {init_stats_path}")
         else:
@@ -180,7 +186,16 @@ class DiffusionTrainer:
             if "action_mode" not in extra_keys:
                 extra_keys = extra_keys + ("action_mode",)
 
-        if self.uses_zarr:
+        if stg_cfg is not None:
+            from square_assembly.datasets.joint_stg_dataset import JointStgDataset
+            self.dataset = JointStgDataset(
+                cfg.task.hdf5_path, task_obs_keys(cfg.task), cfg.policy.obs_horizon, cfg.policy.pred_horizon,
+                self.normalizer, cfg.task.rgb_keys, val_fraction=stg_cfg.val_fraction,
+                split_seed=stg_cfg.split_seed, num_bins=stg_cfg.num_bins,
+            )
+            cache_mode = "in-memory(joint_stg)"
+            logger.info(f"joint_stg: BC 프레임 {len(self.dataset.bc_idx)}, STG 프레임 {len(self.dataset.stg_idx)}")
+        elif self.uses_zarr:
             self.dataset = ZarrSequenceDataset(
                 zarr_path=cfg.task.zarr_path,
                 obs_keys=task_obs_keys(cfg.task),
@@ -246,10 +261,18 @@ class DiffusionTrainer:
                     action_mode_window=window_labels,
                     preference_frames=pref_frames,
                 )
-        self.dataloader = DataLoader(
-            self.dataset, batch_size=cfg.batch_size, shuffle=(sampler is None), sampler=sampler,
-            num_workers=cfg.num_workers, drop_last=True, persistent_workers=cfg.num_workers >= 1,
-        )
+        if stg_cfg is not None:
+            from square_assembly.datasets.joint_stg_dataset import JointBatchSampler
+            batch_sampler = JointBatchSampler(self.dataset.bc_idx, self.dataset.stg_idx, len(self.dataset._index),
+                                              stg_cfg.bc_batch, stg_cfg.stg_batch, seed=cfg.seed)
+            self.dataloader = DataLoader(self.dataset, batch_sampler=batch_sampler, num_workers=cfg.num_workers,
+                                         persistent_workers=cfg.num_workers >= 1)
+        else:
+            self.dataloader = DataLoader(
+                self.dataset, batch_size=cfg.batch_size, shuffle=(sampler is None), sampler=sampler,
+                num_workers=cfg.num_workers, drop_last=True, persistent_workers=cfg.num_workers >= 1,
+            )
+        self.stg_cfg = stg_cfg
         logger.info(f"dataset len={len(self.dataset)} cache={cache_mode} image={self.is_image}")
 
         # LoRA(system.use_lora=true)면 policy.parameters()의 대부분이 requires_grad=False —
@@ -258,7 +281,8 @@ class DiffusionTrainer:
         # encoder_lr_scale>0(system.kind=apo 전용, 2026-07-31 추가)이면 인코더 파라미터를
         # base lr의 이 배율로 별도 그룹에 넣는다 — ApoSystem이 requires_grad만 켜고 lr
         # 분리는 여기서 한다(다른 시스템은 encoder_lr_scale 자체가 없어 항상 단일 그룹).
-        encoder_lr_scale = float(getattr(self.system, "encoder_lr_scale", 0.0) or 0.0)
+        encoder_lr_scale = float(getattr(self.system, "encoder_lr_scale", 0.0) or 0.0) or float(
+            stg_cfg.encoder_lr_scale if stg_cfg is not None else 0.0)
         if encoder_lr_scale > 0 and hasattr(self.policy, "encoders"):
             enc_ids = {id(p) for p in self.policy.encoders.parameters()}
             enc_params = [p for p in self.trainable_params if id(p) in enc_ids]
@@ -406,6 +430,11 @@ class DiffusionTrainer:
                     "action_mask": raw_batch["action_mask"].to(self.device),
                 }
                 metrics = {}
+                if self.stg_cfg is not None:
+                    for k in ("bc_mask", "stg_mask", "stg_label"):
+                        batch[k] = raw_batch[k].to(self.device)
+                    warmup = self.stg_cfg.warmup_epochs * len(self.dataloader)
+                    self.policy.stg_weight = float(self.stg_cfg.weight) * min(1.0, global_step / max(warmup, 1))
                 if self.system is not None:
                     action_mode = raw_batch["action_mode"].to(self.device)
                     loss, metrics = self.system.compute_loss(self.policy, batch, action_mode)
@@ -425,6 +454,7 @@ class DiffusionTrainer:
                     metrics["unweighted_loss"] = per_sample_loss.mean().item()
                 else:
                     loss = self.policy.compute_loss(batch)
+                    metrics = dict(getattr(self.policy, "last_metrics", {}))
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -437,6 +467,7 @@ class DiffusionTrainer:
                     self.system.update_reference_ema(self.policy, global_step)
 
                 if global_step % self.cfg.log_every == 0:
+                    metrics = {k: float(v) for k, v in metrics.items()}
                     logger.info(f"epoch {epoch} step {global_step} loss {loss.item():.4f} grad_norm {grad_norm:.3f}"
                                 + (f" {dict(metrics)}" if metrics else ""))
                     if use_wandb:

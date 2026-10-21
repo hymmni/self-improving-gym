@@ -1,0 +1,1109 @@
+"""마우스+키보드로 사람이 개입하는 뷰어/컨트롤러 — 2D 탑뷰 맵 위에서 EE를 몬다.
+
+정책이 돌다가 `Tab`을 누르면 사람이 잡고, 다시 `Tab`이면 정책에 돌려준다(그 사이 프레임은
+INTV, 직전 구간은 PREINTV — SIRIUS 스킴, intervention_rollout.collect_episode가 라벨링한다.
+돌려준 뒤 다시 잡으면 개입이 여러 번 기록된다). `s`는 일시정지(sim·기록 모두 멈추고 창만 살아
+있음), `q`는 에피소드 포기.
+
+다시 수집: `←`를 0.4초 안에 두 번 누르면 "이전 에피소드를 다시 모을까" 확인창이 뜬다. Enter면 이번
+에피소드를 버리고 끝내며(redo_requested), 수집기가 바로 전에 저장한 에피소드를 지우고 그 시작 상태에서
+다시 모은다. Esc면 닫는다. 첫 번째 ←는 평소대로 되감기가 먼저 된다(두 번째만 확인창으로 쓴다).
+
+되감기: `←`는 직전 모드 전환점(지금 모드가 시작된 스텝 — 개입 중이면 개입 시작점)으로, 이미
+전환점에 서 있으면 그 앞 전환점으로 간다. `b`는 back_steps(기본 20 = 1초)만큼(연타하면 누적),
+`r`은 에피소드 시작점으로 — 같은 너트 배치로 다시 한다. 되감으면 일시정지로 멈춰 어디로
+돌아왔는지 보여주고, 모드도 그 스텝에서 쓰던 대로 돌아간다: 개입 시작점보다 앞으로 가면 다시
+정책이 몬다. 그래서 기록되는 개입 시작은 늘 사람이 실제로 Tab을 누른 스텝이다(되감기 계산이
+개입 시점을 앞당기지 않는다). 되감기 자체(sim·정책 청크 복원, 기록 자르기)는 여기서 안 한다 —
+pop_rewind()로 돌아갈 스텝만 꺼내 주고, 수집기가 collect_episode의 pre_step_fn에서 처리한다.
+버리지 않고 되돌리는 이유: robosuite는 reset마다 배치를 새로 뽑고 시드를 안 남겨서, q로 버린
+어려운 배치는 다시 만날 수 없다.
+
+사람 제어 중 매 스텝(20Hz)의 7-dim OSC_POSE delta 액션:
+- xy: 맵 위 커서 위치를 목표로 PD  (kp·err − kd·v, pos_cap으로 클립)
+- z: 붙잡는 높이(target_z)를 PI로 따라간다. Ctrl(또는 Space)/Shift를 누르는 동안 그 높이를 PH 시연에서
+  잰 속도 규칙으로 옮긴다(2026-09-30, PH 50개의 잡기·놓기 기준 높이별 z 속도): 내림 7cm/s, 그리퍼가 열려
+  있으면 너트 높이 1cm 위부터 3cm/s(잡는 높이 = 너트 높이 ±2mm), 올림은 2cm 동안 4→18cm/s로 가속하고
+  z_max 3cm 전부터 줄인다. 예전엔 z 액션을 고정값(0.6 ≈ 15cm/s)으로 줬는데, 너트를 쥐면 같은 액션에도
+  속도가 크게 틀어져서(쥔 채 내림: 액션 0.1에 4.8cm/s, 0.3~0.45는 6cm/s로 같음) 높이를 옮기는 쪽으로 바꿨다.
+  z_min~z_max에서 멈춘다. 안 누르면 마지막 높이를
+  절대 목표로 붙잡는다(PI: kp_z 2, ki_z 0.2/스텝 — 잡은 채 25cm를 최대 속도로 옮겨도 −0.6cm까지만
+  처지고 멈추면 0으로 돌아온다, 시뮬 실측) — 예전엔 매 스텝 '지금 높이'를 목표로 보내서, 옆으로 빨리 움직이며 처진 만큼이
+  계속 쌓여 Shift 없이 내려갔다(r0v3~v5: 잡은 채 xy 최대 속도 구간에서 z 액션 0인데 초속 4~5cm 하강).
+- 회전: 휠 한 칸 = 야우 목표 ±yaw_step. 손목은 항상 수직 아래(오라클과 같은 자세 제어).
+  야우는 접지 않고(±180도에서 안 끊기게) 따라가서, 목표가 반 바퀴 넘게 앞서도 휠을 굴린 방향으로 돈다. 예전엔
+  가까운 쪽으로 돌아서, 그리퍼가 뒤따라오는 사이 목표가 180도를 넘으면 반대로 돌다 손목 한계에 걸려 멈췄다
+  (2026-10-02 사용자 보고). 손목(마지막) 관절은 ±166도까지고 시작이 +45도라, −쪽으로는 100~115도, +쪽으로는
+  250도쯤 돈다(+야우 = 관절 −쪽, 시뮬 실측). 사람이 그리퍼를 쥐고 있는 동안(조종 중이거나 멈춘 채 붙어 있을 때)
+  목표는 그 범위(여유 wrist_margin) 밖으로 안 나간다. 멈춘 채 커서가 떨어져 있을 때만 자유롭게 돌고, 조종을
+  시작하면 닿을 수 있는 같은 각(없으면 한계)으로 바뀐다.
+- 한계 가이드: 사람이 쥐고 있는 동안 그리퍼 둘레에 고리를 그린다. 고리 위 각도는 **손목 카메라가 놓이는 방향**이다
+  (카메라는 그리퍼 중심에서 5.8cm, 손가락 축 −90도 쪽 — 맵의 그리퍼에서 그쪽으로 옅어지는 빛줄기가 퍼진다:
+  하늘색 넓은 것 = 실제, 흰 좁은 것 = 목표). 흰 호 = 갈 수 있는
+  범위, 빨간 호와 양 끝 막대 = 못 가는 구간, 색 점 = 지금, 흰 점 = 목표, 둘 사이 굵은 호 = 아직 돌아야 할 양.
+  한계에서 휠을 더 굴리면 목표가 벽에 부딪혀 튕기고 벽이 번쩍인다.
+- 그리퍼: 좌클릭 누른 동안 +1(닫힘), 뗀 동안 −1(열림). 일정 속도로 여닫는 램프는 robosuite
+  PandaGripper가 이미 한다(부호만 보고 내부 명령을 옮긴다). 예전엔 여기서도 스텝당 0.1씩 램프를
+  걸었는데, 부호가 뒤집히는 10스텝(0.5초) 동안 손가락이 전혀 안 움직여 반응만 늦었다(2026-09-22
+  실측: 누른 뒤 움직이기 시작 0.55초 → 0.05초). PH 시연의 그리퍼 액션도 ±1뿐이다.
+  넘겨받는 순간(Tab·되감기)에도 버튼만 따른다. 예전엔 손가락이 닫혀 있으면 클릭이 올 때까지 닫아뒀는데
+  (쥔 너트를 Tab 순간 떨어뜨리지 않게), 헛집기로 빈손인 채 넘겨받아도 닫혀 있어 누르고 떼야 열렸다
+  (2026-09-30 사용자 보고). 이제 쥔 너트를 유지하려면 버튼을 누른 채 Tab을 누른다.
+
+붙잡기(자석, 2026-09-30): 사람 모드로 멈춰 있으면 그리퍼가 **실제 마우스 커서**를 자석처럼 끈다.
+커서 위치(_cur)는 마우스 이벤트에서 손이 움직인 양(δ)만 받아 쌓고, 자석은 그 위에 얹은 뒤 OS 포인터를
+그 자리로 옮긴다(warp, 이벤트마다·화면 갱신마다). 붙을 때와 떨어질 때 원리가 다르다:
+- 끌림: field_radius(4.5cm) 안에선 가까울수록 세게 그리퍼 쪽으로 끌려가고, snap_radius(2.5cm) 안에서 붙는다.
+  붙는 순간 빠른 스프링(snap_hz, ζ 0.65 — 넘침 약 7%)이 커서를 중심에 박는다(착). 목표 = 그리퍼 중심,
+  야우 목표 = 실제 야우. (8cm/3cm·ζ 0.35는 너무 멀리서 끌리고 많이 넘친다는 사용자 보고로 줄였다.)
+- 붙음: 되돌리는 스프링이 아니라 끈적임이다 — 손이 당긴 양(_stretch)의 hold_gain만 커서가 바로 따라가고,
+  손을 멈추면(60ms) 당긴 양이 hold_tau로 풀려 착 스프링으로 중심에 돌아온다. 손이 움직이는 동안엔 풀지
+  않아서 포인터가 늘 손 방향으로만(느리게) 움직인다 — 손과 스프링이 싸우며 포인터가 반대로 튀는(드드득)
+  일이 없다(스프링으로 붙잡던 첫 버전에서 사용자 보고, 당기는 중에도 풀던 버전은 XTest로 최대 7px 역행).
+- 떨어짐: 당긴 양이 break_dist(4.5cm)를 넘으면 떨어지고, 커서는 보이던 자리에서 당긴 방향으로 pop_dist(1.2cm)를
+  약 0.1초에 걸쳐 미끄러져 나간다(착). 손이 간 자리(당긴 양 전체)로 순간이동하던 버전은 늘어나 보이던
+  것(35%)보다 훨씬 멀리 튀어 보였고, 6mm 순간이동은 떨어지는 느낌이 너무 약했다(사용자 보고). 그 자리에 쉬고 있으면 다시 끌려오지 않고, 끌림 반경을 벗어나거나 0.3초 뒤 그리퍼 쪽으로
+  다가가면 다시 붙을 수 있다(반경 밖까지 나가야만 되던 버전은 조금 떨어졌다 다시 붙이기가 안 됐다).
+- 야우엔 따로 떨어지는 조건이 없다: 위치가 붙어 있는 동안 휠은 위치와 같은 끈적임으로 hold_gain만큼
+  비틀고, 휠을 멈추면 착 스프링으로 원래 각도에 돌아온다 — 세게 돌려도 야우만 떨어져 나가지 않는다.
+  붙는 순간엔 돌려둔 목표와 실제 야우의 차이에서 출발해 착 돌아 붙는다. 비틀림은 늘 [−π, π)로 접어서
+  짧은 쪽으로 돈다(350도 돌려둔 목표가 −350도를 되감던 문제, 사용자 보고).
+  제어 목표 야우는 붙어 있는 동안 실제 야우에 그대로이고, 위치가 떨어질 때 보이던 비틀림을 가지고 풀린다.
+δ는 X 이벤트 순서로 잰다: 포인터를 옮기면(XWarpPointer) X 서버가 옮긴 자리에 이벤트를 하나 보내고, 그보다
+먼저 도착하는 이벤트는 옮기기 전에 생긴 것이다. 그래서 옮긴 자리를 줄(_pending)에 넣고, 그 자리 이벤트가
+올 때까지는 직전 이벤트 기준, 온 뒤로는 옮긴 자리 기준으로 잰다(_on_motion). "가장 가까운 기준점" 추정은
+붙어 있을 때(포인터를 매번 되돌림) 손 움직임을 지워 버려서 버렸다.
+
+맵은 카메라 영상이 아니라 sim 좌표(특권 정보, 표시 전용)로 직접 그린다 — 픽셀↔월드가
+선형이라 캘리브레이션 없이 커서를 곧바로 목표 좌표로 쓴다. 화면 방향은 agentview와
+맞췄다: 화면 오른쪽 = 월드 +y, 화면 위 = 월드 −x(로봇 쪽이 위).
+
+창은 tkinter다(모든 입력을 창 하나의 이벤트로 받는다). 예전 cv2 창 + pynput 조합을 버린 이유
+(2026-09-22):
+- cv2(Qt) 창은 휠을 창 확대에 써버리고 막을 방법이 없었고, waitKey는 Shift 단독·키 떼기를 못 본다.
+- 그래서 Space/Shift를 pynput 전역 리스너 + "누름 이벤트가 0.6초 안에 또 와야 유지" 방식으로
+  받았는데, 이게 개입 중 z가 안 먹는 원인이었다. X11은 Shift 같은 수식키를 키 반복하지 않아서
+  누름 이벤트가 한 번뿐이고, Space의 키 반복은 뗌+누름 쌍으로 와서 뗌이 유지를 끊는다. 결국
+  둘 다 꾹 눌러도 처음 0.6초만 움직였다(pororo Xvfb에 XTest로 2초 누름 주입: Space 0.70초·
+  Shift 0.60초만 이동).
+Tk 창은 Shift 단독과 떼기를 그대로 받으므로 "누름~뗌 사이 = 누르고 있음"으로 충분하다. 키 반복의
+뗌+누름 쌍은 한 번의 update()에서 연달아 처리돼 스텝 사이에 끊기지 않는다. 창 포커스를 잃으면
+(FocusOut) 떼기가 안 올 수 있으니 z를 멈춘다.
+
+입력기(XIM)는 끈다. pororo 세션엔 ibus-hangul이 XIM 서버로 떠 있고 한/영 전환 키가
+`Hangul,Shift+space,Alt_R`이라, Tk가 기본값대로 XIM을 거치면 Shift(내리기)를 누른 채 Space(올리기)를
+누르는 순간 입력기가 한/영 전환으로 가져가 Space가 안 먹었다(2026-09-22 사용자 보고, :1에서
+`tk useinputmethods` = 1, XIM_SERVERS = @server=ibus 확인). 한글 모드가 되면 글자 키도 조합에 먹힌다.
+
+올리기는 Ctrl이 기본이다. RustDesk(클라이언트 PC가 Wayland)는 Space를 "누르고 있음"으로 못 보낸다 —
+꾹 누르면 누름+뗌이 같은 밀리초에 붙은 쌍을 키 반복 주기(33Hz)로 보낸다(2026-09-22 :1 XRecord 실측).
+그래서 창에선 Space가 한 순간도 눌린 상태가 아니다. 수식키(Shift·Ctrl)는 누름·뗌이 제대로 온다.
+Space도 남겨둔다(로컬 키보드나 X11 클라이언트에선 된다).
+"""
+
+import time
+
+import numpy as np
+
+from square_assembly.runners.square_oracle import (
+    _POS_SCALE, read_privileged_state, rot_delta_toward, yaw_of,
+)
+
+# 손목 카메라(robot0_eye_in_hand)는 그리퍼 중심에서 5.8cm, 손가락 축에서 −90도 쪽에 달려 수직 아래를 본다
+# (2026-10-02 시뮬 실측: 그리퍼 site 좌표 [−1.1, 5.8, −8.7]cm, site +y = 야우 − 90도). 그쪽에 놓인 것이 화면에 잡힌다.
+_GUIDE_R = 0.075   # 손목 한계 가이드 고리의 반지름(m) — 카메라 표시 바로 바깥
+_STG_ASPECT = 21 / 9  # STG 패널을 붙인 화면 전체의 가로:세로 — 사용자 모니터(21:9)를 꽉 채우게 패널이 남는 폭을 쓴다
+
+
+def _cam_dir(yaw):
+    """야우(손가락 축 방향)일 때 그리퍼 중심에서 손목 카메라 쪽을 가리키는 월드 xy 단위벡터."""
+    return np.array([np.sin(yaw), -np.cos(yaw)])
+
+
+def _wrap(a):
+    """각도를 [−π, π)로 — 야우 비틀림이 늘 짧은 쪽으로 돌게."""
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+class MouseTeleopController:
+    """입력 상태(커서·키·버튼·휠)를 7-dim 액션으로 바꾸는 제어 법칙. 창(Tk) 무관.
+
+    Args:
+        kp, kd: xy PD 게인. err(m)·v(m/step)에 곱해 delta(m)를 만든 뒤 _POS_SCALE로 나눈다.
+        pos_cap: xy delta 액션 상한(1.0 == 5cm/step). 0.3이면 최고 약 7.7cm/s로 PH 시연(p90 21.8)보다
+            느려서 kp 2·상한 1.0으로 올렸다: 정상 속도 20~26cm/s, 넘침 0.6cm(시뮬 실측, z PI 적용 상태).
+        down_speed, down_near_speed, near_zone: 내림 속도(m/s), 그리퍼가 열려 있을 때 너트 높이 near_zone(m)
+            위부터의 속도.
+        up_speed, up_start_speed, up_ramp, top_zone: 올림 속도, 누르기 시작할 때 속도와 가속 거리(m),
+            z_max 앞 감속 구간. (z_up/z_down은 키가 눌렸는지다 — 속도와 헷갈리지 말 것)
+        z_cap: z 액션 상한(1.0 == 5cm/step). 쥔 채 18cm/s로 올리려면 0.8쯤 필요하다(시뮬 실측).
+        dt: action() 한 번의 시간(s) — 20Hz 제어.
+        z_min, z_max: 그리퍼 site z 허용 범위(m). 테이블 윗면 0.82, peg 윗면 0.95.
+        yaw_step: 휠 한 칸당 야우 목표 변화(rad).
+        rot_cap: 회전 delta 액션 상한. 0.4면 최고 47도/s, 0.6이면 64도/s(위치 밀림 1.5 → 2.1cm), 0.8부터는 더
+            빨라지지 않고 위치만 5cm 넘게 밀린다(2026-10-02 시뮬 실측).
+        wrist_margin: 손목 관절 한계 앞에 남기는 여유(rad) — 한계에 닿으면 관절이 끼어 손목이 기운다.
+        kd: 0이면 20cm 스텝에서 0.66cm·3cm 스텝에서 0.39cm 넘친다. 2면 0.07·0.03cm로 줄고 자리 잡는 시간도
+            짧아진다(23 → 19스텝). 4 이상은 넘침은 없지만 느려지고 16은 떤다(2026-10-02 시뮬 실측).
+    """
+
+    def __init__(self, kp=2.0, kd=2.0, pos_cap=1.0, z_min=0.83, z_max=1.10,
+                 yaw_step=np.deg2rad(5.0), rot_cap=0.4, wrist_margin=np.deg2rad(3.0), kp_z=2.0, ki_z=0.2,
+                 down_speed=0.07, down_near_speed=0.03, near_zone=0.01,
+                 up_speed=0.18, up_start_speed=0.04, up_ramp=0.02, top_zone=0.03, z_cap=1.0, dt=0.05):
+        self.kp, self.kd, self.pos_cap, self.kp_z, self.ki_z = kp, kd, pos_cap, kp_z, ki_z
+        self.z_min, self.z_max, self.z_cap, self.dt = z_min, z_max, z_cap, dt
+        self.down_speed, self.down_near_speed, self.near_zone = down_speed, down_near_speed, near_zone
+        self.up_speed, self.up_start_speed, self.up_ramp, self.top_zone = up_speed, up_start_speed, up_ramp, top_zone
+        self.yaw_step, self.rot_cap, self.wrist_margin = yaw_step, rot_cap, wrist_margin
+        self.reset()
+
+    def reset(self):
+        self.target_xy = None      # None이면 xy는 제자리 유지(잡은 뒤 커서가 아직 안 움직임)
+        self.target_yaw = None     # None이면 현재 야우 유지. 접지 않은 각(self.yaw와 같은 기준)
+        self.yaw = None            # 실제 야우를 접지 않고 따라간 값(track_yaw)
+        self.yaw_lim = (-np.inf, np.inf)  # 손목 관절이 허용하는 목표 범위(yaw_limits가 갱신)
+        self.target_z = None       # z 키를 안 누를 때 붙잡는 높이 — 뗀 곳(None이면 다음 스텝 높이)
+        self._z_err_sum = 0.0      # 붙잡는 높이 오차의 누적(적분 항) — 너트 무게처럼 계속 누르는 힘을 없앤다
+        self._up_from = None       # 올림 키를 누르기 시작한 높이 — 가속 거리 재기
+        self.grip_cmd = -1.0
+        self.z_up = self.z_down = False  # 올리기/내리기 키를 누르고 있는 동안 True(창의 누름·뗌 이벤트)
+        self.grip_pressed = False
+        self._prev_xy = None
+
+    def take_over(self, state):
+        """사람이 잡는 순간 목표를 현재 자세로 초기화 — 그 전에 쌓인 커서/휠로 튀지 않게.
+        그리퍼는 손가락 상태와 무관하게 지금 버튼 상태를 따른다(모듈 docstring)."""
+        self.target_xy = None
+        self.target_yaw = self.yaw = yaw_of(state["R"])
+        self.yaw_limits(state)
+        self.target_z = float(state["grip"][2])
+        self._z_err_sum = 0.0
+        self._prev_xy = state["grip"][:2].copy()
+        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
+
+    def set_cursor(self, world_xy):
+        self.target_xy = np.asarray(world_xy, dtype=float)[:2].copy()
+
+    def track_yaw(self, R):
+        """실제 야우를 접지 않고 따라간다 — 한 바퀴를 넘겨도 이어지는 각. Returns: 그 값."""
+        y = yaw_of(R)
+        self.yaw = y if self.yaw is None else self.yaw + _wrap(y - self.yaw)
+        return self.yaw
+
+    def yaw_limits(self, state):
+        """손목 관절이 허용하는 야우 범위 (lo, hi) — self.yaw와 같은 기준. 손목 정보가 없으면 제한 없음.
+
+        +야우로 돌면 손목 관절은 −쪽으로 거의 같은 양만큼 돈다(2026-10-02 시뮬 실측: +90도에 관절 44 → −47도).
+        팔이 옮겨 가면 다른 관절이 야우를 바꿔서 범위도 같이 움직인다 — 그래서 매번 지금 관절각으로 다시 잰다."""
+        y, w = self.track_yaw(state["R"]), state.get("wrist")
+        if w is not None:
+            q, lo, hi = w
+            self.yaw_lim = (y - (hi - q - self.wrist_margin), y + (q - lo - self.wrist_margin))
+        return self.yaw_lim
+
+    def wheel(self, notches, limit=False):
+        """야우 목표를 notches칸 돌린다. limit이면 손목 범위에서 멈춘다. Returns: 범위에 막혔으면 True."""
+        if self.target_yaw is None:
+            return False
+        want = self.target_yaw + notches * self.yaw_step
+        self.target_yaw = float(np.clip(want, *self.yaw_lim)) if limit else want
+        return self.target_yaw != want
+
+    def action(self, state):
+        grip, R = state["grip"], state["R"]
+        a = np.zeros(7, dtype=np.float32)
+
+        xy = grip[:2]
+        v = xy - self._prev_xy if self._prev_xy is not None else np.zeros(2)
+        self._prev_xy = xy.copy()
+        if self.target_xy is not None:
+            delta = self.kp * (self.target_xy - xy) - self.kd * v
+            a[:2] = np.clip(delta / _POS_SCALE, -self.pos_cap, self.pos_cap)
+
+        if self.target_z is None:
+            self.target_z = float(grip[2])
+        dz = float(self.z_up) - float(self.z_down)  # 둘 다 누르면 0 — 그 자리에 붙잡는다
+        if dz > 0:
+            if self._up_from is None:
+                self._up_from = self.target_z
+            ramp = min(1.0, (self.target_z - self._up_from) / self.up_ramp)
+            speed = self.up_start_speed + (self.up_speed - self.up_start_speed) * ramp
+            room = self.z_max - self.target_z
+            if room < self.top_zone:
+                speed = max(0.02, speed * room / self.top_zone)
+            self.target_z = min(self.z_max, self.target_z + speed * self.dt)
+        else:
+            self._up_from = None
+            if dz < 0:
+                near_nut = not self.grip_pressed and self.target_z - state["nut"][2] < self.near_zone
+                speed = self.down_near_speed if near_nut else self.down_speed
+                self.target_z = max(self.z_min, self.target_z - speed * self.dt)
+        err = self.target_z - grip[2]
+        # ponytail: 적분 항은 상한만 두는 단순 anti-windup — 넘겨받으면 비운다
+        self._z_err_sum = float(np.clip(self._z_err_sum + err, -0.1, 0.1))
+        a[2] = np.clip((self.kp_z * err + self.ki_z * self._z_err_sum) / _POS_SCALE, -self.z_cap, self.z_cap)
+
+        lo, hi = self.yaw_limits(state)
+        yaw = self.yaw
+        if self.target_yaw is not None:
+            if not lo <= self.target_yaw <= hi:  # 범위 밖(자유롭게 돌려둔 목표, 팔이 옮겨 가 범위가 밀림)
+                same = yaw + _wrap(self.target_yaw - yaw) + 2 * np.pi * np.arange(-1, 2)  # 같은 자세인 각들
+                near = np.clip(same, lo, hi)             # 닿으면 그 각, 아니면 가장 덜 벗어난 쪽의 한계
+                self.target_yaw = float(near[np.argmin(np.abs(same - near))])
+            # 반 바퀴 안쪽만 앞세운다 — rot_delta_toward는 가까운 쪽으로 돌므로, 이래야 굴린 방향으로 돈다
+            yaw = yaw + np.clip(self.target_yaw - yaw, -2.5, 2.5)
+        a[3:6], _ = rot_delta_toward(R, yaw, self.rot_cap)
+
+        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
+        a[6] = self.grip_cmd
+        return a
+
+
+class TopDownMap:
+    """월드 xy ↔ 맵 픽셀. 화면 오른쪽 = +y, 화면 아래 = +x(agentview에서 로봇이 위쪽에 보이는 방향)."""
+
+    def __init__(self, center_xy, extent_m, size_px):
+        self.center = np.asarray(center_xy, dtype=float)[:2]
+        self.size = int(size_px)
+        self.scale = self.size / float(extent_m)  # px per m
+
+    def to_px(self, xy):
+        x, y = float(xy[0]), float(xy[1])
+        px = self.size / 2 + (y - self.center[1]) * self.scale
+        py = self.size / 2 + (x - self.center[0]) * self.scale
+        return int(round(px)), int(round(py))
+
+    def to_world(self, px, py):
+        y = self.center[1] + (px - self.size / 2) / self.scale
+        x = self.center[0] + (py - self.size / 2) / self.scale
+        return np.array([x, y])
+
+
+class MouseTeleopIntervention:
+    """intervention_fn + render_fn 계약을 함께 구현하는 사람 개입 장치.
+
+    Args:
+        env: robomimic EnvRobosuite(또는 raw robosuite env). 맵과 제어에 sim 상태를 읽는다.
+        controller: MouseTeleopController(None이면 기본 게인).
+        map_size: 맵 한 변 픽셀. 왼쪽 카메라 열(위에서부터 세로로 쌓음)도 이 높이로 맞춘다.
+        map_extent: 맵이 덮는 월드 폭(m). 테이블 한 변이 0.8m.
+        state_fn: 테스트용 — sim 상태 dict를 돌려주는 함수(None이면 read_privileged_state).
+        zoom: 처음 띄울 창 크기(캔버스의 몇 배). 창은 늘 크기를 바꿀 수 있고(최대화 버튼, 테두리 끌기) 화면은 창에
+            들어가는 가장 큰 배율로 늘린다. fullscreen이면 전체화면으로 시작한다(F11로 오간다). 그리는 해상도는 그대로
+            두고 다 그린 화면만 늘린다(조금 흐려진다): 맵을 큰 해상도로 직접 그리면 한 장에 13ms(960) → 54ms(2160)라
+            20Hz 스텝을 못 지킨다(2026-10-02 실측, 늘리기는 17ms).
+        human_only: 정책 없이 사람만 조작한다 — 에피소드마다 사람 제어로 멈춘 채 시작하고 Tab(정책에 넘기기)을 무시한다.
+        stg_bins: STG 예측기의 bin 수 — 주면 맵 오른쪽에 예측 패널(화면 전체가 _STG_ASPECT가 되는 폭, 세로축 = 0 ~
+            마지막 bin)을 붙인다. 값은 수집기가 set_stg로 넣고, 창 아래 띠의 체크박스(stg_show)로 분포 막대·기댓값 곡선을
+            따로 켜고 끈다.
+        키 인자들은 Tk keysym이다("Tab", "Left", 소문자 한 글자).
+    """
+
+    _HELP = ("[Tab] human/policy   [<-] last switch   [b] back 1s   [r] restart",
+             "[s] pause   [q] give up   Ctrl/Shift up/down   wheel yaw   LMB grip")
+
+    def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
+                 toggle_key="Tab", switch_key="Left", pause_key="s", quit_key="q",
+                 back_key="b", restart_key="r", back_steps=20, state_fn=None,
+                 snap_radius=0.025, field_radius=0.045, pull_rate=16.0, snap_hz=7.0, snap_zeta=0.65,
+                 hold_gain=0.35, hold_tau=0.2, break_dist=0.045, pop_dist=0.012, human_only=False,
+                 zoom=1.0, fullscreen=False, stg_bins=None):
+        self.raw = getattr(env, "env", env)
+        self.human_only = human_only
+        self.stg_bins = stg_bins
+        self.stg_show = {"bars": True, "mean": True}  # 분포 막대 / 기댓값 곡선
+        self._bar = None           # 체크박스 띠(Tk) — 화면 배율을 잴 때 그 높이를 뺀다
+        self.zoom, self._fullscreen = zoom, fullscreen
+        self._z = zoom             # 지금 화면 배율(창 크기에 맞춘 값, 처음엔 zoom) — 마우스 좌표를 이걸로 나눈다
+        self.controller = controller or MouseTeleopController()
+        table = getattr(self.raw, "table_offset", None)
+        center = table[:2] if table is not None else (0.0, 0.0)
+        if hasattr(self.raw, "bin1_pos"):  # PickPlace(Can): 두 상자(y −0.5~0.53)와 오른쪽 z 게이지가 안 겹치게
+            center, map_extent = (self.raw.bin1_pos[:2] + self.raw.bin2_pos[:2]) / 2, max(map_extent, 1.25)
+        self.map = TopDownMap(center, map_extent, map_size)
+        self.map_extent = map_extent
+        self.window_name = window_name
+        self.back_steps = back_steps
+        self.keys = {toggle_key: "toggle", switch_key: "last_switch",
+                     pause_key: "pause", quit_key: "quit",
+                     back_key: "back", restart_key: "restart", "Return": "confirm", "Escape": "cancel",
+                     "F11": "fullscreen"}
+        self.redo_label = None     # 다시 모을 수 있는 이전 에피소드 설명(수집기가 채움) — None이면 없음
+        self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
+        self._root = None          # Tk 창, render()에서 지연 생성(테스트는 창 없이 돈다)
+        self._last_obs = None
+        self._map_x0 = 0          # 캔버스에서 맵이 시작하는 x — 왼쪽 카메라 열의 폭
+        self.snap_radius, self.field_radius, self.pull_rate = snap_radius, field_radius, pull_rate
+        self.snap_omega, self.snap_zeta = 2 * np.pi * snap_hz, snap_zeta
+        self.hold_gain, self.hold_tau, self.break_dist, self.pop_dist = hold_gain, hold_tau, break_dist, pop_dist
+        self._suppress_motion = False
+        self.reset()
+
+    # ---- intervention_fn 계약 -------------------------------------------------
+    def reset(self):
+        self._active = False
+        self._paused = False
+        self._quit_requested = False
+        self._back, self._restart, self._switches, self._resync = 0, False, 0, False
+        self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
+        self._modes = []           # 스텝별 사람 제어 여부 — 되감으면 그 스텝의 모드로 돌아간다
+        self._rewound = None       # (되감기 전 스텝, 돌아간 스텝) — 멈춘 화면에 띄운다
+        self._confirm_redo = self.redo_requested = False
+        self._left_t = -np.inf     # 직전 ← 시각 — 두 번 연타 판정
+        self._toast = None         # (글, 사라질 시각)
+        self._bump = (-np.inf, 0)  # (손목 한계에 막힌 시각, 막힌 방향 ±1) — 화면이 튕겨 보여준다
+        self._wheel_t = -np.inf    # 마지막으로 휠을 굴린 시각 — 가이드를 잠깐 진하게
+        self._stg = []             # 스텝별 (STG 기댓값, 사람 제어 여부) — 그림이 없던 스텝은 None
+        self._stg_probs = None     # 지금 스텝의 STG 분포
+        self._release_grab()
+        self.num_triggers = 0
+        self.controller.reset()
+        if self.human_only:
+            self.start_as_human()
+
+    def start_as_human(self, earlier=()):
+        """저장된 에피소드를 개입 시작 상태에서 다시 모을 때(수집기 --redo): reset() 뒤에 부르면 이어받는 첫
+        스텝부터 사람 제어로, 멈춘 채 시작한다. 재현한 장면을 보고 [s]로 풀면 그때의 자세에서 이어받는다.
+
+        earlier: 저장된 앞부분의 스텝별 사람 제어 여부 — 그 안으로 되감으면 그때의 모드로 돌아간다."""
+        self._active = self._paused = self._resync = True
+        self._modes = [bool(m) for m in earlier]
+        self.num_triggers = 1
+
+    def should_end(self):
+        return self._quit_requested or self.redo_requested
+
+    def rewind_to(self, step):
+        """수집기가 돌아갈 스텝을 직접 지정한다(렌더 노이즈 직전의 정상 스텝) — 되돌린 뒤 일시정지."""
+        self._goto = step
+        self._paused = True
+
+    def idle(self, seconds):
+        """창을 살려둔 채 기다린다(렌더 회복 대기) — 그냥 sleep하면 창이 응답 없음이 된다."""
+        self._pump(seconds)
+
+    def _pump(self, seconds):
+        """seconds 동안 2ms마다 입력을 처리하며 기다린다. 통째로 sleep하면 그동안 쌓인 마우스 이벤트를
+        깨어나서 한꺼번에 처리해, 붙잡기가 포인터를 몰아서 되돌리며 역행이 보였다(XTest 실측 6px)."""
+        end = time.time() + seconds
+        while time.time() < end:
+            if self._root is not None:
+                self._root.update()
+            time.sleep(0.002)
+
+    def pop_rewind(self, step):
+        """되감기 요청이 있으면 돌아갈 스텝 번호를(없으면 None) 돌려주고 요청을 비운다.
+
+        모드(사람/정책)도 돌아간 스텝에서 쓰던 대로 되돌린다.
+        """
+        if not (self._restart or self._back or self._switches or self._goto is not None):
+            return None
+        if self._goto is not None:
+            t = self._goto
+        elif self._restart:
+            t = 0
+        elif self._back:
+            t = max(0, step - self._back)
+        else:
+            t = step
+            for _ in range(self._switches):
+                t = self._last_switch_before(t)
+        self._back, self._restart, self._switches, self._goto = 0, False, 0, None
+        self._release_grab()       # 되돌린 장면에선 그리퍼가 딴 데 있다
+        if t < len(self._modes):
+            self._active = self._modes[t]
+            del self._modes[t:]
+        self._resync = True
+        self._rewound = (step, t)
+        return t
+
+    def set_stg(self, step, probs):
+        """step에서 정책이 볼 장면의 STG 분포(bin = 남은 스텝)를 받는다. 곡선은 step에서 잘라 다시 잇는다(되감기)."""
+        probs = np.asarray(probs, dtype=float)
+        del self._stg[step:]
+        self._stg += [None] * (step - len(self._stg))
+        self._stg.append((float(probs @ np.arange(len(probs))), self._active))
+        self._stg_probs = probs
+
+    def _last_switch_before(self, step):
+        """step보다 앞에서 가장 가까운 모드 전환점(새 모드의 첫 스텝). 없으면 0."""
+        m = self._modes
+        for s in range(min(step, len(m)) - 1, 0, -1):
+            if m[s] != m[s - 1]:
+                return s
+        return 0
+
+    def __call__(self, step, obs_raw):
+        self._last_obs = obs_raw
+        self._modes[step:] = [self._active]
+        resync, self._resync = self._resync, False
+        if not self._active:
+            return None
+        if resync:  # 되감기 전 목표(커서·야우·그리퍼)를 들고 가면 재개하자마자 팔이 튄다
+            self.controller.take_over(self._state_fn())
+        return self.controller.action(self._state_fn())
+
+    # ---- 입력 -> 상태 -------------------------------------------------------------
+    def _finger_gap(self):
+        q = None if self._last_obs is None else self._last_obs.get("robot0_gripper_qpos")
+        return None if q is None else float(q[0] - q[1])
+
+    def _handle_key(self, key):
+        """Tk keysym -> 상태 갱신. Tk 없이 테스트 가능하게 이벤트 처리와 분리."""
+        what = self.keys.get(key)
+        if what == "fullscreen":  # 창 상태 — 실제 전환은 render()가 한다
+            self._fullscreen = not self._fullscreen
+            return
+        if self._confirm_redo:  # 확인창이 떠 있으면 Enter/Esc만
+            if what == "confirm":
+                self.redo_requested = True
+            elif what == "cancel":
+                self._confirm_redo = False
+            return
+        if what == "last_switch":
+            now = time.time()
+            if now - self._left_t < 0.4:  # 두 번 연타 — 이전 에피소드 다시 모으기
+                self._left_t = -np.inf
+                if self.redo_label is None:
+                    self._toast = ("no previous episode to redo", now + 1.5)
+                else:
+                    self._confirm_redo = self._paused = True
+                return
+            self._left_t = now
+        if what == "toggle" and self.human_only:
+            self._toast = ("human-only: no policy to hand over to", time.time() + 1.5)
+        elif what == "toggle":
+            self._release_grab()
+            self._active = not self._active
+            if self._active:
+                self.num_triggers += 1
+                self.controller.take_over(self._state_fn())
+        elif what == "pause":
+            self._paused = not self._paused
+            if not self._paused:
+                self._rewound = None
+        elif what == "quit":
+            self._quit_requested = True
+        elif what == "last_switch":
+            self._switches += 1
+            self._paused = True
+        elif what == "back":
+            self._back += self.back_steps
+            self._paused = True
+        elif what == "restart":
+            self._restart = True
+            self._paused = True
+
+    def _on_key(self, keysym, down):
+        """Tk 누름/뗌 이벤트. 올리기/내리기 키는 누르고 있는 동안만 z를 움직이고, 나머지는 누를 때 한 번."""
+        if keysym in ("Control_L", "Control_R", "space"):
+            self.controller.z_up = down
+        elif keysym in ("Shift_L", "Shift_R"):
+            self.controller.z_down = down
+        elif down:
+            # Shift를 누른 채면 keysym이 대문자·ISO_Left_Tab으로 온다 — z를 내리면서도 키가 먹게.
+            key = "Tab" if keysym == "ISO_Left_Tab" else (keysym.lower() if len(keysym) == 1 else keysym)
+            self._handle_key(key)
+        return "break"  # Tab이 Tk 기본 동작(포커스 이동)으로 새지 않게
+
+    def _open_window(self):
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.tk.call("tk", "useinputmethods", False)  # ibus-hangul이 Shift+Space를 가져가지 않게(모듈 docstring)
+        root.title(self.window_name)
+        root.configure(bg="black")    # 창 크기는 자유(최대화 버튼) — 화면을 창에 맞춰 늘린다(render)
+        if self.stg_bins:  # STG 패널에 그릴 것 — 화면 밖 아래 띠에 둬서 클릭이 그리퍼(좌클릭)로 새지 않게
+            self._bar = tk.Frame(root, bg="black")
+            self._bar.pack(side="bottom", fill="x")
+            tk.Label(self._bar, text="STG", bg="black", fg="white").pack(side="left", padx=8)
+            for key, text in (("bars", "distribution bars"), ("mean", "expected curve")):
+                var = tk.BooleanVar(value=self.stg_show[key])
+                tk.Checkbutton(self._bar, text=text, variable=var, takefocus=0, bg="black", fg="white",
+                               selectcolor="black", activebackground="black", activeforeground="white",
+                               command=lambda k=key, v=var: self.stg_show.__setitem__(k, v.get())).pack(side="left")
+        view = tk.Label(root, bd=0, highlightthickness=0)
+        view.pack(expand=True)        # 비율이 안 맞아 남는 자리는 검게, 화면은 가운데
+        c = self.controller
+
+        view.bind("<Motion>", lambda e: self._on_motion(e.x, e.y))
+        view.bind("<ButtonPress-1>", lambda e: setattr(c, "grip_pressed", True))
+        view.bind("<ButtonRelease-1>", lambda e: setattr(c, "grip_pressed", False))
+        view.bind("<Button-4>", lambda e: self._on_wheel(+1))   # X11 휠 위
+        view.bind("<Button-5>", lambda e: self._on_wheel(-1))   # X11 휠 아래
+        root.bind("<KeyPress>", lambda e: self._on_key(e.keysym, True))
+        root.bind("<KeyRelease>", lambda e: self._on_key(e.keysym, False))
+        root.bind("<FocusOut>", lambda e: setattr(c, "z_up", False) or setattr(c, "z_down", False))
+        root.protocol("WM_DELETE_WINDOW", lambda: setattr(self, "_quit_requested", True))
+        root.focus_force()
+        self._root, self._view, self._photo = root, view, None
+        self._full_applied = False
+
+    def _release_grab(self):
+        self._cur = None            # 자석이 끄는 커서 위치(월드 m) — 멈춘 사람 모드에서만 의미
+        self._snapped = self._free_until_exit = False
+        self._stretch = np.zeros(2)  # 붙은 뒤 손이 당긴 양(월드 m) — 커서는 그중 hold_gain만 따라간다
+        self._idle = 0.0            # 손이 마지막으로 움직인 뒤 흐른 물리 시간(s) — 멈춰야 당긴 양이 풀린다
+        self._since_release = 0.0   # 떨어진 뒤 흐른 물리 시간(s) — 바로 다시 붙지 않게
+        self._o, self._ov = np.zeros(2), np.zeros(2)  # 붙은 커서의 그리퍼 기준 위치와 속도(착 스프링)
+        self._yo, self._yov = 0.0, 0.0  # 붙은 야우의 비틀림(rad, [−π, π))과 그 속도(착 스프링)
+        self._pop_left = np.zeros(2)  # 떨어진 뒤 아직 미끄러져 나갈 거리(월드 m)
+        self._wheel_idle = 0.0      # 휠이 마지막으로 돈 뒤 흐른 물리 시간(s)
+        self._snap_t = self._release_t = 0.0
+        self._prev_px = None        # 직전 마우스 이벤트 위치(캔버스 px)
+        self._pending = []          # 옮겼지만 X 서버의 그 자리 이벤트가 아직 안 온 포인터 자리 [(px, 시각)]
+        self._last_warp = None
+        self._tick_t = None
+
+    def _magnet_on(self):
+        return self._paused and self._active
+
+    def _on_motion(self, x, y):
+        """왼쪽 카메라 열 위에서는 목표를 안 바꾼다 — 맵은 그 오른쪽에 붙어 있다.
+        멈춘 사람 모드에선 손이 움직인 양만 받아 자석에 넘기고 포인터를 바로 옮긴다(모듈 docstring '붙잡기')."""
+        if self._suppress_motion:  # 우리가 포인터를 옮기며 Tk가 바로 부르는 합성 이벤트
+            return
+        x, y = x / self._z, y / self._z  # 늘린 화면의 좌표 -> 캔버스 좌표
+        if not self._map_x0 <= x < self._map_x0 + self.map.size:  # 카메라 열, STG 패널
+            self._cur, self._prev_px = None, None
+            return
+        pos = np.array([x, y], dtype=float)
+        if not self._magnet_on() or self._cur is None or self._prev_px is None:
+            self._cur = self.map.to_world(x - self._map_x0, y)
+            self._prev_px = pos
+            if self._magnet_on():
+                self._update_magnet(self._state_fn())
+            self._apply_target()
+            return
+        now = time.time()
+        self._pending = [(w, t) for w, t in self._pending if now - t < 0.2]  # 합쳐져 사라진 이벤트는 포기
+        for j, (w, _) in enumerate(self._pending):
+            if np.abs(pos - w).max() <= 0.5:  # 옮긴 자리 이벤트 — 여기서부터 새 기준
+                del self._pending[:j + 1]
+                self._prev_px = pos
+                return
+        base, self._prev_px = self._prev_px, pos
+        delta = self.map.to_world(*(pos - (self._map_x0, 0))) - self.map.to_world(*(base - (self._map_x0, 0)))
+        st = self._state_fn()
+        if self._snapped:
+            self._stretch = self._stretch + delta
+            self._o = self._o + self.hold_gain * delta  # 손 입력은 스프링을 거치지 않고 바로
+            self._idle = 0.0
+        else:
+            toward = np.dot(delta, np.asarray(st["grip"][:2], dtype=float) - self._cur) > 0
+            if self._free_until_exit and toward and self._since_release > 0.3:
+                self._free_until_exit = False  # 떨어졌다가 다시 그리퍼 쪽으로 — 다시 끌린다
+            self._cur = self._cur + delta
+        self._update_magnet(st)
+        self._place_cursor(st)
+        self._apply_target()
+
+    def _update_magnet(self, st):
+        g = np.asarray(st["grip"][:2], dtype=float)
+        if self._snapped and np.linalg.norm(self._stretch) > self.break_dist:
+            self._snapped = False
+            pull = self._stretch / np.linalg.norm(self._stretch)
+            self._cur = g + self._o                 # 보이던 자리에서
+            self._pop_left = self.pop_dist * pull   # 당긴 방향으로 미끄러져 나간다(_tick)
+            self.controller.target_yaw = self.controller.track_yaw(st["R"]) + self._yo  # 보이던 비틀림을 가지고 풀린다
+            self._free_until_exit = True
+            self._since_release = 0.0
+            self._release_t = time.time()
+            return
+        if self._snapped:
+            return
+        dist = np.linalg.norm(self._cur - g)
+        if self._free_until_exit and dist > self.field_radius:
+            self._free_until_exit = False
+        elif not self._free_until_exit and dist < self.snap_radius:
+            self._snapped = True
+            self._o, self._ov, self._stretch = self._cur - g, np.zeros(2), np.zeros(2)
+            self._pop_left = np.zeros(2)
+            prev, yaw = self.controller.target_yaw, self.controller.track_yaw(st["R"])
+            self._yo, self._yov = (0.0 if prev is None else _wrap(prev - yaw)), 0.0  # 짧은 쪽에서 출발
+            self._snap_t = time.time()
+            self.controller.target_yaw = yaw
+
+    def _place_cursor(self, st):
+        """붙어 있으면 커서 = 그리퍼 + 착 스프링 위치. 그 자리로 OS 포인터를 옮긴다."""
+        if self._snapped:
+            self._cur = np.asarray(st["grip"][:2], dtype=float) + self._o
+        px = np.array(self.map.to_px(self._cur), dtype=float) + (self._map_x0, 0)
+        px = np.round(px)
+        ref = self._pending[-1][0] if self._pending else self._prev_px
+        if ref is None or np.abs(px - ref).max() >= 1.0:
+            self._warp_pointer(px)
+
+    def _apply_target(self):
+        if self._cur is None:
+            return
+        self.controller.set_cursor(np.asarray(self._state_fn()["grip"][:2], dtype=float)
+                                   if self._magnet_on() and self._snapped else self._cur)
+
+    def _on_wheel(self, notches):
+        """휠 = 야우 목표. 자석에 붙어 있는 동안엔 끈적하게 비틀기만 하고 원래 각도로 돌아온다(모듈 docstring).
+        사람이 그리퍼를 쥐고 있으면(조종 중·붙어 있음) 손목 범위에서 멈추고, 막힌 쪽을 _bump에 남긴다."""
+        c = self.controller
+        self._wheel_t = time.time()
+        if not (self._magnet_on() and self._snapped):
+            blocked = c.wheel(notches, limit=self._active and not self._paused)
+        else:
+            lo, hi = c.yaw_limits(self._state_fn())
+            want = _wrap(self._yo + self.hold_gain * notches * c.yaw_step)  # 끈적하게, 바로
+            self._yo = float(np.clip(want, lo - c.yaw, hi - c.yaw))
+            self._wheel_idle = 0.0
+            blocked = self._yo != want
+        if blocked:
+            self._bump = (self._wheel_t, int(np.sign(notches)))
+
+    def _animate(self, st):
+        """화면 갱신마다 부른다 — 지난 호출 뒤 흐른 시간만큼 자석 물리를 진행한다."""
+        now = time.time()
+        dt = 0.0 if self._tick_t is None else min(now - self._tick_t, 0.05)
+        self._tick_t = now
+        self._tick(st, dt)
+
+    def _tick(self, st, dt):
+        """자석 물리 dt초: 붙음 = 당긴 양이 풀리고 착 스프링이 따라감, 근처 = 끌림. 그 뒤 포인터를 옮긴다."""
+        if not self._magnet_on() or self._cur is None:
+            return
+        g = np.asarray(st["grip"][:2], dtype=float)
+        w, z = self.snap_omega, self.snap_zeta
+        n = max(1, int(np.ceil(dt / 0.005)))
+        h = dt / n
+        for _ in range(n):  # 반 암시적 오일러, 5ms 이하
+            self._idle += h
+            self._wheel_idle += h
+            self._since_release += h
+            if self._snapped:
+                if self._idle > 0.06:
+                    self._stretch = self._stretch * np.exp(-h / self.hold_tau)
+                self._ov = self._ov + (w * w * (self.hold_gain * self._stretch - self._o) - 2 * z * w * self._ov) * h
+                self._o = self._o + self._ov * h
+                if self._wheel_idle > 0.06:  # 휠을 멈추면 원래 각도로 — 도는 동안엔 손과 싸우지 않는다
+                    self._yov += (-w * w * self._yo - 2 * z * w * self._yov) * h
+                    self._yo = _wrap(self._yo + self._yov * h)
+            else:
+                step = self._pop_left * (1 - np.exp(-h / 0.03))  # 떨어진 뒤 미끄러짐(약 0.1초)
+                self._cur, self._pop_left = self._cur + step, self._pop_left - step
+            if not self._snapped and not self._free_until_exit:
+                d = np.linalg.norm(g - self._cur)
+                pull = np.clip((self.field_radius - d) / (self.field_radius - self.snap_radius), 0.0, 1.0)
+                self._cur = self._cur + (g - self._cur) * min(1.0, self.pull_rate * pull * h)
+            self._update_magnet(st)
+        self._place_cursor(st)
+        self._apply_target()
+
+    def _warp_pointer(self, px):
+        self._pending.append((px, time.time()))
+        self._last_warp = px
+        if self._root is not None:
+            self._suppress_motion = True
+            try:
+                self._view.event_generate("<Motion>", warp=True, x=round(px[0] * self._z), y=round(px[1] * self._z))
+            finally:
+                self._suppress_motion = False
+
+    # ---- render_fn 계약 -----------------------------------------------------------
+    def render(self, frame):
+        """frame(HWC uint8 RGB 한 장, 여러 장의 리스트, 또는 {카메라 이름: 영상})을 맵 왼쪽에 세로로
+        쌓아 띄우고 입력을 처리한다. dict면 칸 사이 구분선과 카메라 이름표를 붙인다.
+
+        일시정지 중엔 여기서 창을 계속 갱신하며 머문다(호출부의 스텝 루프가 그동안 멈춘다).
+        되감기 요청이 들어오면 일시정지여도 돌아간다 — 호출부가 되감은 장면으로 다시 부르면
+        그 장면에서 다시 멈춘다(그래서 멈춘 채로 b를 연타하거나 ←를 0.4초보다 천천히 눌러 뒤로 훑을 수 있다 — ← 두 번 연타는 다시 수집).
+        """
+        import cv2
+        from PIL import Image, ImageTk
+
+        if self._root is None:
+            self._open_window()
+        frames = frame if isinstance(frame, (list, tuple, dict)) else [frame]
+        while True:
+            arr = self._compose(frames)
+            if self._photo is None:  # 첫 장: 창 크기 = 캔버스 x zoom. 그 뒤로는 창 크기(최대화·전체화면)에 화면을 맞춘다
+                self._root.geometry(f"{round(arr.shape[1] * self.zoom)}x{round(arr.shape[0] * self.zoom)}")
+                self._root.update()
+            if self._fullscreen != self._full_applied:
+                self._root.attributes("-fullscreen", self._fullscreen)
+                self._root.update()
+                self._full_applied = self._fullscreen
+            # 크기가 바뀐 직후 한두 장은 창 크기가 아직 안 바뀌어 있을 수 있다 — 다음 장에 맞춰진다
+            bar_h = self._bar.winfo_height() if self._bar is not None else 0
+            self._z = self._fit(arr.shape[1::-1], (self._root.winfo_width(), self._root.winfo_height() - bar_h))
+            if self._z != 1.0:
+                arr = cv2.resize(arr, (round(arr.shape[1] * self._z), round(arr.shape[0] * self._z)),
+                                 interpolation=cv2.INTER_LINEAR)
+            img = Image.fromarray(arr)
+            if self._photo is None or (self._photo.width(), self._photo.height()) != img.size:
+                self._photo = ImageTk.PhotoImage(img)
+                self._view.configure(image=self._photo)
+            else:
+                self._photo.paste(img)
+            self._root.update()
+            if (self._quit_requested or self.redo_requested or not self._paused
+                    or self._back or self._restart or self._switches):
+                return not (self._quit_requested or self.redo_requested)
+            self._pump(0.02)
+
+    def _fit(self, canvas_wh, window_wh):
+        """창에 들어가는 가장 큰 화면 배율. 창이 아직 안 떴으면(1x1) zoom."""
+        if min(window_wh) <= 1:
+            return self.zoom
+        return min(window_wh[0] / canvas_wh[0], window_wh[1] / canvas_wh[1])
+
+    def _compose(self, frames):
+        """[카메라들(위에서부터) | 맵] RGB 캔버스. 카메라 한 장의 높이 = 맵 높이 / 카메라 수.
+        frames가 {이름: 영상}이면 칸 사이 구분선과 이름표를 붙인다. 맵 위 글씨·게이지는 HUD로 그린다."""
+        import cv2
+        from PIL import Image, ImageDraw
+
+        names = list(frames) if isinstance(frames, dict) else [None] * len(frames)
+        frames = list(frames.values()) if isinstance(frames, dict) else frames
+        S = self.map.size
+        h = S // len(frames)
+        cams = []
+        for f in frames:
+            f = np.asarray(f)
+            cams.append(f if f.shape[0] == h else cv2.resize(f, (int(f.shape[1] * h / f.shape[0]), h)))
+        left = np.concatenate(cams, axis=0)
+        left = np.pad(left, ((0, S - left.shape[0]), (0, 0), (0, 0)))
+        self._map_x0 = x0 = left.shape[1]
+        s = self._state_fn()
+        self._animate(s)
+        img = Image.fromarray(np.concatenate([left, self._draw_map(s)[:, :, ::-1]], axis=1)).convert("RGBA")
+        over = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(over)
+        k = S / 960
+        if names[0] is not None:
+            self._draw_camera_labels(d, names, h, x0, k)
+        self._draw_hud(d, s, x0, S, k)
+        img = Image.alpha_composite(img, over)
+        if self._confirm_redo:  # 확인창은 따로 한 층 — 같은 층에 반투명으로 칠하면 밑의 HUD를 덮어쓴다
+            modal = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            self._draw_redo_dialog(ImageDraw.Draw(modal), x0, S, k)
+            img = Image.alpha_composite(img, modal)
+        out = np.asarray(img.convert("RGB"))
+        if self.stg_bins:  # HUD가 안 덮는 칸이라 반투명 합성(캔버스 전체에 들면 4ms 더) 뒤에 붙인다
+            out = np.concatenate([out, self._draw_stg(S, round(S * _STG_ASPECT) - x0 - S)], axis=1)
+        return out
+
+    def _draw_redo_dialog(self, d, x0, S, k):
+        """←← 확인창: 화면을 어둡게 하고 가운데에 '이전 에피소드를 다시 모을까'."""
+        from square_assembly.runners import teleop_hud as hud
+
+        d.rectangle((0, 0, x0 + S, S), fill=(0, 0, 0, 120))
+        bw, bh = 560 * k, 170 * k
+        bx, by = x0 + (S - bw) / 2, (S - bh) / 2
+        d.rounded_rectangle((bx, by, bx + bw, by + bh), radius=18 * k, fill=(22, 25, 30, 240),
+                            outline=hud.PAUSED + (255,), width=max(1, round(2 * k)))
+        d.text((bx + 28 * k, by + 38 * k), "Redo the previous episode?", font=hud.font(round(22 * k), True),
+               fill=hud.TEXT, anchor="lm")
+        d.text((bx + 28 * k, by + 76 * k), f"{self.redo_label} is deleted and collected again",
+               font=hud.font(round(15 * k)), fill=hud.DIM, anchor="lm")
+        d.text((bx + 28 * k, by + 98 * k), "from the same start; this episode is discarded.",
+               font=hud.font(round(15 * k)), fill=hud.DIM, anchor="lm")
+        hud.row(d, (bx + 28 * k, by + 136 * k), [("key", "Enter"), ("text", "redo"), ("key", "Esc"),
+                                                 ("text", "cancel")], size=round(16 * k))
+
+    def _draw_camera_labels(self, d, names, h, x0, k):
+        from square_assembly.runners import teleop_hud as hud
+
+        for i, name in enumerate(names):
+            if i:
+                d.line((0, i * h, x0, i * h), fill=(12, 13, 16, 255), width=max(2, round(4 * k)))
+            title, sub = ("WRIST", name) if name == "robot0_eye_in_hand" else (name.upper(), "")
+            x, y, r = round(10 * k), i * h + round(10 * k), round(5 * k)
+            f1, f2 = hud.font(round(14 * k), True), hud.font(round(13 * k))
+            w = d.textlength(title + ("  " if sub else ""), font=f1) + (d.textlength(sub, font=f2) if sub else 0)
+            hh = round(26 * k)
+            tx = x + 5 * r + 4 * k
+            d.rounded_rectangle((x, y, tx + w + 12 * k, y + hh), radius=hh // 2, fill=hud.PANEL)
+            d.ellipse((x + 2 * r, y + hh / 2 - r, x + 4 * r, y + hh / 2 + r), fill=(120, 200, 255, 255))
+            d.text((tx, y + hh / 2), title, font=f1, fill=hud.TEXT, anchor="lm")
+            if sub:
+                d.text((tx + d.textlength(title + "  ", font=f1), y + hh / 2), sub, font=f2, fill=hud.DIM,
+                       anchor="lm")
+        d.line((x0 - 1, 0, x0 - 1, self.map.size), fill=(12, 13, 16, 255), width=max(2, round(4 * k)))
+
+    def _draw_hud(self, d, s, x0, S, k):
+        from square_assembly.runners import teleop_hud as hud
+
+        c = self.controller
+        mode_col = hud.HUMAN if self._active else hud.POLICY
+        # 왼쪽 위: 모드 알약(+ 멈춤·되감기 안내)
+        label = "HUMAN" if self._active else "POLICY"
+        x = hud.pill(d, (x0 + 16 * k, 16 * k), label, mode_col + (255,),
+                     color=(255, 255, 255) if self._active else (16, 24, 18), size=round(18 * k))
+        if self._paused:
+            x = hud.pill(d, (x + 8 * k, 16 * k), "PAUSED", hud.PAUSED + (255,), size=round(18 * k))
+            msg = "S  resume"
+            if self._rewound is not None:
+                msg = f"step {self._rewound[0]} \u2192 {self._rewound[1]}     " + msg
+            if self._active and not self._snapped:
+                msg += "     hover the gripper to grab it"
+            hud.pill(d, (x + 8 * k, 16 * k), msg, hud.PANEL, color=hud.TEXT, size=round(15 * k), bold=False,
+                     pad=(12, 8))
+
+        # 오른쪽: z 게이지(z_min~z_max), peg 윗면 눈금, 바닥~현재 z 채움
+        top, bot = 80 * k, S - 150 * k
+        gx0, gx1 = x0 + S - 40 * k, x0 + S - 26 * k
+        def z_to_py(z):
+            return bot - (np.clip(z, c.z_min, c.z_max) - c.z_min) / (c.z_max - c.z_min) * (bot - top)
+        zy = z_to_py(s["grip"][2])
+        d.rounded_rectangle((gx0, top, gx1, bot), radius=(gx1 - gx0) / 2, fill=(255, 255, 255, 28),
+                            outline=(255, 255, 255, 70), width=1)
+        d.rounded_rectangle((gx0, zy, gx1, bot), radius=(gx1 - gx0) / 2, fill=mode_col + (190,))
+        mark_z, mark_label = s.get("z_mark", (0.95, "peg"))
+        py = z_to_py(mark_z)
+        d.line((gx0 - 6 * k, py, gx1 + 6 * k, py), fill=(64, 196, 196, 255), width=max(2, round(3 * k)))
+        d.text((gx0 - 10 * k, py), mark_label, font=hud.font(round(12 * k)), fill=(64, 196, 196), anchor="rm")
+        d.rounded_rectangle((gx0 - 4 * k, zy - 4 * k, gx1 + 4 * k, zy + 4 * k), radius=4 * k, fill=(255, 255, 255, 255))
+        d.text((gx0 - 10 * k, zy), f"{s['grip'][2]:.2f}", font=hud.font(round(13 * k), True), fill=hud.TEXT,
+               anchor="rm")
+        dz = float(c.z_up) - float(c.z_down)
+        if self._active and dz:  # z는 위치가 아니라 속도 명령 — 누르고 있는 방향을 삼각형으로
+            cx, tip = (gx0 + gx1) / 2, zy - 22 * k * dz
+            d.polygon([(cx, tip), (cx - 7 * k, zy - 10 * k * dz), (cx + 7 * k, zy - 10 * k * dz)], fill=(255, 255, 255))
+
+        # 손목 카메라가 보는 쪽: 실제 그리퍼는 넓은 빛줄기, 명령 목표는 그 안의 좁고 흰 빛줄기
+        self._draw_camera_beam(d, x0, S, s["grip"][:2], yaw_of(s["R"]), (120, 200, 255), 32, 150)
+        if self._active:
+            self._draw_camera_beam(d, x0, S, *self._target_pose(s), (255, 255, 255), 9, 170)
+
+        # 붙잡기: 자석 반경, 붙는 순간 조여드는 링, 떨어지는 순간 퍼지는 파문, 늘어난 만큼 가늘어지는 줄
+        gpx = np.array(self.map.to_px(s["grip"][:2]), dtype=float) + (x0, 0)
+        if self._magnet_on():
+            R, now = self.snap_radius * self.map.scale, time.time()
+            if self._snapped:
+                d.ellipse((*(gpx - R), *(gpx + R)), fill=mode_col + (50,))
+            else:
+                d.ellipse((*(gpx - R), *(gpx + R)), outline=(255, 255, 255, 70), width=max(1, round(2 * k)))
+            age = now - self._snap_t
+            if age < 0.35:
+                rr = R * (1.6 - 1.0 * age / 0.35)
+                d.ellipse((*(gpx - rr), *(gpx + rr)), outline=(255, 255, 255, int(230 * (1 - age / 0.35))),
+                          width=max(2, round(3 * k)))
+            age = now - self._release_t
+            if age < 0.35:
+                rr = R * (1.0 + 1.2 * age / 0.35)
+                d.ellipse((*(gpx - rr), *(gpx + rr)), outline=mode_col + (int(200 * (1 - age / 0.35)),),
+                          width=max(2, round(2 * k)))
+            if self._snapped and self._cur is not None:
+                cp = np.array(self.map.to_px(self._cur), dtype=float) + (x0, 0)
+                pull = min(1.0, np.linalg.norm(self._stretch) / self.break_dist)
+                if np.linalg.norm(cp - gpx) > 2:
+                    d.line((*gpx, *cp), fill=(255, 255, 255, int(200 * (1 - 0.5 * pull))),
+                           width=max(1, round((5 - 3.5 * pull) * k)))
+
+        self._draw_yaw_guide(d, s, x0, S, k, mode_col)
+
+        # 아래: 상태 줄 + 키 안내 패널
+        px0, py0, px1, py1 = x0 + 16 * k, S - 120 * k, x0 + S - 60 * k, S - 16 * k
+        d.rounded_rectangle((px0, py0, px1, py1), radius=14 * k, fill=hud.PANEL)
+        sz = round(15 * k)
+        lx, ly = px0 + 16 * k, py0 + 22 * k
+        yaw = np.degrees(yaw_of(s["R"]))
+        hud.row(d, (lx, ly), [("text", "z"), ("value", f"{s['grip'][2]:.3f} m"), ("text", "   yaw"),
+                              ("value", f"{yaw:+.0f}\u00b0"), ("text", "   grip"),
+                              ("value", "CLOSE" if c.grip_cmd > 0 else "OPEN")], size=sz)
+        hud.row(d, (lx, ly + 32 * k), [("key", "Tab"), ("text", "human/policy"), ("key", "\u2190"),
+                                       ("text", "last switch"), ("key", "B"), ("text", "back 1s"),
+                                       ("key", "R"), ("text", "restart"), ("key", "F11"), ("text", "fullscreen")],
+                size=sz)
+        hud.row(d, (lx, ly + 64 * k), [("key", "S"), ("text", "pause"), ("key", "Q"), ("text", "give up"),
+                                       ("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"),
+                                       ("key", "Wheel"), ("text", "yaw"), ("key", "LMB"), ("text", "grip")], size=sz)
+        now = time.time()
+        if self._toast is not None and now < self._toast[1]:
+            f = hud.font(round(15 * k), True)
+            w = d.textlength(self._toast[0], font=f) + 24 * k
+            hud.pill(d, (x0 + (S - w) / 2, 70 * k), self._toast[0], hud.PANEL, color=hud.TEXT, size=round(15 * k))
+
+    def _draw_camera_beam(self, d, x0, S, xy, yaw, col, half, alpha):
+        """손목 카메라 쪽으로 퍼지며 옅어지는 부채꼴(지도 앱의 '보는 방향' 빛줄기) — 그쪽에 놓인 것이 손목 화면에 잡힌다.
+        half = 반각(도). 가이드 고리 바로 안쪽에서 끝나, 고리 위의 점이 빛줄기 끝에 온다."""
+        m = self.map
+        c = np.array([x0 + S / 2 + (xy[1] - m.center[1]) * m.scale, S / 2 + (xy[0] - m.center[0]) * m.scale])
+        mid = 180.0 - np.degrees(yaw)  # 카메라 방향(sin yaw, −cos yaw)의 화면 각(3시에서 시계 방향)
+        R, n = (_GUIDE_R - 0.007) * m.scale, 28
+        for i in range(n, 0, -1):  # 바깥(옅음)부터 — 같은 층에 그리면 덮어쓰므로 안쪽이 진하게 남는다
+            r = R * i / n
+            d.pieslice((*(c - r), *(c + r)), mid - half, mid + half, fill=col + (int(alpha * (1 - (i - 1) / n)),))
+
+    def _draw_yaw_guide(self, d, s, x0, S, k, col):
+        """손목 한계 가이드(모듈 docstring) — 사람이 그리퍼를 쥐고 있을 때만. 고리 위 각도 = 손목 카메라가 놓이는 방향."""
+        from square_assembly.runners import teleop_hud as hud
+
+        c, m = self.controller, self.map
+        if not (self._active and (not self._paused or self._snapped)) or s.get("wrist") is None:
+            return
+        lo, hi = c.yaw_limits(s)
+        y = c.yaw
+        t = y + self._yo if self._paused else (c.target_yaw if c.target_yaw is not None else y)
+        now = time.time()
+        hit, side = max(0.0, 1 - (now - self._bump[0]) / 0.45), self._bump[1]  # 막힌 직후 1 → 0
+        t = float(np.clip(t, lo, hi)) + self._bump_offset()
+        busy = hit > 0 or now - self._wheel_t < 1.2 or abs(t - y) > np.radians(3)  # 쓸 때만 진하게
+        g = np.asarray(s["grip"][:2], dtype=float)
+
+        def P(a, r=_GUIDE_R):
+            v = g + r * _cam_dir(a)
+            return (x0 + S / 2 + (v[1] - m.center[1]) * m.scale, S / 2 + (v[0] - m.center[0]) * m.scale)
+
+        def arc(a0, a1, fill, width):
+            n = max(2, int(abs(a1 - a0) / 0.04) + 1)
+            d.line([P(a) for a in np.linspace(a0, a1, n)], fill=fill, width=max(1, round(width * k)), joint="curve")
+
+        wall = (255, 70, 70)
+        arc(lo, hi, (255, 255, 255, 90 if busy else 40), 3)
+        if hit:  # 벽이 번쩍 — 못 가는 구간 전체를 부채꼴로 칠했다가 사라진다
+            fan = [P(a, _GUIDE_R + 0.012) for a in np.linspace(hi, lo + 2 * np.pi, 12)]
+            d.polygon([P(0.0, 0.0)] + fan, fill=wall + (int(130 * hit),))
+        arc(hi, lo + 2 * np.pi, wall + (230 if busy else 150,), 6 + 4 * hit)
+        for a, sgn in ((lo, -1), (hi, 1)):  # 양 끝 막대(막힌 쪽은 길고 희게 번쩍)와 거기까지 남은 각
+            on = hit if sgn == side else 0.0
+            d.line((*P(a, _GUIDE_R - 0.008 - 0.006 * on), *P(a, _GUIDE_R + 0.008 + 0.006 * on)),
+                   fill=tuple(int(v + (255 - v) * on) for v in wall) + (255,), width=max(2, round((4 + 3 * on) * k)))
+            d.text(P(a + sgn * 0.1, _GUIDE_R + 0.024), f"{np.degrees(abs(a - y)):.0f}\u00b0", font=hud.font(round(13 * k)),
+                   fill=hud.TEXT + (255 if busy else 120,), anchor="mm")
+        if abs(t - y) > np.radians(2):  # 아직 돌아야 할 양
+            arc(y, t, (255, 255, 255, 230), 6)
+        if abs(t - y) > np.radians(2) and min(t - lo, hi - t) > np.radians(12):  # 한계 옆에선 막대의 숫자와 겹친다
+            d.text(P(t, _GUIDE_R + 0.022), f"{np.degrees(t - y):+.0f}\u00b0", font=hud.font(round(14 * k), True),
+                   fill=hud.TEXT, anchor="mm")
+        for a, fill, r in ((y, col + (255,), 6 * k), (t, (255, 255, 255, 255), 4.5 * k)):
+            px = np.array(P(a))
+            d.ellipse((*(px - r), *(px + r)), fill=fill, outline=(20, 22, 26, 255), width=max(1, round(k)))
+
+    def _draw_stg(self, S, W):
+        """STG 패널(높이 S, 폭 W) RGB — 축 하나에 겹쳐 그린다(render_demo_video의 패널과 같은 배치).
+        가로 = 스텝, 세로 = 남은 스텝. 기댓값 곡선(색 = 사람/정책)과 지금 기댓값 점선, 그리고 지금 스텝의 분포를
+        세로축에 붙인 가로 막대(bin 묶음 확률, 가장 긴 막대 = 축 폭의 40%)로 깐다.
+        가로축은 지금 스텝까지(얼마나 걸릴지 모르니 실시간으로 늘린다), 세로축은 0 ~ 예측기의 마지막 bin."""
+        from PIL import Image, ImageDraw
+        from square_assembly.runners import teleop_hud as hud
+
+        k, show = S / 960, self.stg_show
+        img = Image.new("RGB", (W, S), (30, 33, 36))
+        d = ImageDraw.Draw(img)
+        d.line((0, 0, 0, S), fill=(12, 13, 16), width=max(2, round(4 * k)))  # 맵과의 경계
+        f = hud.font(round(12 * k))
+        pts = [(t, *v) for t, v in enumerate(self._stg) if v is not None] if show["mean"] else []
+        p = self._stg_probs if show["bars"] else None
+        nbin = self.stg_bins
+        top = nbin - 1                        # 세로축 끝 = 마지막 bin(남은 스텝)
+        xmax = max(len(self._stg) - 1, 1)     # 가로축 끝 = 지금 스텝
+        x0, x1, y0, y1 = 44 * k, W - 14 * k, 40 * k, S - 44 * k
+        X = lambda t: x0 + t / xmax * (x1 - x0)
+        Y = lambda v: y1 - min(v, top) / top * (y1 - y0)
+        L = lambda pr, mx: x0 + pr / max(mx, 1e-12) * 0.4 * (x1 - x0)   # 분포 길이(가로)
+
+        d.rectangle((x0, y0, x1, y1), outline=(70, 74, 80))
+        d.text((x0, y0 - 8 * k), "steps to go", font=hud.font(round(14 * k), True), fill=hud.TEXT, anchor="ls")
+        for v in (0, xmax // 2, xmax):
+            d.text((X(v), y1 + 5 * k), str(v), font=f, fill=hud.DIM, anchor="mt")
+        d.text((x1, y1 + 20 * k), "step", font=f, fill=hud.DIM, anchor="rt")
+        for v in (0, top // 2, top):
+            d.text((x0 - 5 * k, Y(v)), str(v), font=f, fill=hud.DIM, anchor="rm")
+
+        if p is not None:  # 지금 스텝의 분포 막대 — 세로 위치 = 남은 스텝
+            q = np.zeros(nbin)
+            m = min(nbin, len(p))
+            q[:m] = p[:m]
+            nb = 100   # 512 bin을 그대로 그리면 줄무늬만 보여서 묶는다
+            bars = np.bincount(np.arange(nbin) * nb // nbin, weights=q, minlength=nb)
+            for i, b in enumerate(bars):
+                if L(b, bars.max()) >= x0 + 2:   # 1픽셀도 안 되는 꼬리는 건너뛴다
+                    d.rectangle((x0 + 1, Y((i + 1) * nbin / nb), L(b, bars.max()), Y(i * nbin / nb)), fill=(70, 120, 190))
+
+        w = max(2, round(2 * k))
+        for (ta, ea, _), (tb, eb, hb) in zip(pts, pts[1:]):
+            if tb == ta + 1:
+                d.line((X(ta), Y(ea), X(tb), Y(eb)), fill=hud.HUMAN if hb else hud.POLICY, width=w)
+        if pts:
+            t, e, h = pts[-1]
+            for xx in np.arange(x0, x1, 10 * k):  # 지금 기댓값 — 축 끝까지 그어 분포 봉우리와 견준다
+                d.line((xx, Y(e), min(xx + 5 * k, x1), Y(e)), fill=hud.PAUSED, width=max(1, round(1.5 * k)))
+            r = 4 * k
+            d.ellipse((X(t) - r, Y(e) - r, X(t) + r, Y(e) + r), fill=hud.TEXT)
+            low = Y(e) > y1 - 24 * k   # 점이 늘 오른쪽 끝이라 왼쪽에, 바닥 근처면 눈금 숫자와 안 겹치게 위로
+            d.text((X(t) - 8 * k, Y(e) + (-6 if low else 6) * k), f"{e:.0f}", font=hud.font(round(13 * k), True),
+                   fill=hud.TEXT, anchor="rb" if low else "rt")
+        return np.asarray(img)
+
+    def _draw_map(self, s):
+        """맵 도형(격자·peg·너트·그리퍼)만 cv2로 BGR에 그린다 — 글씨·게이지는 _draw_hud."""
+        import cv2
+
+        S, m = self.map.size, self.map
+        img = np.full((S, S, 3), (36, 33, 30), dtype=np.uint8)
+        c = self.controller
+
+        # 테이블(맵 전체 폭 = table 한 변)과 10cm 격자
+        h = np.ceil(self.map_extent * 5) / 10  # 맵 반폭을 덮는 10cm 격자(밖으로 나간 선은 안 보인다)
+        for k in np.arange(-h, h + 0.01, 0.1):
+            px, _ = m.to_px((0.0, m.center[1] + k))
+            _, py = m.to_px((m.center[0] + k, 0.0))
+            cv2.line(img, (px, 0), (px, S), (54, 50, 46), 1, cv2.LINE_AA)
+            cv2.line(img, (0, py), (S, py), (54, 50, 46), 1, cv2.LINE_AA)
+
+        # peg, 너트: sim의 충돌 박스를 위에서 본 실제 크기로. 손잡이(마지막 박스)를 밝은 색으로 먼저 칠하고
+        # 고리로 덮는다 — 손잡이는 고리 벽 속까지 들어가 있어서, 보이는 밝은 부분이 곧 쥘 수 있는 구간이다.
+        def fill(pts, color):
+            hull = cv2.convexHull(np.array([m.to_px(p) for p in pts], dtype=np.int32))
+            cv2.fillConvexPoly(img, hull, color, cv2.LINE_AA)
+
+        if "target" in s:  # Can 목표 칸 — 벽보다 옅게
+            fill(s["target"], (90, 90, 40))
+        for pts in s["peg_boxes"]:
+            fill(pts, (196, 196, 64))
+        *ring, handle = s["nut_boxes"]
+        fill(handle, (60, 205, 255))
+        for pts in ring:
+            fill(pts, (50, 127, 205))
+
+        # 그리퍼: 실제(굵게, 간격 = 실제 열림)와 사람 제어 중엔 명령 목표(흰 선). 목표는 커서·휠·클릭을
+        # 그 자리에서 바로 따라가고 실제 그리퍼는 PD·OSC로 뒤따라온다 — 둘을 겹쳐 봐야 조종감이 맞는다.
+        col = (72, 99, 255) if self._active else (113, 204, 46)  # teleop_hud.HUMAN / POLICY (BGR)
+        k = max(1, round(S / 480))
+        self._draw_gripper(img, s["grip"][:2], yaw_of(s["R"]), self._finger_gap() or 0.08, col, 3 * k)
+        if self._active:
+            self._draw_gripper(img, *self._target_pose(s), 0.02 if c.grip_cmd > 0 else 0.08, (255, 255, 255), 2 * k)
+        return img
+
+    def _target_pose(self, s):
+        """화면에 그릴 명령 목표의 (xy, 야우) — 한계에 막힌 직후엔 튕기는 각이 얹힌다."""
+        c = self.controller
+        if self._magnet_on() and self._cur is not None:  # 멈춘 사람 모드: 자석이 끄는 커서 자세
+            txy = self._cur
+            tyaw = c.target_yaw if c.target_yaw is not None else yaw_of(s["R"])
+            if self._snapped:  # 붙어 있으면 휠로 비튼 만큼 보인다(원래 각도로 돌아온다)
+                tyaw = yaw_of(s["R"]) + self._yo
+        else:
+            txy = c.target_xy if c.target_xy is not None else s["grip"][:2]
+            tyaw = c.target_yaw if c.target_yaw is not None else yaw_of(s["R"])
+        return txy, tyaw + self._bump_offset()
+
+    def _bump_offset(self):
+        """손목 한계에 막힌 직후 목표가 벽 쪽으로 넘쳤다가 튕겨 돌아오는 각(rad) — 0.45초 동안."""
+        age = time.time() - self._bump[0]
+        return self._bump[1] * np.radians(10) * np.exp(-9 * age) * np.cos(40 * age) if age < 0.45 else 0.0
+
+    def _draw_gripper(self, img, xy, yaw, gap, col, thickness):
+        """중심 십자 + 손가락 두 개(손가락 축 = yaw 방향, 간격 gap m)."""
+        import cv2
+
+        m = self.map
+        u = np.array([np.cos(yaw), np.sin(yaw)])
+        n = np.array([-u[1], u[0]])
+        cv2.drawMarker(img, m.to_px(xy), col, cv2.MARKER_CROSS, 7 * thickness, max(1, thickness // 3), cv2.LINE_AA)
+        for sign in (1, -1):
+            tip = np.asarray(xy)[:2] + sign * (gap / 2) * u
+            cv2.line(img, m.to_px(tip - 0.008 * n), m.to_px(tip + 0.008 * n), col, thickness, cv2.LINE_AA)  # 패드 폭 1.6cm
+
+    def close(self):
+        if self._root is not None:
+            self._root.destroy()
+            self._root = None

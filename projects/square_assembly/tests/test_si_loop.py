@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from square_assembly.policies.diffusion.diffusion_policy_image import DiffusionPolicyImage
-from square_assembly.scripts.train_si import compute_decision_reward, compute_returns
+from square_assembly.scripts.train_si import add_terminal_reward, compute_decision_reward, compute_returns, is_hack_failure
 
 DEVICE = "cpu"
 IMAGE_HW = (32, 32)
@@ -73,6 +73,17 @@ def test_reward_fn_has_no_ground_truth():
         assert token not in source, f"compute_decision_reward에 금지된 토큰 {token!r}이 등장함"
 
 
+def test_terminal_reward_goes_to_last_decision():
+    """희소 보상(사용자 결정 2026-10-06): 성공이면 마지막 결정에 +bonus, 실패면 −penalty. 0이면 그대로."""
+    rewards = np.array([3.0, -1.0, 2.0], dtype=np.float32)
+    np.testing.assert_allclose(add_terminal_reward(rewards, True, 150.0), [3.0, -1.0, 152.0])
+    np.testing.assert_allclose(add_terminal_reward(rewards, False, 150.0), rewards)
+    np.testing.assert_allclose(add_terminal_reward(rewards, True, 0.0), rewards)
+    np.testing.assert_allclose(add_terminal_reward(rewards, False, 150.0, 150.0), [3.0, -1.0, -148.0])
+    np.testing.assert_allclose(add_terminal_reward(rewards, True, 150.0, 150.0), [3.0, -1.0, 152.0])
+    np.testing.assert_allclose(rewards, [3.0, -1.0, 2.0])   # 입력은 안 바뀐다
+
+
 def test_optimizer_excludes_encoder():
     """옵티마이저에 넘기는 파라미터 목록에 policy.encoders의 파라미터가 하나도 없어야 한다."""
     policy = _make_policy()
@@ -85,3 +96,28 @@ def test_optimizer_excludes_encoder():
     assert optimized_ids == unet_ids
     assert optimized_ids.isdisjoint(encoder_ids)
     assert len(encoder_ids) > 0  # 인코더 자체가 비어있지 않은지(테스트가 공허하게 통과하지 않게)
+
+
+def test_hack_failure_is_failed_episode_with_high_stg_sum():
+    """실패 + STG 보상 합(종료 벌점 제외) > threshold만 걸러진다. 성공·threshold None은 절대 안 걸러진다."""
+    stg = [60.0, 50.0]                                              # STG 합 110
+    assert is_hack_failure(stg, False, 0.0, 100.0)
+    assert is_hack_failure(add_terminal_reward(stg, False, 150.0, 150.0), False, 150.0, 100.0)   # −150을 되돌려 110
+    assert not is_hack_failure([60.0, 30.0], False, 0.0, 100.0)    # 90
+    assert not is_hack_failure(stg, True, 0.0, 100.0)               # 성공
+    assert not is_hack_failure(stg, False, 0.0, None)               # 꺼짐
+
+
+def test_zero_failure_dense_keeps_only_terminal_penalty():
+    """실패면 밀집 보상을 버리고 종료 벌점만, 성공이면 그대로(+보너스). 꺼져 있으면 원래 동작."""
+    rewards = np.array([90.0, -80.0, 40.0], dtype=np.float32)
+    np.testing.assert_allclose(add_terminal_reward(rewards, False, 150.0, 150.0, zero_failure_dense=True), [0.0, 0.0, -150.0])
+    np.testing.assert_allclose(add_terminal_reward(rewards, True, 150.0, 150.0, zero_failure_dense=True), [90.0, -80.0, 190.0])
+    np.testing.assert_allclose(add_terminal_reward(rewards, False, 150.0, 150.0), [90.0, -80.0, -110.0])
+
+
+def test_no_dense_reward_leaves_only_sparse_outcome():
+    """dense=False면 성공·실패 모두 밀집 보상을 버리고 종료 보상만 — DPPO 원본처럼 희소 성공 보상만 쓰는 점검용."""
+    rewards = np.array([90.0, -80.0, 40.0], dtype=np.float32)
+    np.testing.assert_allclose(add_terminal_reward(rewards, True, 1.0, 0.0, dense=False), [0.0, 0.0, 1.0])
+    np.testing.assert_allclose(add_terminal_reward(rewards, False, 1.0, 0.0, dense=False), [0.0, 0.0, 0.0])

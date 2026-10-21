@@ -192,6 +192,9 @@ def collect_episode(
     merger_name="overwrite",
     te_coeff=0.01,
     print_diagnostics=True,
+    pre_step_fn=None,
+    reset_fn=None,
+    resume=None,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
 
@@ -208,6 +211,23 @@ def collect_episode(
 
     render_fn(obs_raw)이 주어지면 매 스텝 obs_raw와 함께 호출하고 False 반환 시 에피소드를
     끝낸다(커스텀 뷰어용, render보다 우선). 없고 render=True면 기존 env.render(mode="human")를 쓴다.
+    render_fn은 env.step() **뒤에** 불리므로 받는 obs는 다음 스텝의 관측이다 — 저장용으로 쓰면
+    obs가 액션보다 한 칸 앞선다(2026-09-22까지의 수집기가 그랬다). 저장은 pre_step_fn에서 한다.
+
+    reset_fn()이 주어지면 env.reset() 대신 불러 첫 obs를 받는다 — 저장해 둔 시작 상태에서 다시 모을 때.
+
+    resume={"obs": [...], "actions": [...], "modes": [...]}(길이 t0, obs는 env가 주는 형식)이면 저장된
+    에피소드의 앞 t0스텝을 이미 지나온 것으로 치고 step t0부터 이어서 모은다 — reset_fn이 step t0의 sim
+    상태를 되돌려 그 obs를 줘야 한다. 반환값엔 앞부분도 들어 있고, 되감기는 그 앞부분으로도 들어간다
+    (그 스텝에서 실행 중이던 청크는 모르므로 정책이 이어받으면 그 자리에서 새로 추론한다).
+
+    pre_step_fn(step, obs_raw)는 매 스텝 액션을 고르기 직전, 반환 obs[step]과 같은 시점에
+    불린다. None을 돌려주면 그대로 진행하고, 스텝 번호 t(< step)를 돌려주면 되감기다 — 호출부가
+    env(sim)를 t 시점으로 이미 복원했다는 뜻이고, 여기서는 기록을 t까지 자르고 정책 쪽 상태도
+    t 시점 그대로 되돌린다: 그때 실행 중이던 청크와 그 안의 위치, obs 히스토리(원래 받았던 obs
+    그대로). 그래서 되감은 뒤엔 새로 추론하지 않고 그 청크의 남은 액션부터 이어 쓰고, 청크가
+    끝난 뒤부터 새로 추론한다. 그다음 render_fn으로 복원된 장면을 한 번 다시 그리고(뷰어가
+    일시정지 중이면 거기서 멈춘다) 같은 스텝 번호 t로 pre_step_fn이 다시 불린다.
 
     predict_fn(obs_history) -> (T, Da) ndarray로 청크 예측을 대체할 수 있다(예: robomimic
     체크포인트처럼 자체 정규화·RNN 은닉상태를 갖는 정책 — 이 경우 T=1로 매 스텝 재계획해도
@@ -230,15 +250,29 @@ def collect_episode(
         predict_fn = lambda history: _predict_chunk(policy, normalizer, history, obs_keys, device)
     if hasattr(policy, "eval"):
         policy.eval()
-    obs_raw = env.reset()
+    obs_raw = env.reset() if reset_fn is None else reset_fn()
     obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
 
     obs_seq, action_seq, mode_seq = [], [], []
+    ctx_seq = []  # 스텝별 (청크, 청크 위치, obs 히스토리) — 되감기 복원용
     chunk, chunk_ptr = None, 0
     success = False
     step_times_ms, render_times_ms = [], []  # 진단용(2026-07-27) - env.step()/render() 자체가
     # 얼마나 걸리는지 측정. async_infer 여부와 무관 - "끊김"이 merger/추론 문제가 아니라
     # 렌더링·물리 스텝 자체의 비용/변동성 때문일 가능성을 실측으로 확인하기 위함.
+
+    start = 0
+    if resume is not None and len(resume["obs"]):
+        if async_infer:
+            raise RuntimeError("async_infer에선 resume을 못 쓴다 — obs_provider의 스텝 번호가 0부터다")
+        start = len(resume["obs"])
+        past = [resume["obs"][0]] * (obs_horizon - 1) + list(resume["obs"])  # past[t:t+To] = step t의 obs 히스토리
+        for t in range(start):
+            obs_seq.append({key: _to_storage_obs(key, resume["obs"][t][key]) for key in obs_keys})
+            action_seq.append(np.asarray(resume["actions"][t], dtype=np.float32))
+            mode_seq.append(int(resume["modes"][t]))
+            ctx_seq.append((None, 0, tuple(past[t:t + obs_horizon])))
+        obs_history = deque((past + [obs_raw])[start:], maxlen=obs_horizon)
 
     async_ctx = None
     if async_infer:
@@ -246,10 +280,23 @@ def collect_episode(
         async_ctx["obs_provider"].put(0, obs_raw)
 
     try:
-        step = 0
+        step = start
         while max_steps is None or step < max_steps:
             if should_end_fn is not None and should_end_fn():
                 break
+            rewound = pre_step_fn(step, obs_raw) if pre_step_fn is not None else None
+            if rewound is not None:
+                if async_ctx is not None:
+                    raise RuntimeError("async_infer에선 되감기를 못 한다 — obs_provider의 스텝 번호가 어긋난다")
+                step = rewound
+                chunk, chunk_ptr, history = ctx_seq[step]
+                obs_history = deque(history, maxlen=obs_horizon)
+                obs_raw = history[-1]
+                del obs_seq[step:], action_seq[step:], mode_seq[step:], ctx_seq[step:]
+                if render_fn is not None and not render_fn(obs_raw):
+                    break
+                continue
+            ctx_seq.append((chunk, chunk_ptr, tuple(obs_history)))
             loop_start = time.time()
 
             intv_action = intervention_fn(step, obs_raw)
@@ -275,6 +322,8 @@ def collect_episode(
 
             t_step0 = time.time()
             obs_raw, _reward, done, _info = env.step(action)
+            if getattr(env, "last_action", None) is not None:
+                action_seq[-1] = env.last_action  # AbsRot6dActionEnv: 정책의 절대 액션 대신 실제로 넣은 delta를 기록
             step_times_ms.append((time.time() - t_step0) * 1000.0)
             obs_history.append(obs_raw)
             step += 1

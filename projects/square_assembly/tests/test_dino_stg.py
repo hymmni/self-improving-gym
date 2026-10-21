@@ -192,3 +192,317 @@ def test_checkpoint_roundtrip_preserves_predictions(tmp_path):
     torch.testing.assert_close(loaded(x), expected)
     assert ckpt["cache_meta"]["crop"] == 76
     assert ckpt["num_bins"] == 7
+
+
+@pytest.mark.parametrize("parts,dim", [("all", 6), ("feat", 4), ("lowdim", 2)])
+def test_obs_parts_selects_which_columns_enter_the_window(tmp_path, parts, dim):
+    """obs_parts는 프레임 벡터에서 이미지 특징/고유수용 감각 중 어느 쪽을 쓸지 고른다 —
+    예측기가 진행도를 어디서 읽는지 가르는 실험 축(2026-09-23)."""
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3], feat_dim=4, low_dim=2)
+    ds = DinoFeatureWindows(str(cache), obs_horizon=2, obs_parts=parts)
+
+    assert ds.frame_dim == dim
+    x, _ = ds[2]                      # t=2 -> 윈도우 [frame 1, frame 2]
+    assert x.shape == (2 * dim,)
+    # feat은 +t, lowdim은 -t로 채워져 있어 어느 쪽이 들어왔는지 부호로 구분된다.
+    expected = {"all": [1, -1], "feat": [1, 1], "lowdim": [-1, -1]}[parts]
+    assert [np.sign(x[0].item()), np.sign(x[dim - 1].item())] == expected
+
+
+def test_obs_parts_rejects_unknown_value(tmp_path):
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[2])
+    with pytest.raises(ValueError, match="obs_parts"):
+        DinoFeatureWindows(str(cache), obs_horizon=2, obs_parts="images")
+
+
+def test_success_tail_selection_uses_last_onset_and_excludes_prefix_from_inputs_and_stats(tmp_path):
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[8, 4, 4, 4], success=[True, True, True, False])
+    with h5py.File(source, "w") as f:
+        for name, modes in {"demo_0": [0, 1, 1, 0, 0, 1, 1, 0],
+                            "demo_1": [-1] * 4, "demo_2": [0] * 4,
+                            "demo_3": [0] * 4}.items():
+            f.create_dataset(f"data/{name}/action_mode", data=modes)
+    ds = DinoFeatureWindows(cache, 2, fail_bin=99, mode_hdf5=source)
+    # Last onset is frame 5, not last human frame 6; final policy frame 7 stays.
+    kept = ds.retain_success_tails(list(range(20)))
+    assert kept == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    assert len(ds) == 20  # Excluded prefixes remain available for evaluation.
+    np.testing.assert_array_equal(ds.labels()[kept], [2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0])
+    np.testing.assert_array_equal(ds[5][0].numpy(), [5] * 4 + [-5] * 2 + [5] * 4 + [-5] * 2)
+    np.testing.assert_array_equal(ds[4][0].numpy(), [3] * 4 + [-3] * 2 + [4] * 4 + [-4] * 2)
+    mean, std = ds.compute_frame_stats(kept + [5], sample_only=True)
+    # Three tail frames (5,6,7), four demo (1000..1003), four rollout (2000..2003).
+    expected = 12030 / 11
+    np.testing.assert_allclose(mean, [expected] * 4 + [-expected] * 2)
+    assert np.isfinite(std).all() and (std > 0).all()
+
+
+def test_success_tail_selection_does_not_clamp_heldout_history(tmp_path):
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[4, 4])
+    with h5py.File(source, "w") as f:
+        for name in ("demo_0", "demo_1"):
+            f.create_dataset(f"data/{name}/action_mode", data=[0, 0, 1, 1])
+    ds = DinoFeatureWindows(cache, 2, mode_hdf5=source)
+    assert ds.retain_success_tails([0, 1, 2, 3]) == [2, 3]
+    assert ds[2][0][0].item() == 2  # Train start pads within the tail.
+    assert ds[6][0][0].item() == 1001  # Held-out start still sees its real history.
+
+
+def test_success_tail_selection_requires_complete_mode_metadata(tmp_path):
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[4])
+    ds = DinoFeatureWindows(cache, 2)
+    with pytest.raises(ValueError, match="action_mode"):
+        ds.retain_success_tails([0, 1, 2, 3])
+
+
+@pytest.mark.parametrize("modes", [[0, 0], [0, 0, 1, 1, 0]])
+def test_strict_modes_rejects_source_length_mismatch_before_padding(tmp_path, modes):
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[4])
+    with h5py.File(source, "w") as f:
+        f.create_dataset("data/demo_0/action_mode", data=modes)
+    with pytest.raises(ValueError, match="action_mode"):
+        DinoFeatureWindows(cache, 2, mode_hdf5=source, strict_modes=True)
+
+
+def test_agentview_selects_named_camera_and_ignores_other_inputs(tmp_path):
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3])
+    with h5py.File(cache, "r+") as f:
+        # Camera order deliberately differs from the real VIP cache.
+        f.attrs["meta"] = json.dumps({"rgb_keys": ["robot0_eye_in_hand_image", "agentview_image"]})
+        f["data/demo_0/feat"][:] = [[90, 91, 10, 11], [92, 93, 20, 21], [94, 95, 30, 31]]
+    before = DinoFeatureWindows(cache, 2, obs_parts="agentview")
+    assert before.frame_dim == 2
+    np.testing.assert_array_equal(before[2][0].numpy(), [20, 21, 30, 31])
+    np.testing.assert_array_equal(before[0][0].numpy(), [10, 11, 10, 11])
+    mean, std = before.compute_frame_stats([0, 1, 2])
+    np.testing.assert_array_equal(mean, [20, 21])
+    with h5py.File(cache, "r+") as f:
+        f["data/demo_0/feat"][:, :2] = np.nan
+        del f["data/demo_0/lowdim"]  # Proprioception must not even be read.
+    after = DinoFeatureWindows(cache, 2, obs_parts="agentview")
+    for i in range(3):
+        torch.testing.assert_close(after[i][0], before[i][0])
+        assert after[i][1] == before[i][1]
+    mean_after, std_after = after.compute_frame_stats([0, 1, 2])
+    np.testing.assert_array_equal(mean_after, mean)
+    np.testing.assert_array_equal(std_after, std)
+
+
+def test_wrist_selects_eye_in_hand_camera_only(tmp_path):
+    """손목 카메라만(사용자 요청 2026-10-07) — agentview와 같은 규칙으로 robot0_eye_in_hand_image 열만 쓴다."""
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3])
+    with h5py.File(cache, "r+") as f:
+        f.attrs["meta"] = json.dumps({"rgb_keys": ["agentview_image", "robot0_eye_in_hand_image"]})
+        f["data/demo_0/feat"][:] = [[90, 91, 10, 11], [92, 93, 20, 21], [94, 95, 30, 31]]
+        del f["data/demo_0/lowdim"]
+    ds = DinoFeatureWindows(cache, 2, obs_parts="wrist")
+    assert ds.frame_dim == 2
+    np.testing.assert_array_equal(ds[2][0].numpy(), [20, 21, 30, 31])
+
+
+@pytest.mark.parametrize("keys,width", [([], 4), (["wrist"], 4),
+                                      (["agentview_image", "agentview_image"], 4),
+                                      (["agentview_image", "wrist"], 3)])
+def test_agentview_rejects_missing_ambiguous_or_misaligned_camera_metadata(tmp_path, keys, width):
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3], feat_dim=width)
+    with h5py.File(cache, "r+") as f:
+        f.attrs["meta"] = json.dumps({"rgb_keys": keys})
+    with pytest.raises(ValueError, match="camera|rgb_keys"):
+        DinoFeatureWindows(cache, 2, obs_parts="agentview")
+
+
+def test_rollout_limit_keeps_every_expert_demo_and_nests_across_sizes():
+    """전문가 시연만(A) vs 롤아웃·개입을 n개 더한 것(B) 비교용 — 시연은 늘 다 남고, n이 커지면 남는 집합이 포함 관계다."""
+    from square_assembly.scripts.train_dstg_vip import rollout_demos_to_drop
+    modes = {f"demo_{i}": np.full(5, -1) for i in range(3)}              # 전문가 시연
+    modes.update({f"demo_{i}": np.array([0, 0, 1, 1, 1]) for i in range(3, 7)})   # 개입 성공
+    modes.update({f"demo_{i}": np.zeros(5, dtype=int) for i in range(7, 9)})      # 무개입 성공
+    names, rollouts = list(modes), {f"demo_{i}" for i in range(3, 9)}
+
+    assert rollout_demos_to_drop(names, modes, 0, seed=0) == rollouts                # A: 시연만
+    kept = [rollouts - rollout_demos_to_drop(names, modes, n, seed=0) for n in (2, 4, 6)]
+    assert [len(k) for k in kept] == [2, 4, 6] and kept[0] < kept[1] < kept[2]
+    assert rollout_demos_to_drop(names, modes, 99, seed=0) == set()
+
+
+def test_rollout_limit_can_keep_only_no_intervention_rollouts():
+    """시연 + 사람 개입 없이 성공한 롤아웃만 — 개입 데모는 limit와 무관하게 전부 빠진다."""
+    from square_assembly.scripts.train_dstg_vip import rollout_demos_to_drop
+    modes = {f"demo_{i}": np.full(5, -1) for i in range(3)}
+    modes.update({f"demo_{i}": np.array([0, -10, 1, 1, 1]) for i in range(3, 7)})   # 개입 성공
+    modes.update({f"demo_{i}": np.zeros(5, dtype=int) for i in range(7, 10)})       # 무개입 성공
+    names, intv, clean = list(modes), {f"demo_{i}" for i in range(3, 7)}, {f"demo_{i}" for i in range(7, 10)}
+
+    drop = rollout_demos_to_drop(names, modes, 2, seed=0, kind="no_intervention")
+    assert intv <= drop and len(clean - drop) == 2
+    assert rollout_demos_to_drop(names, modes, 99, seed=0, kind="no_intervention") == intv
+
+
+def test_rollout_limit_can_keep_only_intervention_rollouts():
+    """시연 + 사람 개입 데모만 — 개입 없이 성공한 롤아웃은 limit와 무관하게 전부 빠진다."""
+    from square_assembly.scripts.train_dstg_vip import rollout_demos_to_drop
+    modes = {f"demo_{i}": np.full(5, -1) for i in range(3)}
+    modes.update({f"demo_{i}": np.array([0, -10, 1, 1, 1]) for i in range(3, 7)})   # 개입 성공
+    modes.update({f"demo_{i}": np.zeros(5, dtype=int) for i in range(7, 10)})       # 무개입 성공
+    names, intv, clean = list(modes), {f"demo_{i}" for i in range(3, 7)}, {f"demo_{i}" for i in range(7, 10)}
+
+    drop = rollout_demos_to_drop(names, modes, 2, seed=0, kind="intervention")
+    assert clean <= drop and len(intv - drop) == 2
+    assert rollout_demos_to_drop(names, modes, 99, seed=0, kind="intervention") == clean
+
+
+def test_clamp_labels_folds_long_remaining_steps_into_the_last_bin(tmp_path):
+    """num_bins보다 먼 라벨은 마지막 bin("그 이상")으로 모이고, 바뀐 샘플을 알려 준다 — 나머지는 그대로."""
+    cache = tmp_path / "feats.h5"
+    _write_fake_cache(cache, lengths=[6, 3])
+    dataset = DinoFeatureWindows(cache, obs_horizon=2)
+    before = dataset.labels().copy()
+
+    clamped = dataset.clamp_labels(num_bins=4)
+
+    assert clamped.tolist() == (before >= 4).tolist() and clamped.sum() == 2
+    assert dataset.labels().tolist() == np.minimum(before, 3).tolist()
+    assert dataset[int(np.flatnonzero(clamped)[0])][1] == 3
+
+
+def test_learning_curves_also_work_on_every_frame_without_success_tails(tmp_path):
+    """전처리 없이(성공-tail 선택 없이) 전 프레임으로 학습해도 epoch별 곡선과 최저 val 모델을 남긴다 — 다른 조건과 같은 기준으로 epoch을 고르게."""
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[0, 0, 1, 1, 1, 1])
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"),
+                                    record_curves=True, num_epochs=1, batch_size=2, device="cpu", num_bins_override=8))
+    train_dstg_vip.main.__wrapped__(cfg)
+    ck = torch.load(tmp_path / "best_predictor.pt", weights_only=False)
+    assert ck["n_train_samples"] == 4 * 6 and not ck["success_tail_only"]   # 개입 전 프레임까지 전부 학습
+
+
+def test_success_tail_can_start_at_the_first_onset(tmp_path):
+    """개입이 두 번인 성공(두 번째는 되감아 짧게 친 교정)은 첫 개입 시작부터 쓸 수 있다 — 무개입·시연·실패는 그대로."""
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[8, 4, 4, 4], success=[True, True, True, False])
+    with h5py.File(source, "w") as f:
+        for name, modes in {"demo_0": [0, 1, 1, 0, 0, 1, 1, 0], "demo_1": [-1] * 4, "demo_2": [0] * 4,
+                            "demo_3": [0] * 4}.items():
+            f.create_dataset(f"data/{name}/action_mode", data=modes)
+    ds = DinoFeatureWindows(cache, 2, fail_bin=99, mode_hdf5=source)
+    assert ds.retain_success_tails(list(range(20)), first=True) == list(range(1, 16))
+    assert ds.history_starts["demo_0"] == 1
+
+
+def test_training_uses_the_same_first_onset_for_train_and_validation(tmp_path):
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[0, 1, 0, 1, 1, 1])   # 개입 시작 1, 3
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"),
+                                    record_curves=True, success_tail_only=True, success_tail_from="first",
+                                    num_epochs=1, batch_size=2, device="cpu", num_bins_override=8))
+    train_dstg_vip.main.__wrapped__(cfg)
+    ck = torch.load(tmp_path / "best_predictor.pt", weights_only=False)
+    assert set(ck["train_history_starts"].values()) == {1} and ck["success_tail_from"] == "first"
+    import json
+    row = json.loads((tmp_path / "learning_curve.json").read_text())["rows"][0]
+    assert row["val_retained"]["n"] == 5 and row["val_excluded_prefix"]["n"] == 1   # 검증 데모 1개: 프레임 1~5 / 0
+
+
+def test_two_hot_targets_keep_the_label_as_their_expectation():
+    from square_assembly.datasets.stg_labels import stg_bin_values, two_hot
+    values = stg_bin_values(16, "log", top=100, log_scale=10)
+    labels = torch.tensor([0, 3, 37, 100, 150])
+    t = two_hot(labels, values)
+    assert torch.allclose(t.sum(-1), torch.ones(5))
+    assert torch.allclose((t * values).sum(-1), labels.clamp(max=100).float(), atol=1e-4)   # 먼 라벨은 마지막 bin
+    assert ((t > 0).sum(-1) <= 2).all()
+    index = stg_bin_values(8)
+    assert torch.equal(two_hot(torch.tensor([0, 5, 7]), index), torch.eye(8)[[0, 5, 7]])   # 기존 방식 = one-hot
+
+
+def test_log_bins_widen_away_from_completion():
+    from square_assembly.datasets.stg_labels import stg_bin_values
+    values = stg_bin_values(64, "log", top=256, log_scale=10)
+    width = values.diff()
+    assert values[0] == 0 and abs(values[-1] - 256) < 1e-3 and (width.diff() > 0).all()
+    assert torch.allclose(stg_bin_values(5, "uniform", top=8), torch.tensor([0., 2, 4, 6, 8]))
+
+
+def test_log_bin_training_saves_the_bin_values(tmp_path):
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[-1] * 6)
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"), record_curves=True,
+                                    num_epochs=1, batch_size=2, device="cpu", num_bins_override=4,
+                                    bin_scheme="log", bin_top=4, bin_log_scale=2))
+    train_dstg_vip.main.__wrapped__(cfg)
+    ck = torch.load(tmp_path / "best_predictor.pt", weights_only=False)
+    assert ck["bin_scheme"] == "log" and len(ck["bin_values"]) == 4 and abs(ck["bin_values"][-1] - 4) < 1e-5
+
+
+def test_interval_one_hot_puts_each_label_in_the_nearest_bin():
+    from square_assembly.datasets.stg_labels import interval_one_hot
+    values = torch.tensor([0., 4, 8, 12])
+    t = interval_one_hot(torch.tensor([0, 1, 2, 3, 6, 11, 40]), values)
+    assert torch.equal(t.argmax(-1), torch.tensor([0, 0, 0, 1, 1, 3, 3]))   # 경계(2)는 아래 구간, 범위 밖은 끝 구간
+    assert torch.equal(t.sum(-1), torch.ones(7))
+
+
+def test_relative_gauss_targets_widen_with_remaining_steps():
+    from square_assembly.scripts.train_dstg_vip import _gaussian_targets
+    labels = torch.tensor([20, 100])
+    t = _gaussian_targets(labels, 256, 0.1 * (labels.float() + 10))
+    bins = torch.arange(256.)
+    mean = (t * bins).sum(-1)
+    sd = (t * (bins - mean[:, None]) ** 2).sum(-1).sqrt()
+    assert torch.allclose(mean, labels.float(), atol=0.1)
+    assert torch.allclose(sd, torch.tensor([3.0, 11.0]), atol=0.15)
+
+
+@pytest.mark.parametrize("extra, key, value", [
+    (dict(bin_scheme="uniform", bin_top=4, num_bins_override=3, bin_encoding="interval"), "bin_encoding", "interval"),
+    (dict(num_bins_override=8, gauss_sigma_rel=0.1), "gauss_sigma_rel", 0.1)])
+def test_interval_and_relative_gauss_training_run_and_are_recorded(tmp_path, extra, key, value):
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[-1] * 6)
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"),
+                                    record_curves=True, num_epochs=1, batch_size=2, device="cpu", **extra))
+    train_dstg_vip.main.__wrapped__(cfg)
+    assert torch.load(tmp_path / "best_predictor.pt", weights_only=False)[key] == value
