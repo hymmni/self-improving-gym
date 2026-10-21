@@ -37,8 +37,13 @@ def test_encode_frames_is_deterministic():
     np.testing.assert_allclose(a.astype(np.float32), b.astype(np.float32), rtol=1e-2, atol=1e-2)
 
 
-def test_reward_wrapper_matches_the_cached_feature_path(tmp_path):
-    """롤아웃용 obs 배치로 낸 d가, 같은 프레임을 캐시해서 낸 d(학습·평가 경로)와 같아야 한다."""
+import pytest
+
+
+@pytest.mark.parametrize("obs_parts", ["all", "feat"])
+def test_reward_wrapper_matches_the_cached_feature_path(tmp_path, obs_parts):
+    """롤아웃용 obs 배치로 낸 d가, 같은 프레임을 캐시해서 낸 d(학습·평가 경로)와 같아야 한다.
+    obs_parts=feat(이미지 특징만, 고유수용 뺌)이면 래퍼도 lowdim을 쓰지 않는다."""
     import h5py
     import json
     import torch
@@ -63,13 +68,13 @@ def test_reward_wrapper_matches_the_cached_feature_path(tmp_path):
         g.attrs["is_success"], g.attrs["length"] = True, length
         f.attrs["meta"] = json.dumps({"crop": 76, "size": 224, "rgb_keys": cams, "lowdim_keys": low_keys})
 
-    dataset = DinoFeatureWindows(cache, 2)
+    dataset = DinoFeatureWindows(cache, 2, obs_parts=obs_parts)
     mean, std = dataset.compute_frame_stats(range(length))
     dataset.apply_frame_stats(mean, std)
     head = DinoStgHead(2 * dataset.frame_dim, 10, head_hidden=(8,))
     ckpt = tmp_path / "predictor.pt"
     save_checkpoint(ckpt, head, {"in_dim": 2 * dataset.frame_dim, "num_bins": 10, "head_hidden": [8], "obs_horizon": 2,
-                                 "frame_mean": mean, "frame_std": std,
+                                 "frame_mean": mean, "frame_std": std, "obs_parts": obs_parts,
                                  "cache_meta": {"crop": 76, "size": 224, "rgb_keys": cams, "lowdim_keys": low_keys}})
     bins = torch.arange(10, dtype=torch.float32)
     with torch.no_grad():
@@ -83,5 +88,5 @@ def test_reward_wrapper_matches_the_cached_feature_path(tmp_path):
     obs = {k: torch.from_numpy(imgs[k][window]).permute(0, 1, 4, 2, 3).float() / 255 for k in cams}
     obs.update(normalizer.normalize_obs({k: torch.from_numpy(low[k][window]) for k in low_keys}))
 
-    assert reward.obs_keys == cams + low_keys and reward.obs_horizon == 2
+    assert reward.obs_keys == cams + (low_keys if obs_parts == "all" else []) and reward.obs_horizon == 2
     np.testing.assert_allclose(reward.d(obs).numpy(), expected.numpy(), atol=2e-2)

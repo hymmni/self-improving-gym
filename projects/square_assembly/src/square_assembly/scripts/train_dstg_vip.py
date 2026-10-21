@@ -28,6 +28,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Subset
 
 from square_assembly.datasets.dino_feature_dataset import DinoFeatureWindows
+from square_assembly.datasets.stg_labels import interval_one_hot, stg_bin_values, two_hot
 from square_assembly.policies.diffusion.dino_stg_predictor import DinoStgHead, save_checkpoint
 
 logger = logging.getLogger(__name__)
@@ -38,9 +39,11 @@ def _gaussian_targets(labels, num_bins, sigma):
 
     Formula: Farebrother et al. (2024), arxiv.org/abs/2403.03950, Appendix A.
     """
-    if not math.isfinite(sigma) or sigma <= 0:
+    sigma = torch.as_tensor(sigma, dtype=torch.float32, device=labels.device)   # 스칼라 또는 샘플별 (B,)
+    if not (torch.isfinite(sigma).all() and (sigma > 0).all()):
         raise ValueError("gauss_sigma must be finite and positive")
     edges = torch.arange(num_bins + 1, device=labels.device, dtype=torch.float32) - 0.5
+    sigma = sigma.unsqueeze(-1) if sigma.ndim else sigma
     cdf = torch.erf((edges - labels.float().unsqueeze(-1)) / (math.sqrt(2) * sigma))
     mass = cdf[:, 1:] - cdf[:, :-1]
     return mass / mass.sum(-1, keepdim=True)
@@ -97,10 +100,12 @@ def _mask_modalities(x, obs_horizon, feat_dim, probability):
 
 def _run_epoch(head, loader, device, num_bins, optimizer=None,
                gauss_sigma=0.0, pair_weight=0.0, pair_stride=8,
-               modality_dropout=0.0, obs_horizon=2, feat_dim=0):
-    """train_dstg._run_epoch와 같은 지표를 낸다: NLL(cross entropy)과 기댓값 MAE."""
+               modality_dropout=0.0, obs_horizon=2, feat_dim=0, values=None, encode=two_hot,
+               gauss_sigma_rel=0.0, gauss_sigma_t0=10.0):
+    """train_dstg._run_epoch와 같은 지표를 낸다: NLL(cross entropy)과 기댓값 MAE.
+    values(bin 값)가 있으면 two-hot 목표 CE(bin_scheme uniform/log) — NLL은 bin 폭이 달라 index 방식과 비교 못 한다."""
     head.train(optimizer is not None)
-    bin_idx = torch.arange(num_bins, device=device, dtype=torch.float32)
+    bin_idx = values if values is not None else torch.arange(num_bins, device=device, dtype=torch.float32)
     total_nll, total_abs_err, n = 0.0, 0.0, 0
 
     for batch in loader:
@@ -115,9 +120,12 @@ def _run_epoch(head, loader, device, num_bins, optimizer=None,
             else:
                 x = _mask_modalities(x, obs_horizon, feat_dim, modality_dropout)
         logits = head(x)
-        nll = F.cross_entropy(logits, labels)
-        loss = (F.cross_entropy(logits, _gaussian_targets(labels, num_bins, gauss_sigma))
-                if gauss_sigma else nll)
+        nll = F.cross_entropy(logits, encode(labels, values) if values is not None else labels)
+        if gauss_sigma or gauss_sigma_rel:   # 고정 폭 또는 남은 스텝 비례 폭 σ = rel·(T + t0)
+            sigma = gauss_sigma or gauss_sigma_rel * (labels.float() + gauss_sigma_t0)
+            loss = F.cross_entropy(logits, _gaussian_targets(labels, num_bins, sigma))
+        else:
+            loss = nll
         if optimizer is not None and pair_weight:
             if not modality_dropout:
                 xp = batch[2].to(device)
@@ -141,20 +149,21 @@ def _run_epoch(head, loader, device, num_bins, optimizer=None,
     return total_nll / n, total_abs_err / n
 
 
-def _collect_curve(head, dataset, indices, device, num_bins, batch_size):
+def _collect_curve(head, dataset, indices, device, num_bins, batch_size, values=None, encode=two_hot):
     """Evaluate epoch-end weights without consuming the training shuffle RNG."""
     loader = DataLoader(Subset(dataset, indices), batch_size=batch_size, shuffle=False,
                         generator=torch.Generator().manual_seed(0))
     was_training = head.training
     head.eval()
     distances, nlls, labels = [], [], []
-    bins = torch.arange(num_bins, device=device, dtype=torch.float32)
+    bins = values if values is not None else torch.arange(num_bins, device=device, dtype=torch.float32)
     try:
         with torch.no_grad():
             for x, y in loader:
                 logits, y = head(x.to(device)), y.to(device).long()
                 distances.append((logits.softmax(-1) * bins).sum(-1).cpu().numpy())
-                nlls.append(F.cross_entropy(logits, y, reduction="none").cpu().numpy())
+                nlls.append(F.cross_entropy(logits, encode(y, values) if values is not None else y,
+                                            reduction="none").cpu().numpy())
                 labels.append(y.cpu().numpy())
     finally:
         head.train(was_training)
@@ -225,8 +234,18 @@ def main(cfg: DictConfig):
         raise ValueError("gauss_sigma must be finite and nonnegative")
     if not math.isfinite(pair_weight) or pair_weight < 0 or pair_stride < 1:
         raise ValueError("pair_weight must be nonnegative; pair_stride must be positive")
-    if (gauss_sigma or pair_weight) and cfg.get("fail_bin") is not None:
+    gauss_sigma_rel = float(cfg.get("gauss_sigma_rel", 0.0))
+    gauss_sigma_t0 = float(cfg.get("gauss_sigma_t0", 10.0))
+    if not math.isfinite(gauss_sigma_rel) or gauss_sigma_rel < 0 or (gauss_sigma and gauss_sigma_rel):
+        raise ValueError("gauss_sigma_rel must be finite, nonnegative and not combined with gauss_sigma")
+    if (gauss_sigma or gauss_sigma_rel or pair_weight) and cfg.get("fail_bin") is not None:
         raise ValueError("ordinal losses cannot smooth a separate failure class")
+    bin_scheme = cfg.get("bin_scheme", "index")
+    if bin_scheme != "index" and (gauss_sigma or gauss_sigma_rel or pair_weight or cfg.get("fail_bin") is not None
+                                  or not cfg.get("num_bins_override")):
+        raise ValueError("bin_scheme uniform/log는 num_bins_override가 필요하고 gauss_sigma·pair_weight·fail_bin과 같이 못 쓴다")
+    bin_encoding = cfg.get("bin_encoding", "two_hot")
+    encode = {"two_hot": two_hot, "interval": interval_one_hot}[bin_encoding]
 
     dataset = DinoFeatureWindows(cfg.cache_path, cfg.obs_horizon, fail_bin=cfg.get("fail_bin"),
                              label_horizon=cfg.get("label_horizon"),
@@ -299,7 +318,14 @@ def main(cfg: DictConfig):
 
     labels = dataset.labels()
     max_label = int(labels.max())
-    if cfg.get("num_bins_override"):
+    values = None
+    if bin_scheme != "index":
+        num_bins, top = int(cfg.num_bins_override), int(cfg.bin_top)
+        if max_label > top:   # 마지막 bin 값 = "top 스텝 이상"
+            over = dataset.clamp_labels(top + 1)
+            logger.warning(f"최대 라벨 {max_label} > bin_top {top}: {int(over.sum())}프레임을 top으로 모았다.")
+        values = stg_bin_values(num_bins, bin_scheme, top, float(cfg.get("bin_log_scale", 10.0))).to(device)
+    elif cfg.get("num_bins_override"):
         num_bins = int(cfg.num_bins_override)
         if num_bins <= max_label:   # 마지막 bin = "num_bins-1 스텝 이상"
             over = dataset.clamp_labels(num_bins)
@@ -335,7 +361,7 @@ def main(cfg: DictConfig):
         wandb_config = {k: cfg.get(k) for k in ("seed", "split_seed", "num_epochs", "batch_size", "lr",
                        "weight_decay", "obs_horizon", "obs_parts", "label_horizon",
                        "preintv", "success_tail_only", "success_tail_from", "gauss_sigma", "pair_weight",
-                       "modality_dropout")}
+                       "modality_dropout", "bin_scheme", "bin_encoding", "gauss_sigma_rel")}
         wandb_config["head_hidden"] = list(cfg.head_hidden)
         wandb_run = wandb.init(
             project=cfg.wandb_project, entity=cfg.get("wandb_entity"),
@@ -373,14 +399,15 @@ def main(cfg: DictConfig):
         train_nll, train_mae = _run_epoch(
             head, train_loader, device, num_bins, optimizer=optimizer,
             gauss_sigma=gauss_sigma, pair_weight=pair_weight, pair_stride=pair_stride,
-            modality_dropout=modality_dropout, obs_horizon=cfg.obs_horizon, feat_dim=feat_dim)
+            modality_dropout=modality_dropout, obs_horizon=cfg.obs_horizon, feat_dim=feat_dim, values=values,
+            encode=encode, gauss_sigma_rel=gauss_sigma_rel, gauss_sigma_t0=gauss_sigma_t0)
         if epoch % cfg.log_every == 0 or epoch == cfg.num_epochs - 1:
             msg = f"epoch {epoch} train_nll={train_nll:.4f} train_mae={train_mae:.3f}"
             logger.info(msg)
             print(msg, flush=True)
         if record_curves:
-            train_arrays = _collect_curve(head, dataset, sorted(set(train_idx)), device, num_bins, cfg.batch_size)
-            val_arrays = _collect_curve(head, dataset, val_idx, device, num_bins, cfg.batch_size)
+            train_arrays = _collect_curve(head, dataset, sorted(set(train_idx)), device, num_bins, cfg.batch_size, values, encode)
+            val_arrays = _collect_curve(head, dataset, val_idx, device, num_bins, cfg.batch_size, values, encode)
             demo, t = val_arrays[3:]
             eligible = np.array([ti >= val_starts[n] for n, ti in zip(demo, t)])
             row = {"epoch": epoch + 1, "train": _curve_metrics(train_arrays),
@@ -404,7 +431,7 @@ def main(cfg: DictConfig):
                   f"val_retained_mae={row['val_retained']['mae']:.3f} "
                   f"val_retained_k8={row['val_retained']['k8']}", flush=True)
 
-    val_nll, val_mae = _run_epoch(head, val_loader, device, num_bins, optimizer=None)
+    val_nll, val_mae = _run_epoch(head, val_loader, device, num_bins, optimizer=None, values=values, encode=encode)
     logger.info(
         f"[val] nll={val_nll:.4f} mae={val_mae:.3f} (n={len(val_idx)} samples, {n_val_demos} demos)"
     )
@@ -415,6 +442,11 @@ def main(cfg: DictConfig):
     meta = {
         "in_dim": in_dim,
         "num_bins": num_bins,
+        "bin_scheme": bin_scheme,
+        "bin_encoding": bin_encoding,
+        "gauss_sigma_rel": gauss_sigma_rel,
+        "gauss_sigma_t0": gauss_sigma_t0,
+        "bin_values": values.cpu().tolist() if values is not None else None,
         "head_hidden": list(cfg.head_hidden),
         "obs_horizon": cfg.obs_horizon,
         "fail_bin": cfg.get("fail_bin"),

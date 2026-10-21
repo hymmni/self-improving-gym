@@ -297,6 +297,21 @@ def test_agentview_selects_named_camera_and_ignores_other_inputs(tmp_path):
     np.testing.assert_array_equal(std_after, std)
 
 
+def test_wrist_selects_eye_in_hand_camera_only(tmp_path):
+    """손목 카메라만(사용자 요청 2026-10-07) — agentview와 같은 규칙으로 robot0_eye_in_hand_image 열만 쓴다."""
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[3])
+    with h5py.File(cache, "r+") as f:
+        f.attrs["meta"] = json.dumps({"rgb_keys": ["agentview_image", "robot0_eye_in_hand_image"]})
+        f["data/demo_0/feat"][:] = [[90, 91, 10, 11], [92, 93, 20, 21], [94, 95, 30, 31]]
+        del f["data/demo_0/lowdim"]
+    ds = DinoFeatureWindows(cache, 2, obs_parts="wrist")
+    assert ds.frame_dim == 2
+    np.testing.assert_array_equal(ds[2][0].numpy(), [20, 21, 30, 31])
+
+
 @pytest.mark.parametrize("keys,width", [([], 4), (["wrist"], 4),
                                       (["agentview_image", "agentview_image"], 4),
                                       (["agentview_image", "wrist"], 3)])
@@ -415,3 +430,79 @@ def test_training_uses_the_same_first_onset_for_train_and_validation(tmp_path):
     import json
     row = json.loads((tmp_path / "learning_curve.json").read_text())["rows"][0]
     assert row["val_retained"]["n"] == 5 and row["val_excluded_prefix"]["n"] == 1   # 검증 데모 1개: 프레임 1~5 / 0
+
+
+def test_two_hot_targets_keep_the_label_as_their_expectation():
+    from square_assembly.datasets.stg_labels import stg_bin_values, two_hot
+    values = stg_bin_values(16, "log", top=100, log_scale=10)
+    labels = torch.tensor([0, 3, 37, 100, 150])
+    t = two_hot(labels, values)
+    assert torch.allclose(t.sum(-1), torch.ones(5))
+    assert torch.allclose((t * values).sum(-1), labels.clamp(max=100).float(), atol=1e-4)   # 먼 라벨은 마지막 bin
+    assert ((t > 0).sum(-1) <= 2).all()
+    index = stg_bin_values(8)
+    assert torch.equal(two_hot(torch.tensor([0, 5, 7]), index), torch.eye(8)[[0, 5, 7]])   # 기존 방식 = one-hot
+
+
+def test_log_bins_widen_away_from_completion():
+    from square_assembly.datasets.stg_labels import stg_bin_values
+    values = stg_bin_values(64, "log", top=256, log_scale=10)
+    width = values.diff()
+    assert values[0] == 0 and abs(values[-1] - 256) < 1e-3 and (width.diff() > 0).all()
+    assert torch.allclose(stg_bin_values(5, "uniform", top=8), torch.tensor([0., 2, 4, 6, 8]))
+
+
+def test_log_bin_training_saves_the_bin_values(tmp_path):
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[-1] * 6)
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"), record_curves=True,
+                                    num_epochs=1, batch_size=2, device="cpu", num_bins_override=4,
+                                    bin_scheme="log", bin_top=4, bin_log_scale=2))
+    train_dstg_vip.main.__wrapped__(cfg)
+    ck = torch.load(tmp_path / "best_predictor.pt", weights_only=False)
+    assert ck["bin_scheme"] == "log" and len(ck["bin_values"]) == 4 and abs(ck["bin_values"][-1] - 4) < 1e-5
+
+
+def test_interval_one_hot_puts_each_label_in_the_nearest_bin():
+    from square_assembly.datasets.stg_labels import interval_one_hot
+    values = torch.tensor([0., 4, 8, 12])
+    t = interval_one_hot(torch.tensor([0, 1, 2, 3, 6, 11, 40]), values)
+    assert torch.equal(t.argmax(-1), torch.tensor([0, 0, 0, 1, 1, 3, 3]))   # 경계(2)는 아래 구간, 범위 밖은 끝 구간
+    assert torch.equal(t.sum(-1), torch.ones(7))
+
+
+def test_relative_gauss_targets_widen_with_remaining_steps():
+    from square_assembly.scripts.train_dstg_vip import _gaussian_targets
+    labels = torch.tensor([20, 100])
+    t = _gaussian_targets(labels, 256, 0.1 * (labels.float() + 10))
+    bins = torch.arange(256.)
+    mean = (t * bins).sum(-1)
+    sd = (t * (bins - mean[:, None]) ** 2).sum(-1).sqrt()
+    assert torch.allclose(mean, labels.float(), atol=0.1)
+    assert torch.allclose(sd, torch.tensor([3.0, 11.0]), atol=0.15)
+
+
+@pytest.mark.parametrize("extra, key, value", [
+    (dict(bin_scheme="uniform", bin_top=4, num_bins_override=3, bin_encoding="interval"), "bin_encoding", "interval"),
+    (dict(num_bins_override=8, gauss_sigma_rel=0.1), "gauss_sigma_rel", 0.1)])
+def test_interval_and_relative_gauss_training_run_and_are_recorded(tmp_path, extra, key, value):
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[6] * 5)
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[-1] * 6)
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    cfg = OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"),
+                                    record_curves=True, num_epochs=1, batch_size=2, device="cpu", **extra))
+    train_dstg_vip.main.__wrapped__(cfg)
+    assert torch.load(tmp_path / "best_predictor.pt", weights_only=False)[key] == value

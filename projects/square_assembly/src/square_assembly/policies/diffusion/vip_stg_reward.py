@@ -25,11 +25,14 @@ class VipStgPredictor(nn.Module):
 
     def __init__(self, head, ckpt, normalizer, encoder):
         super().__init__()
-        if ckpt.get("obs_parts", "all") != "all" or ckpt.get("fail_bin") is not None:
-            raise ValueError("obs_parts=all, fail_bin 없는 VIP 예측기만 지원한다")
+        obs_parts = ckpt.get("obs_parts", "all")
+        if obs_parts not in ("all", "feat") or ckpt.get("fail_bin") is not None:
+            raise ValueError("obs_parts=all|feat, fail_bin 없는 VIP 예측기만 지원한다")
         meta = ckpt["cache_meta"]
         self.head, self.encoder, self.normalizer = head, encoder, normalizer
-        self.rgb_keys, self.lowdim_keys = list(meta["rgb_keys"]), list(meta["lowdim_keys"])
+        # feat = 이미지 특징만(고유수용 뺌) — 캐시 프레임도 카메라 특징만이라 lowdim을 안 붙인다
+        self.rgb_keys = list(meta["rgb_keys"])
+        self.lowdim_keys = list(meta["lowdim_keys"]) if obs_parts == "all" else []
         self.crop, self.size = meta["crop"], meta["size"]
         self.register_buffer("frame_mean", torch.tensor(ckpt["frame_mean"], dtype=torch.float32))
         self.register_buffer("frame_std", torch.tensor(ckpt["frame_std"], dtype=torch.float32))
@@ -43,8 +46,9 @@ class VipStgPredictor(nn.Module):
             u8 = (obs[k].reshape(b * to, *obs[k].shape[2:]) * 255).round().clamp(0, 255).byte()
             feat = encode_frames(self.encoder, u8.permute(0, 2, 3, 1).cpu().numpy(), self.crop, self.size, device)
             parts.append(torch.from_numpy(feat).float().to(device))
-        low = self.normalizer.unnormalize_obs({k: obs[k].cpu() for k in self.lowdim_keys})
-        parts += [low[k].reshape(b * to, -1).to(device) for k in self.lowdim_keys]
+        if self.lowdim_keys:
+            low = self.normalizer.unnormalize_obs({k: obs[k].cpu() for k in self.lowdim_keys})
+            parts += [low[k].reshape(b * to, -1).to(device) for k in self.lowdim_keys]
         frames = (torch.cat(parts, dim=-1) - self.frame_mean) / self.frame_std
         return self.head(frames.reshape(b, -1))
 
@@ -66,7 +70,7 @@ class VipStgReward(DstgReward):
         self.rgb_keys = predictor.rgb_keys
         self.obs_keys = predictor.rgb_keys + predictor.lowdim_keys
         self.obs_horizon = int(ckpt["obs_horizon"])
-        self._init_common(predictor, ckpt["num_bins"], statistic, cvar_alpha, threshold, device)
+        self._init_common(predictor, ckpt["num_bins"], statistic, cvar_alpha, threshold, device, ckpt.get("bin_values"))
 
 
 def load_stg_reward(ckpt_path, normalizer, **kwargs):

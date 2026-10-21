@@ -131,3 +131,46 @@ def _runs(names, ts, modes, success):
         ends = np.concatenate([idx[brk], [idx[-1]]])
         for a, b in zip(starts, ends):
             yield name, int(a), int(b)
+
+
+def stg_bin_values(num_bins, scheme="index", top=None, log_scale=10.0):
+    """bin i가 뜻하는 남은 스텝 값(오름차순 float32 텐서). 보상 d = sum(p_i * values_i).
+
+    index: values_i = i(기존 방식, 정수 라벨 = bin 번호). uniform: 0..top 균등.
+    log: log(1 + T/log_scale) 공간에서 0..top 균등 — 완료에서 멀수록 bin이 넓다. 예측 오차가 남은 스텝에
+    비례(experiments/2026-10-08_can-stg-intv3-and-dppo.md §7, 상대 오차 12–16%)해서 bin 폭도 거기에 맞춘다.
+    """
+    import torch
+
+    if scheme == "index":
+        return torch.arange(num_bins, dtype=torch.float32)
+    if scheme == "uniform":
+        return torch.linspace(0, float(top), num_bins)
+    if scheme == "log":
+        u = torch.linspace(0, float(np.log1p(top / log_scale)), num_bins, dtype=torch.float64)
+        return (log_scale * torch.expm1(u)).float()
+    raise ValueError(f"bin_scheme는 index | uniform | log 중 하나다: {scheme}")
+
+
+def two_hot(labels, values):
+    """(B,) 남은 스텝 -> (B, K) 목표 분포. 이웃한 두 bin에 거리 비율로 나눠 기댓값이 라벨과 같다(DreamerV3 twohot).
+    values 범위 밖 라벨은 끝 bin으로 모은다."""
+    import torch
+
+    values = values.to(labels.device)
+    y = labels.float().clamp(float(values[0]), float(values[-1]))
+    hi = torch.searchsorted(values, y).clamp(1, len(values) - 1)
+    lo = hi - 1
+    w = ((y - values[lo]) / (values[hi] - values[lo])).unsqueeze(-1)
+    target = torch.zeros(len(y), len(values), device=y.device)
+    return target.scatter(1, lo.unsqueeze(-1), 1 - w).scatter_add(1, hi.unsqueeze(-1), w)
+
+
+def interval_one_hot(labels, values):
+    """(B,) 남은 스텝 -> (B, K) one-hot. bin 중심 values로 빈틈없이 나눈 구간(경계 = 이웃 중심의 중간, 경계값은 아래 구간)에 넣는다.
+    two_hot과 달리 구간 안의 위치는 버리고 d는 중심값으로 계산된다(2026-10-19 인코딩 비교)."""
+    import torch
+
+    values = values.to(labels.device)
+    k = torch.bucketize(labels.float(), (values[1:] + values[:-1]) / 2)
+    return torch.nn.functional.one_hot(k, len(values)).float()

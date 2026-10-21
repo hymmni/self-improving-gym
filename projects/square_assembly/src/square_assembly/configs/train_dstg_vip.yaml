@@ -6,6 +6,11 @@ cache_path: ???   # scripts/cache_vip_feats.py 산출물
 out: outputs/dstg_vip/predictor.pt
 num_bins_override: 256   # 라벨 0~255. 학습 라벨이 닿지 않는 먼 bin은 낯선 상태에서 확률이 새어 기댓값·표준편차를
                          # 부풀린다(experiments/2026-10-01_stg-bins256.md). 더 먼 라벨은 마지막 bin("255 이상")으로 모은다.
+bin_scheme: index        # index(bin i = i스텝, 기존) | uniform | log — uniform/log는 0..bin_top을 num_bins_override개 bin 값으로 나누고
+                         # two-hot 라벨(datasets/stg_labels.py). log는 완료에서 멀수록 bin이 넓다(2026-10-19 비교 실험).
+bin_top: 256             # uniform/log 마지막 bin 값. 더 먼 라벨은 여기로 모은다.
+bin_log_scale: 10.0      # log: log(1 + T/bin_log_scale) 공간에서 균등 — 작을수록 끝 근처가 촘촘하다.
+bin_encoding: two_hot    # uniform/log 라벨: two_hot(이웃 두 bin에 거리 비율) | interval(가장 가까운 중심 구간 one-hot, 구간 안 위치는 버림)
 fail_bin: null           # 실패 롤아웃 데이터를 쓸 때만 설정(이번 실험은 PH 성공 데모만)
 label_horizon: null      # 설정하면 라벨이 '남은 스텝 수' 대신 '남은 비율 x 이 값' —
                          # 에피소드 길이 편차가 큰 텔레옵 데이터용. num_bins도 같이 줄여야 한다.
@@ -18,6 +23,8 @@ preintv: none            # PREINTV 프레임 처리: none(그대로) | drop(trai
 preintv_weight: 1        # PREINTV 프레임을 train에서 몇 배로 복제할지(1=그대로)
 preintv_len: null        # PREINTV 구간을 개입 시작점부터 몇 프레임으로 다시 잴지(null=저장된 15)
 gauss_sigma: 0.0         # HL-Gauss width in label units; 0 preserves one-hot CE
+gauss_sigma_rel: 0.0     # >0이면 HL-Gauss 폭을 남은 스텝에 비례: σ = gauss_sigma_rel·(T + gauss_sigma_t0) (gauss_sigma와 같이 못 씀)
+gauss_sigma_t0: 10.0
 pair_weight: 0.0         # signed anchor-label difference loss; 0 disables pairs
 pair_stride: 8          # endpoints must both belong to retained training frames
 modality_dropout: 0.0   # total probability; half vision-only masking, half lowdim-only masking
@@ -32,7 +39,7 @@ wandb_run_name: null
 wandb_group: null
 wandb_mode: online
 
-obs_parts: all           # all | feat(모든 카메라) | lowdim(9차원) | agentview(main camera만)
+obs_parts: all           # all | feat(모든 카메라) | lowdim(9차원) | agentview(main camera만) | wrist(손목 카메라만)
 obs_horizon: 2           # configs/policy/diffusion_unet.yaml과 동일
 seed: 1
 device: cuda

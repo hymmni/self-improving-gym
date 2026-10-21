@@ -23,7 +23,8 @@ import torch
 from square_assembly.datasets.stg_labels import build_labels
 
 OBS_PARTS = {"all": ("feat", "lowdim"), "feat": ("feat",), "lowdim": ("lowdim",),
-             "agentview": ("feat",)}
+             "agentview": ("feat",), "wrist": ("feat",)}
+CAMERA_PARTS = {"agentview": "agentview_image", "wrist": "robot0_eye_in_hand_image"}   # 카메라 하나만 쓰는 obs_parts
 
 
 def episode_split_by_name(demo_names, val_fraction, seed):
@@ -69,7 +70,7 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         fail_bin (int | None): 실패 데모에 붙일 별도 클래스. 실패 데모가 있는데 None이면 죽는다.
         obs_parts (str): 캐시의 어느 부분을 입력으로 쓸지 — all(이미지 특징+고유수용) |
             feat(모든 카메라 특징만) | lowdim(eef pos/quat + gripper qpos 9차원만) |
-            agentview(main camera 특징만; wrist와 lowdim 제외). 예측기가
+            agentview(main camera 특징만; wrist와 lowdim 제외) | wrist(손목 카메라 특징만). 예측기가
             진행도를 이미지가 아니라 고유수용 감각에서 읽는지 가르기 위한 축이다(2026-09-23).
     """
 
@@ -85,12 +86,13 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
             raise ValueError(f"obs_parts는 {sorted(OBS_PARTS)} 중 하나여야 한다: {obs_parts}")
 
         with h5py.File(cache_path, "r") as f:
-            if obs_parts == "agentview":
+            if obs_parts in CAMERA_PARTS:
+                camera = CAMERA_PARTS[obs_parts]
                 cameras = json.loads(f.attrs.get("meta", "{}")).get("rgb_keys")
                 if (not isinstance(cameras, list) or not all(isinstance(k, str) for k in cameras)
-                        or cameras.count("agentview_image") != 1):
-                    raise ValueError("agentview requires rgb_keys containing one agentview_image camera")
-                camera_index = cameras.index("agentview_image")
+                        or cameras.count(camera) != 1):
+                    raise ValueError(f"{obs_parts} requires rgb_keys containing one {camera} camera")
+                camera_index = cameras.index(camera)
             for name in sorted(f["data"].keys()):
                 g = f["data"][name]
                 length = int(g.attrs["length"])
@@ -100,7 +102,7 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
                 blocks = []
                 for part in OBS_PARTS[obs_parts]:
                     columns = slice(None)
-                    if obs_parts == "agentview":
+                    if obs_parts in CAMERA_PARTS:
                         feat = g["feat"]
                         if (feat.ndim != 2 or feat.shape[1] < len(cameras)
                                 or feat.shape[1] % len(cameras)):
