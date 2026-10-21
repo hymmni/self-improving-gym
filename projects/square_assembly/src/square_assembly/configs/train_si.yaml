@@ -29,10 +29,18 @@ value_lr: 1.0e-4           # 크리틱은 처음부터 배우므로 정책 lr(1e
 critic_hidden: [256, 256]
 ft_denoising_steps: null   # 마지막 몇 디노이징 단계만 파인튜닝(null=전부). DPPO 논문의 효율 트릭
 max_grad_norm: 1.0         # 재사용 때문에 비율이 튈 수 있어 DDPO-SF 경로보다 보호가 필요하다
+ppo_batch: null            # 옵티마이저 한 스텝의 (결정, 디노이징 단계) 쌍 수. null이면 logp_batch(예전 동작: 256쌍마다 step).
+                           # logp_batch는 GPU 메모리 청크라 그 그래디언트를 모아 ppo_batch마다 한 번 step한다(원본 Square 픽셀은 10000~50000)
+critic_per_minibatch: false  # true면 크리틱도 PPO 미니배치마다 한 스텝(원본 Algorithm 1). false면 epoch마다 한 스텝(iteration당 update_epochs번)
 
 statistic: mean            # mean | cvar (DstgReward에 그대로 전달)
 cvar_alpha: 0.8
 gamma: 0.9                 # 논문 기본값
+success_bonus: 0.0         # >0이면 환경 성공 에피소드의 마지막 결정에 더한다(정답 신호 사용, termination=env 전용)
+failure_penalty: 0.0       # >0이면 성공 못 하고 끝난(타임아웃) 에피소드의 마지막 결정에서 뺀다(같은 조건)
+dense_reward: true         # false면 성공·실패 모두 밀집(STG) 보상을 버리고 종료 보상만(희소 보상 점검용, 같은 조건)
+zero_failure_dense: false  # true면 실패 에피소드의 밀집(STG) 보상을 0으로 버리고 종료 벌점만 남긴다(같은 조건)
+hack_filter_threshold: null  # 숫자면 실패했는데 STG 보상 합(종료 벌점 제외)이 이보다 큰 에피소드를 업데이트에서 뺀다(10/6 "해킹형 실패" 정의는 100)
 reinforce_scale: 5.0e-2    # 논문 c
 lr: 1.0e-6                 # (DPPO 원본의 이미지 정책 actor_lr은 1e-5 — algo=dppo로 돌릴 땐 재검토)
                            # 파인튜닝이라 사전학습 lr(1e-4)보다 훨씬 작게 — train.yaml의
@@ -47,6 +55,7 @@ episodes_per_iter: ???      # 기본값을 못 박지 않는다 — 1 에피소�
 seed0: 900000               # 학습 롤아웃 시드 시작점. 아직 평가 phase가 시드 대역을 정하지
                             # 않아 900000으로 두되, 실제 평가 phase에서 재검토가 필요하다.
 out: ???
+save_every: null            # N이면 N iteration마다 <out>_it{N}.pt도 저장(끝·best 외 중간 정책)
 device: cuda
 use_wandb: false            # true면 iteration별 지표를 W&B에도 올린다(train_stats.jsonl과 같은 값)
 wandb_project: square_assembly
