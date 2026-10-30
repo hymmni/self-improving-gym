@@ -80,6 +80,9 @@ def _build_diffusion_stg(task_cfg, policy_cfg):
         vip_size=policy_cfg.get("vip_size", 224),
         vip_frozen_stages=tuple(policy_cfg.get("vip_frozen_stages", ("conv1", "bn1", "layer1", "layer2"))),
         vip_grad_checkpoint=policy_cfg.get("vip_grad_checkpoint", False),
+        # 키가 없으면 legacy(선형 헤드, global_cond 전체) — 기존 체크포인트의 run_config 호환.
+        stg_head_hidden=tuple(policy_cfg.stg.get("head_hidden", None) or ()),
+        stg_image_only=bool(policy_cfg.stg.get("image_only", False)),
     )
 
 

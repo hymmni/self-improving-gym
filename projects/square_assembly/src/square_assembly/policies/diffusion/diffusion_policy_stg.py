@@ -8,8 +8,11 @@
 - 인코더: ResNet18+SpatialSoftmax 대신 사전학습 VIP ResNet50(카메라 두 대가 공유). 앞단(vip_frozen_stages)은 얼리고,
   BatchNorm은 늘 eval(작은 배치 미세조정 관례, 롤아웃·RL과 통계가 같다). 입력 전처리는 ① 캐시(cache_vip_feats)와 같다
   (crop 76 -> resize 224 -> ImageNet 정규화). 출력은 ① 체크포인트의 특징 평균·표준편차로 표준화한다.
-- stg_head: global_cond -> num_stg_bins 선형층 하나(bias 없음). DstgPredictor(head_hidden=())와 키가 같아
+- stg_head: DstgPredictor.head와 같은 모양(Linear+ReLU 은닉층들, 마지막 Linear는 bias 없음)이라 키가 같고
   export_dstg_ckpt가 내보낸 체크포인트를 DstgReward/train_si가 그대로 읽는다.
+  · 논문 구성(신규 학습 기본, configs의 policy.stg.head_hidden=[256,256], image_only=true): MLP, 입력은 프레임마다
+    카메라 이미지 특징만(proprio·stage 제외, 이력 프레임 이어 붙임). UNet은 proprio까지 받는다.
+  · legacy(옵션 키가 없을 때): 선형층 하나, 입력은 UNet과 같은 global_cond 전체.
 - compute_loss: bc_mask 행은 디퓨전 MSE, stg_mask 행은 CE. 합 = BC + stg_weight * STG(stg_weight는 학습기가 warmup).
 
 RL(train_si) 중엔 인코더가 얼려져 unet만 바뀌므로 STG 헤드가 읽는 특징 = 보상이 움직이지 않는다.
@@ -83,7 +86,8 @@ def _camera_stats(stats_ckpt, rgb_keys):
 
 class DiffusionPolicyImageStg(DiffusionPolicyImage):
     def __init__(self, num_stg_bins, vip_pretrained=True, vip_stats_ckpt=None, vip_size=224,
-                 vip_frozen_stages=("conv1", "bn1", "layer1", "layer2"), vip_grad_checkpoint=False, **kwargs):
+                 vip_frozen_stages=("conv1", "bn1", "layer1", "layer2"), vip_grad_checkpoint=False,
+                 stg_head_hidden=(), stg_image_only=False, **kwargs):
         # ponytail: 부모가 ResNet18 인코더와 작은 조건의 UNet을 만든 뒤 아래서 갈아 끼운다(생성 1~2초 낭비) —
         # 부모 원본을 안 건드리기 위함(ADR-005).
         super().__init__(**kwargs)
@@ -106,7 +110,15 @@ class DiffusionPolicyImageStg(DiffusionPolicyImage):
             down_dims=kwargs.get("down_dims", (256, 512)), kernel_size=kwargs.get("kernel_size", 5),
             n_groups=kwargs.get("n_groups", 8), diffusion_step_embed_dim=kwargs.get("diffusion_step_embed_dim", 256),
         )
-        self.stg_head = nn.Sequential(nn.Linear(global_cond_dim, num_stg_bins, bias=False))
+        # ponytail: 기본값이 legacy(선형·global_cond 전체)라 키 없는 기존 설정/체크포인트가 그대로 로드된다.
+        self.stg_image_only = bool(stg_image_only)
+        self._img_dim, self._per_step = len(self.rgb_keys) * EMBED_DIM, per_step
+        in_dim = self.obs_horizon * self._img_dim if self.stg_image_only else global_cond_dim
+        layers = []
+        for h in stg_head_hidden:
+            layers += [nn.Linear(in_dim, h), nn.ReLU()]
+            in_dim = h
+        self.stg_head = nn.Sequential(*layers, nn.Linear(in_dim, num_stg_bins, bias=False))
         self.stg_weight = 0.0
         self.last_metrics = {}
 
@@ -117,6 +129,12 @@ class DiffusionPolicyImageStg(DiffusionPolicyImage):
                 m.eval()
         return self
 
+    def stg_input(self, global_cond):
+        """global_cond (B, To*per_step) -> STG 헤드 입력. image_only면 프레임마다 앞의 카메라 특징 구간만(proprio·stage 제외)."""
+        if not self.stg_image_only:
+            return global_cond
+        return global_cond.reshape(global_cond.shape[0], self.obs_horizon, self._per_step)[..., :self._img_dim].flatten(1)
+
     def compute_loss(self, batch, reduction="mean"):
         if "stg_label" not in batch:
             return super().compute_loss(batch, reduction)
@@ -124,7 +142,7 @@ class DiffusionPolicyImageStg(DiffusionPolicyImage):
         bc, stg = batch["bc_mask"], batch["stg_mask"]
         zero = global_cond.sum() * 0.0
         bc_loss = self._bc_loss(global_cond[bc], batch["action"][bc], batch["action_mask"][bc]) if bc.any() else zero
-        stg_loss = (F.cross_entropy(self.stg_head(global_cond[stg]), batch["stg_label"][stg].long())
+        stg_loss = (F.cross_entropy(self.stg_head(self.stg_input(global_cond[stg])), batch["stg_label"][stg].long())
                     if stg.any() else zero)
         self.last_metrics = {"bc_loss": bc_loss.detach(), "stg_loss": stg_loss.detach(), "stg_weight": self.stg_weight}
         return bc_loss + self.stg_weight * stg_loss
@@ -147,8 +165,12 @@ def export_dstg_ckpt(policy_ckpt_path, out_path):
     model = torch.load(policy_ckpt_path, map_location="cpu", weights_only=False)["model"]
     head = {k[len("stg_head."):]: v for k, v in model.items() if k.startswith("stg_head.")}
     saved = load_run_config(policy_ckpt_path)
-    torch.save({"model": head, "num_bins": int(head["0.weight"].shape[0]), "policy_ckpt": policy_ckpt_path,
-                "obs_keys": task_obs_keys(saved.task), "head_hidden": []}, out_path)
+    n_linear = 1 + max(int(k.split(".")[0]) for k in head) // 2    # Linear, ReLU, ..., Linear(마지막)
+    hidden = [int(head[f"{2 * i}.weight"].shape[0]) for i in range(n_linear - 1)]
+    stg_cfg = saved.policy.get("stg", None) or {}
+    torch.save({"model": head, "num_bins": int(head[f"{2 * (n_linear - 1)}.weight"].shape[0]),
+                "policy_ckpt": policy_ckpt_path, "obs_keys": task_obs_keys(saved.task), "head_hidden": hidden,
+                "image_only": bool(stg_cfg.get("image_only", False))}, out_path)
     return out_path
 
 

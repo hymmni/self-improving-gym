@@ -165,3 +165,79 @@ def test_camera_stats_scale_is_one_scalar_per_camera(tmp_path):
     m, s = stats[RGB[1]]
     assert torch.equal(m, mean[1024:2048]) and torch.allclose(s, torch.full((1024,), 2.0))
     assert torch.allclose(stats[RGB[0]][1], std[:1024].pow(2).mean().sqrt().expand(1024))   # 거의 상수인 차원에 끌려가지 않음
+
+
+# ---- 헤드 구성: 논문 구성(MLP + 이미지 특징만) vs legacy(선형 + global_cond 전체) ----
+PAPER = dict(stg_head_hidden=(32, 32), stg_image_only=True)
+
+
+def _policy_cfg(**kw):
+    return DiffusionPolicyImageStg(
+        rgb_keys=RGB, lowdim_keys=LOW, obs_dims={"robot0_eef_pos": 3}, obs_horizon=2, action_dim=3, pred_horizon=4,
+        image_hw=(16, 16), crop_hw=(14, 14), down_dims=(16, 32), kernel_size=3, n_groups=4,
+        diffusion_step_embed_dim=8, num_train_timesteps=10, num_inference_steps=10,
+        num_stg_bins=20, vip_pretrained=False, vip_size=32, **kw)
+
+
+def test_paper_head_is_mlp_over_image_features_only():
+    torch.manual_seed(0)
+    p = _policy_cfg(**PAPER)
+    linears = [m for m in p.stg_head if isinstance(m, torch.nn.Linear)]
+    assert [(l.in_features, l.out_features) for l in linears] == [(2 * 2 * 1024, 32), (32, 32), (32, 20)]
+    assert linears[-1].bias is None
+    # UNet 조건은 그대로 proprio 포함(2 x (2*1024 + 3))
+    assert p.unet.down_modules[0][0].cond_encoder[1].in_features - 8 == 2 * (2 * 1024 + 3)
+    # lowdim을 바꿔도 헤드 입력은 안 변한다
+    obs = _batch()["obs"]
+    p.eval()                                  # RandomCrop 제거
+    gc = p.get_global_cond(obs)
+    obs2 = dict(obs, robot0_eef_pos=obs["robot0_eef_pos"] + 5)
+    assert torch.equal(p.stg_input(gc), p.stg_input(p.get_global_cond(obs2)))
+    assert not torch.equal(gc, p.get_global_cond(obs2))
+    p.train()
+    p.stg_weight = 1.0
+    p.compute_loss(_batch()).backward()   # 손실 경로도 새 입력으로 동작
+
+
+def test_legacy_head_is_unchanged_linear_on_global_cond():
+    p = _policy()
+    assert [type(m) for m in p.stg_head] == [torch.nn.Linear] and p.stg_head[0].in_features == 2 * (2 * 1024 + 3)
+    gc = p.get_global_cond(_batch()["obs"])
+    assert p.stg_input(gc) is gc
+
+
+def test_missing_config_keys_build_legacy_policy():
+    from square_assembly.factory import registry
+    import square_assembly.policies.diffusion.diffusion_policy_registrations  # noqa: F401
+    task = OmegaConf.create({"name": "t", "rgb_keys": RGB, "lowdim_keys": LOW, "obs_dims": {"robot0_eef_pos": 3},
+                             "action_dim": 3, "image_size": 16})
+    legacy = registry.create_policy("diffusion_stg", task, OmegaConf.create(POLICY_CFG))     # stg에 새 키 없음
+    assert len(legacy.stg_head) == 1 and legacy.stg_head[0].in_features == 2 * (2 * 1024 + 3)
+    cfg = OmegaConf.create(dict(POLICY_CFG, stg={"num_bins": 20, "head_hidden": [32, 32], "image_only": True}))
+    paper = registry.create_policy("diffusion_stg", task, cfg)
+    assert len(paper.stg_head) == 5 and paper.stg_head[0].in_features == 2 * 2 * 1024
+
+
+def _export_and_check(tmp_path, stg_cfg, **policy_kw):
+    policy = _policy_cfg(**policy_kw).eval()
+    task = OmegaConf.create({"name": "t", "rgb_keys": RGB, "lowdim_keys": LOW, "obs_dims": {"robot0_eef_pos": 3},
+                             "action_dim": 3, "image_size": 16})
+    save_run_config(str(tmp_path), task, OmegaConf.create(dict(POLICY_CFG, stg=stg_cfg)), "diffusion_stg")
+    ckpt = save_epoch_checkpoint(str(tmp_path), 1, policy)
+    export_dstg_ckpt(ckpt, str(tmp_path / "predictor.pt"))
+    reward = DstgReward(str(tmp_path / "predictor.pt"))
+    obs = _batch()["obs"]
+    with torch.no_grad():
+        probs = torch.softmax(policy.stg_head(policy.stg_input(policy.get_global_cond(obs))), -1)
+    assert torch.allclose(reward.d(obs), (probs * torch.arange(20.0)).sum(-1), atol=1e-5)
+    return torch.load(tmp_path / "predictor.pt", weights_only=False)
+
+
+def test_paper_head_export_gives_same_d_through_dstg_reward(tmp_path):
+    ex = _export_and_check(tmp_path, {"num_bins": 20, "head_hidden": [32, 32], "image_only": True}, **PAPER)
+    assert ex["head_hidden"] == [32, 32] and ex["image_only"] and ex["num_bins"] == 20
+
+
+def test_legacy_export_still_linear_and_marks_no_image_only(tmp_path):
+    ex = _export_and_check(tmp_path, {"num_bins": 20})
+    assert ex["head_hidden"] == [] and not ex.get("image_only")
