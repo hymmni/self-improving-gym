@@ -38,3 +38,4 @@ data/
 
 # W&B 로컬 런 로그 (재생성 가능)
 wandb/
+*.notion.json
