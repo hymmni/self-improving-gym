@@ -22,6 +22,8 @@ vip_grad_checkpoint: false  # true면 ResNet 층마다 활성값을 버리고 �
 
 stg:
   num_bins: 512
+  head_hidden: [256, 256]  # 논문 구성: MLP 헤드(키가 없는 옛 설정은 선형 헤드로 동작)
+  image_only: true         # 헤드는 이미지 특징만 읽는다(proprio는 UNet에만). 키가 없으면 global_cond 전체
   weight: ???              # λ 최종값 — 스모크에서 두 손실이 인코더에 주는 그래디언트 크기를 재서 정한다
   warmup_epochs: 530       # SADP처럼 학습 앞 절반 동안 0 -> weight 선형
   encoder_lr_scale: 0.1    # 인코더 lr = lr x 0.1 (DP 문헌 권장, train.yaml system.encoder_lr_scale 주석)
