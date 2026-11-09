@@ -1,0 +1,21 @@
+#!/bin/sh
+# 커밋 메시지가 `타입(스코프): 제목`과 `- ` 본문을 갖췄는지 검사한다.
+message=$(sed '/^# -* >8 -*$/,$d' "$1" | grep -v '^#' | sed '/^[[:space:]]*$/d')
+
+case $message in
+  "Merge branch "*|"Merge branches "*|"Merge remote-tracking branch "*|"Merge tag "*) exit 0 ;;
+  "Merge commit "*|"Merge pull request "*) exit 0 ;;
+  'Revert "'*|'Reapply "'*|"fixup! "*|"squash! "*|"amend! "*) exit 0 ;;
+esac
+
+if ! printf '%s\n' "$message" | sed -n 1p |
+    LC_ALL=C grep -Eq '^(feat|fix|refactor|docs|chore|test|wip)\([^)]+\)!?: .+'; then
+  echo "BLOCKED: 커밋 제목은 '타입(스코프): 제목' 형식이어야 합니다." >&2
+  echo "  타입: feat, fix, refactor, docs, chore, test, wip" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "$message" | sed 1d | grep -q '^- '; then
+  echo "BLOCKED: 커밋 본문에 '- '로 시작하는 설명이 필요합니다." >&2
+  exit 1
+fi

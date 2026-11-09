@@ -421,10 +421,11 @@ pytest projects/square_assembly/tests/
 
 ---
 
-## 4. 하네스/워크플로우 유틸 (상세는 CLAUDE.md)
+## 4. 하네스·레포 유틸 (하네스 규칙은 AGENTS.md)
 
 ```bash
-python scripts/execute.py <plan.md> [--model MODEL] [--checkpoint-every N] [--push]   # 플랜 task 자동 실행
-python scripts/merge_to_main.py [feat-branch] [--push] [--yes]                        # main 병합 (직접 git merge 금지)
-python scripts/scheduler.py {--time HH:MM | --in DURATION} [--resume ID | --cmd CMD] --prompt "..."  # 예약 실행
+python3 .harness/setup.py              # clone마다 한 번: git hook 연결, .gitignore 블록, superpowers 설치
+copier update --defaults               # 하네스 갱신 — chore/update-harness 브랜치에서, 이어서 setup.py
+python3 scripts/sync_remote.py {push|pull} user@host:/절대/경로/레포루트 [--only data,checkpoints,...] [--dry-run] [--delete]  # 서버와 data/checkpoints/outputs 동기화 (ADR-002)
+python3 scripts/notion_sync.py docs/paper/<draft>.md [--page <url|id>] [--dry-run] [--full]  # 논문 초안을 Notion에 단방향 동기화
 ```

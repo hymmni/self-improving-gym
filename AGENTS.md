@@ -1,27 +1,33 @@
-# Self-Improving Gym — 프로젝트 규칙 (AGENTS.md)
+# Agent Harness
 
 ## 🚀 세션 시작 체크리스트
 새 세션을 시작할 때 반드시 수행하라:
-1. `README.md`를 읽고 프로젝트 구조와 적용 방법을 파악한다.
-2. `docs/ARCHITECTURE.md`, `docs/ADR.md`, `docs/private/ENVIRONMENT.md`를 읽고 현재 구조·결정 이력·하드웨어 구성을 파악한다.
-3. `docs/superpowers/plans/*.state.json`에 `completed_at`이 비어있는 플랜이 있는지 확인해 이어서 할 작업이 있는지 파악한다.
+1. `README.md`를 읽고 프로젝트 구조를 파악한다.
+2. 가상환경이 있는지 확인한다(`venv/`, `.venv/`, `conda` 환경 등). 있으면 해당 환경에서 작업한다.
+   - conda: `conda activate <env>` / venv: `source venv/bin/activate`
+3. `docs/ARCHITECTURE.md`, `docs/ADR.md`를 읽고 현재 구조와 결정 이력을 파악한다. 문서에 "자리표시"가 남아 있으면 아직 채우지 않은 것이다. 사용자에게 알리고, 동의를 받으면 코드를 읽어 실제 내용으로 채운다.
+4. `docs/RESEARCH.md`가 있으면 읽고 그 규칙도 따른다. 하네스를 `research` 옵션으로 설치한 경우에만 있다.
+5. `git config core.hooksPath`가 `.githooks`가 아니면 사용자에게 알리고 동의를 받아 `python3 .harness/setup.py`를 실행한다.
+6. 현재 브랜치의 플랜(`docs/superpowers/plans/`)이 있으면 체크되지 않은 task부터 이어 간다.
+7. `continuation_plan.md`가 있으면 읽고 이전 세션의 중단 지점부터 이어서 시작한다.
 
-## 🧪 로봇 연구 프로토콜
-- **수정 범위 (Write Scope)**: 모든 소스 코드 수정은 이 레포지토리 내부에서 수행한다. (단, `references/`는 읽기 전용 — 아래 참조)
-- **환경 관리 (Environment)**: 패키지 설치 및 `requirements.txt`, `environment.yml` 생성/수정은 레포지토리 루트에서 관리한다. 서브프로젝트가 별도 스택/환경을 쓰는 경우 `docs/ADR.md`에 근거를 남기고 독립 conda env로 분리한다.
-- **참조 범위 (Read Scope)**: `references/`의 오픈소스 코드를 분석해 로직을 이식하되, 수정은 절대 금지한다.
-- **출처 표기**: `references/`에서 코드를 이식할 경우 `# From: references/<repo_name>/<path>` 형태로 주석을 남긴다. 리서치 노트(마크다운 요약, 논문 PDF 등 코드가 아닌 자료)는 인용 대상이 아니다 — 실제 `references/` 하위 구조는 `docs/ARCHITECTURE.md` 참고.
-- **실험 기록**: 의미 있는 변화(알고리즘 교체, 핵심 파라미터 변경) 발생 시 `experiments/`에 기록을 남긴다 (`experiments/LOG_TEMPLATE.md` 참고).
+## 🧪 작업 규칙
+- **수정 범위 (Write Scope)**: 모든 소스 코드 수정은 이 작업 레포지토리 내부에서 수행합니다. (단, `references/`는 읽기 전용 — 아래 참조)
+- **환경 관리 (Environment)**: 의존성은 프로젝트가 쓰는 파일(`pyproject.toml`, `requirements.txt`, `environment.yml`)에 추가하고, 이 파일들은 레포지토리 루트에서 관리합니다.
+- **실행 환경 (Docker)**: `docker-compose.yml`이 있으면 실행·테스트는 `docker compose exec dev <명령>`으로 합니다. 에이전트는 컨테이너 밖에서 작업합니다.
+- **참조 범위 (Read Scope)**: `references/` 폴더의 오픈소스 코드를 분석하여 로직을 이식하되, 수정은 절대 금지합니다.
+- **출처 표기**: `references/`에서 코드를 가져올 경우 `# From: references/repo_name/file.py`와 같이 주석을 남기십시오.
 
 ## 📐 아키텍처 & 기술 스택
 이 프로젝트의 스택·구조·결정 이력은 `docs/ARCHITECTURE.md`(현재 구조 스냅샷)와 `docs/ADR.md`(결정-이유-트레이드오프 로그)가 단일 진처다. 구조에 영향을 주는 작업 전에는 반드시 두 문서를 먼저 확인하라.
 
-AGENTS.md 자체는 특정 기술 스택을 전제하지 않는다 — 실제 채택 스택, 서브프로젝트별 예외는 `docs/ARCHITECTURE.md`·`docs/ADR.md`에서 확인하라. 하드웨어 환경(GPU 서버 여부, 디바이스 하드코딩 금지 등)은 `docs/private/ENVIRONMENT.md`(git 미추적, 로컬 전용 — 이 레포가 public이라 인프라 정보만 분리했다)에서 확인하라.
+이 문서는 특정 기술 스택을 전제하지 않는다. 실제 채택 스택과 구조는 프로젝트마다 다르므로 두 문서에서 확인하라. 이 하네스를 새 프로젝트에 처음 적용할 때는 두 문서에 해당 프로젝트의 실제 스택과 구조를 채워 넣는다. 인프라 정보(서버 주소, PC 구성)는 두 문서에 쓰지 않고 git에서 제외된 `docs/private/`에 쓴다. 프로젝트 레포가 public일 수 있다. 인프라 정보가 필요하면 `docs/private/`에서 찾는다.
 
 ## 📝 개발 프로세스
 - **기본 워크플로우 — 직접 세션 협업**: 새 설계나 구현 방향은 먼저 사용자와 논의해 확정한 뒤 진행한다. 작업 도중 설계 판단이 필요한 지점(접근 방식 선택, 시도가 실패했을 때의 다음 방향, 결과 해석)마다 먼저 확인받고, 사용자 모르게 재설계하지 않는다. 결과가 기대와 다르게 나오면 "안 됐다"로 뭉개지 말고, 무엇을 어떻게 시도했고 왜 그렇게 판단했는지 구체적으로 보고해 사용자가 직접 검증할 수 있게 한다.
-- **`scripts/execute.py` (보조 도구, 예외적 사용)**: 설계가 이미 사용자와 합의되어 여러 task로 기계적으로 쪼갤 수 있는 작업에만 쓴다. 실행 방식은 3단계 티어(평소=인터랙티브 task별 승인 / 바쁨=`--checkpoint-every N` / 급함=플랜 전체 무인 실행)로 나뉜다 — 어떤 티어를 쓸지도 실행 전에 사용자와 먼저 논의한다. 상세 워크플로우는 `harness` 스킬(`.claude/skills/harness/SKILL.md` — Codex도 이 파일을 읽으면 된다) 참고.
-- **Commit Message**: Scoped Conventional Commits 사용. **커밋 메시지(제목·본문)는 영어로 작성**한다. 괄호 안에 수정된 모듈 영역(`policy`, `env`, `data`, `config`, `harness` 등 베이스라인 이름이나 모듈)을 명시하고, **제목은 명사형이 아닌 서술형(동사 중심 문장)으로** 작성하며, **반드시 본문에 글머리기호(`-`)를 사용한 멀티라인 상세 설명을 추가**하라. 예시:
+- **상세 워크플로우**: 설계·플랜·실행 절차는 `harness` 스킬(`.agents/skills/harness/SKILL.md`)을 따른다.
+- **큰 작업 시작 전**: 여러 task짜리 큰 작업을 시작하기 전에 대략적인 토큰 소모 규모(작음/보통/큼)를 사용자에게 알린다. 필요하면 각 에이전트의 공식 수단으로 사용량을 확인해 근거로 제시한다.
+- **Commit Message**: Scoped Conventional Commits 사용. 타입은 `feat|fix|refactor|docs|chore|test|wip`만 쓴다. 다른 사람이 설정이나 코드를 바꿔야 하는 변경은 `feat(config)!:`처럼 콜론 앞에 `!`를 붙인다. **커밋 메시지(제목·본문)는 영어로 작성**한다. 괄호 안에 수정된 모듈 영역(`policy`, `env`, `data`, `config`, `harness` 등 베이스라인 이름이나 모듈)을 명시하고, **제목은 명사형이 아닌 서술형(동사 중심 문장)으로** 작성하며, **반드시 본문에 글머리기호(`-`)를 사용한 멀티라인 상세 설명을 추가**하라. 예시:
   ```
   feat(policy): add diffusion head to transformer backbone
 
@@ -29,54 +35,43 @@ AGENTS.md 자체는 특정 기술 스택을 전제하지 않는다 — 실제 �
   - expose num_diffusion_steps as Hydra config key (default 100)
   - update forward() signature: obs_seq → (action_pred, noise_pred)
   ```
-- 작업을 완료할 때마다 `experiments/`에 수정 사항 요약을 작성하라.
-- **세션 정리**: 작업 단위(태스크/phase/의미 있는 소결)가 끝날 때마다 컨텍스트가 충분히 쌓였는지 스스로 판단해 `/compact`, `/clear`, 또는 새 세션 시작을 사용자에게 먼저 권장하라. 사용자가 매번 기억해서 요청하지 않아도 되게 하기 위함이다.
+- **세션 정리**: 작업 단위(태스크/phase/의미 있는 소결)가 끝날 때마다 컨텍스트가 충분히 쌓였는지 스스로 판단해 컨텍스트 정리나 새 세션 시작을 사용자에게 먼저 권장하라.
+
+## 🌿 브랜치와 릴리즈
+- GitHub Flow를 따른다. 브랜치는 `main`과 `feat|fix|refactor|docs|chore/<주제>`만 쓴다. 주제는 소문자, 숫자, `.`, `_`, `-`로 쓴다. main은 언제든 버전 태그를 달 수 있는 상태로 유지한다.
+- 실패한 시도는 `git revert`한다.
+- main에 합치기 전에 브랜치에 main을 병합하고 그 상태로 테스트한다. 테스트한 뒤 main이 바뀌었으면 다시 병합하고 테스트한다. push한 브랜치는 rebase하지 않는다. force push는 `--force-with-lease`도 쓰지 않는다.
+- main 반영 방식은 `.copier-answers.yml`의 `main_via_pr`를 따른다. 파일이나 값이 없으면 `true`로 본다.
+  - `true`: main 반영은 PR로만 한다. 에이전트가 PR을 만들고(`gh`가 없으면 링크 안내) 사람이 웹에서 일반 병합(merge commit)한다. 에이전트는 main에 직접 커밋이나 병합을 하지 않고, 공유 레포의 main에 push하지 않는다.
+  - `false`: 사람이 로컬에서 `git merge --no-ff <브랜치>`로 main에 병합하고 push한다. 에이전트는 main에 커밋·병합·push하지 않고, 필요하면 실행할 명령을 사용자에게 알려 사용자가 터미널에서 직접 실행하게 한다.
+  - 두 방식 모두 에이전트가 main에 커밋·병합·push하는 명령은 위험 명령 차단 스크립트가 막는다.
+- 버전 태그 `vX.Y.Z`는 사람들에게 새 버전으로 올리라고 알릴 때 main에 단다. 버그 수정은 Z, 기능 추가는 Y, 다른 사람이 설정이나 코드를 바꿔야 하는 변경은 X를 올린다. 1.0.0 전에는 그런 변경도 Y를 올린다. 옛 버전은 따로 고치지 않는다. main에서 고치고 새 버전을 낸다.
+  - `true`: release-please가 릴리즈 PR을 열어 두고 병합될 때마다 갱신한다. 사람이 릴리즈 PR을 병합하면 버전, `CHANGELOG.md`, 태그, GitHub Release가 만들어진다. 태그를 직접 달지 않는다.
+  - `false`: 사람이 프로젝트의 버전 표기(`pyproject.toml` 등)를 고쳐 main에 반영한 뒤 `git tag -a vX.Y.Z -m "<바뀐 점>"`으로 태그를 달고 push한다. GitHub Release는 필요할 때만 만든다.
+- 배포·실행 환경은 `git checkout vX.Y.Z`로 태그만 쓴다.
+- 브랜치와 커밋 규칙은 `.githooks/`가 검사한다. hook을 우회하거나 `core.hooksPath`를 다른 값으로 바꾸지 않는다. 하네스 도입 전에 갈라져 `.githooks/`가 없는 브랜치에서는 main을 병합할 때까지 검사가 동작하지 않는다.
+
+## 📦 작업 산출물
+- `scratch/`: git에서 제외한다. 일회용 스크립트는 여기에만 쓰고, 계속 쓸 코드는 `scripts/`나 테스트로 옮긴다.
+
+## 🐞 하네스 문제 보고
+- 하네스 파일(`AGENTS.md`, `.agents/`, `.githooks/`, `.harness/`, 에이전트별 설정 폴더, `docs/RESEARCH.md`)의 버그나 개선점을 발견하면 사용자에게 알린다. 사용자가 동의하면 템플릿 레포에 이슈를 올린다.
+- 템플릿 레포는 `.copier-answers.yml`의 `_src_path`다. 이 파일이 없으면 이 레포가 템플릿 레포다. `gh:owner/repo`면 `gh issue create -R owner/repo --label bug`(개선 제안은 `--label enhancement`)로 올리고, `gh`가 없으면 `https://github.com/owner/repo/issues/new/choose` 링크를 안내한다.
+- 본문에는 문제, 재현 방법, 기대한 동작, 하네스 버전(`_commit`), 에이전트 종류를 적는다. 템플릿 레포는 public이므로 프로젝트 이름, 코드, 파일 경로, 인프라 정보는 넣지 않는다.
+- 설치된 프로젝트(`.copier-answers.yml`이 있는 레포)에서는 하네스 파일을 직접 고치지 않는다. 고친 내용은 `copier update` 뒤에도 남아 템플릿의 수정과 겹치고, 다른 프로젝트에는 전달되지 않는다. 템플릿 레포에서는 직접 고친다.
+- 문제를 피해 갈 때도 hook이나 차단 스크립트를 끄지 않는다(`--no-verify`, `core.hooksPath` 변경, 하네스 파일 수정). 규칙 안의 다른 방법을 쓰거나, 막힌 명령이 정당하면 사용자에게 알려 터미널에서 직접 실행하게 한다. 그런 방법이 없으면 멈추고 사용자의 결정을 따른다.
+- 이슈가 템플릿에 반영되면 `copier update --defaults`로 받는다.
 
 ## 🤖 모델 선택 가이드
-작업 복잡도에 따라 적절한 모델을 사용자에게 제안하라. 클로드는 실행 중인 세션의 모델을 변경할 수 없으므로, 인터랙티브 세션의 모델 선택은 **세션 시작 전**에 이루어진다. `execute.py`를 쓰는 예외적인 경우엔 `--model`로 플랜 전체의 모델을 지정한다(task별 세분화는 지원하지 않는다).
+작업 복잡도에 맞는 모델 등급을 사용자에게 제안하라. 에이전트는 실행 중인 세션의 모델을 직접 바꿀 수 없으므로, 모델 선택은 세션 시작 전에 사용자가 한다. 등급별 모델 이름은 에이전트마다 다르다.
 
-| 모델 | 적합한 작업 |
+| 등급 | 적합한 작업 |
 |---|---|
-| **fable** | 최고 난이도 — 복합 연구 설계, 장시간 자율 작업, 가장 까다로운 디버깅 |
-| **opus** | 신규 아키텍처 설계, 복잡한 알고리즘 구현, 다단계 추론이 필요한 작업 |
-| **sonnet** | 일반 코딩, 리팩토링, 대부분의 day-to-day 작업 (기본값) |
-| **haiku** | 단순 수정, 문서 작성, 빠른 조회성 작업 |
-
-### 작업 시작 전 모델 추천 프로토콜
-새 작업(의미 있는 단위의 구현/실험)을 시작하기 전에 작업 복잡도를 평가해 적합한 모델을 판단하고, **모델 변경이 이득이라고 판단될 때만 사용자에게 변경을 요청**하라:
-- 추천 모델 ≠ 현재 세션 모델이고, 작업 규모가 커서 토큰 절약/품질 향상 효과가 뚜렷하면 → 사용자에게 `/model <추천모델>` 변경을 요청하고 응답을 기다린다.
-- 추천 모델 == 현재 모델이거나, 작업이 짧아 변경 오버헤드 대비 이득이 없으면 → 요청 없이 그대로 진행한다.
-
-`execute.py`는 `--model` → sonnet(기본값) 순으로 모델을 결정하며, 플랜 전체에 적용된다:
-```bash
-python3 scripts/execute.py docs/superpowers/plans/<file>.md --model sonnet
-```
+| **최고 난이도** | 복합 연구 설계, 장시간 자율 작업, 가장 까다로운 디버깅 |
+| **설계·복잡한 구현** | 신규 아키텍처 설계, 복잡한 알고리즘 구현, 다단계 추론이 필요한 작업 |
+| **일반 작업** | 일반 코딩, 리팩토링, 대부분의 day-to-day 작업 (기본값) |
+| **단순 작업** | 단순 수정, 문서 작성, 빠른 조회성 작업 |
 
 ## 🛠️ 유틸리티 명령어
-연구/데이터 수집·시각화 스크립트(`watch_*.py`, `record_*.py`, `drive_*.py` 등) 전체 목록과 옵션은 `COMMANDS.md`를 참고하라. 아래는 하네스 자체의 메타 스크립트다.
-- `python scripts/execute.py <plan.md> [--model MODEL] [--checkpoint-every N] [--push]` # 클로드의 자가 교정 실행 (하네스 내부용, 예외적 사용 — 위 개발 프로세스 참고)
-- `python scripts/merge_to_main.py <feat-branch> [--push]` # feature 브랜치를 main에 병합 (pull→rebase→`--no-ff`)
-- `python scripts/scheduler.py {--time HH:MM | --in 2h30m} [--resume <id> | --cmd "..."] --prompt "..."` # 지정 시각에 Claude/Codex 세션 또는 명령 실행 (외부 터미널용)
-- `python scripts/sync_remote.py {push|pull} user@host:/절대/경로/레포루트 [--only data,checkpoints,...] [--project 이름] [--dry-run] [--delete]` # SSH 원격 서버와 data/checkpoints/outputs/results 동기화 (rsync, 보통 호스트에서 실행 — ADR-002)
-
-### ⏰ 세션 연속 규칙
-리밋을 넘겨 이어가려면 `scripts/scheduler.py`로 리셋 시각에 재실행을 예약한다. **추측해서 시각을 자동계산하지 않는다** — 리셋 시각이 필요하면 공식값을 조회한다(Claude는 `claude -p "/usage"`, Codex는 해당 CLI의 사용량 조회).
-
-**클로드가 직접 실행하지 마라.** `scheduler.py`는 지금 세션이 끝난 뒤(리밋으로 종료된 뒤)에도 살아있어야 하는 예약이라, 클로드가 지금 세션의 Bash 툴로 띄우면 세션 종료 시 함께 죽어 의미가 없다 — 실행할 명령어만 제시하고, **사용자가 자신의 터미널에서 직접 실행**하게 하라.
-
-- **인터랙티브 세션 재개**: `--resume <세션ID>`로 예약한다. 단, 그 세션을 다른 곳에서 동시에 계속 쓰고 있는 상태라면 겹쳐 발화해 fork가 생길 수 있으니 쓰지 않는다 — 그런 경우엔 리셋 후 수동으로 이어간다.
-  ```bash
-  python3 scripts/scheduler.py --time HH:MM --resume <세션ID> --prompt "continue"
-  ```
-- **execute.py(헤드리스)**: `<plan>.state.json`의 완료 task를 건너뛰므로 리밋으로 중단돼도 그냥 재실행하면 이어진다. 원하면 그 재실행을 리셋 시각에 예약한다.
-  ```bash
-  python3 scripts/scheduler.py --time HH:MM --cmd "python3 scripts/execute.py <plan.md>"
-  ```
-
-`execute.py` 등 여러 task짜리 큰 작업을 시작하기 직전(평소 승인 타이밍)에는 리셋 시각 재실행 예약이 필요한지 사용자에게 먼저 물어본다.
-
-### 🔀 main 병합 규칙 (CRITICAL)
-사용자가 feature 브랜치를 **main에 병합**해달라고 요청하면:
-- **반드시 `scripts/merge_to_main.py` 사용을 안내하라.** `git merge`/`git rebase`를 직접 치지 마라. 이유: 이 스크립트가 `pull --ff-only` → `rebase` → `--no-ff merge` 순서와 충돌 시 자동 abort를 보장한다.
-- **클로드가 직접 실행하지 마라.** main/origin을 건드리는 작업이므로, 실행할 명령어(`python3 scripts/merge_to_main.py <feat-branch>`)를 제시하고 **사용자가 직접 실행**하게 하라. (사용자가 명시적으로 "네가 실행해"라고 하면 그때만 `--yes`를 붙여 실행)
-- task 압축(squash)은 feature 브랜치 내부에서만 일어나며, main 병합 시에는 각 task 커밋을 그대로 보존한다.
+- `python3 .harness/setup.py` # clone마다 한 번 실행: git hook 연결, `.gitignore` 블록과 공유 파일 검사, 설치된 에이전트에 `superpowers` 설치
+- `copier update --defaults` # 하네스 갱신. `--defaults`는 이전 답변을 그대로 쓴다. 없으면 터미널이 없는 에이전트 셸에서 실패한다. 사용자 동의를 받아 브랜치에서 실행하고, 이어서 `python3 .harness/setup.py`를 실행한 뒤 충돌 표시를 해결한다

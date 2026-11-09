@@ -10,8 +10,9 @@ projects/
   grasp_carry/       # 은닉 물성 기반 파지·운반 (JAX/Haiku, pymunk 물리)
   square_assembly/   # robomimic Diffusion Policy + DDPO self-improvement (PyTorch, 별도 conda env)
 docs/                # ARCHITECTURE.md·ADR.md(구조/결정 이력), superpowers/(플랜·스펙)
-experiments/         # 의미 있는 변화가 있을 때마다 남기는 실험 기록
-scripts/             # 하네스 실행기 (execute.py, merge_to_main.py 등) — 상세는 CLAUDE.md
+experiments/         # 실험 기록 (git 미추적, docs/RESEARCH.md)
+scripts/             # 레포 유틸 (sync_remote.py, notion_sync.py 등) — 목록은 COMMANDS.md
+AGENTS.md, .agents/, .harness/, .githooks/   # 에이전트 하네스 (agent-harness 템플릿)
 docker/, docker-compose*.yml, DOCKER.md   # 두 스택(JAX/PyTorch)을 하나로 통합한 개발 컨테이너
 references/          # 원본 참조 코드 (읽기 전용)
 ```
@@ -118,12 +119,22 @@ python -m square_assembly.scripts.train task=square
 
 ## 4. 하네스 / 개발 워크플로우
 
-이 레포는 Claude Code 기반 자가 교정 하네스(`scripts/execute.py`)로도 작업을 진행합니다. 세션 시작 체크리스트, 플랜 실행 방법, main 병합 규칙 등 개발 프로세스 전체는 `CLAUDE.md`가 단일 진처입니다.
+에이전트 작업 규칙은 [agent-harness](https://github.com/hymmni/agent-harness) 템플릿(copier, `research` 옵션)으로 설치한 `AGENTS.md`와 `docs/RESEARCH.md`가 단일 진처입니다. `CLAUDE.md`는 `@AGENTS.md` 한 줄입니다. 하네스 파일은 직접 고치지 않고 `copier update`로 갱신합니다(명령은 `COMMANDS.md` 4절).
+
+- clone마다 한 번 `python3 .harness/setup.py`를 실행합니다(git hook 연결, `.gitignore` 블록, superpowers 설치).
+- main 반영은 PR로만 합니다(`main_via_pr: true`). 브랜치 이름은 `feat|fix|refactor|docs|chore/<주제>`입니다.
+- release-please 릴리즈 PR이 열리려면 GitHub Settings → Actions → General에서 "Allow GitHub Actions to create and approve pull requests"를 켜야 합니다.
+
+### 이 프로젝트 전용 규칙 (에이전트도 따른다)
+
+- 연구·데이터 수집·시각화 스크립트 목록과 옵션은 `COMMANDS.md`에 있다.
+- 서브프로젝트가 별도 스택·환경을 쓰면 `docs/ADR.md`에 근거를 남기고 독립 conda env로 분리한다.
 
 ## 5. 문서 지도
 
 - `docs/ARCHITECTURE.md` — 디렉토리 구조·기술 스택 스냅샷
 - `docs/ADR.md` — 결정-이유-트레이드오프 로그
 - `docs/private/ENVIRONMENT.md` — 로컬 하드웨어 구성 (git 미추적)
-- `experiments/` — 실험 기록 (`LOG_TEMPLATE.md` 참고)
+- `docs/RESEARCH.md` — 연구 규칙 (실험 기록, 하드웨어, fork)
+- `experiments/` — 실험 기록 (양식은 `.harness/LOG_TEMPLATE.md`)
 - `docs/superpowers/` — 브레인스토밍 스펙·플랜 (하네스용)

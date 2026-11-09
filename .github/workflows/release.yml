@@ -1,0 +1,17 @@
+# main에 병합될 때마다 릴리즈 PR을 열거나 갱신한다. 릴리즈 PR을 병합하면 vX.Y.Z 태그와 GitHub Release가 생긴다.
+# 버전은 커밋 타입으로 정한다: feat → minor, 나머지 표시 타입 → patch, `!` → major.
+name: release-please
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json

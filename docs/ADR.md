@@ -134,3 +134,8 @@ off가 기본이지만 DPPO 런에선 켠다(스모크 실측 adv_std=32). 두 �
 **트레이드오프**: 논문 구성 헤드는 입력 차원이 달라(4114 -> 4096) 기존 `diffusion_stg` 체크포인트의 헤드를 이어받지 못하므로 새로 학습해야 한다. 같은 공유 구조에서
 MLP/이미지-only가 선형/전체 입력보다 낫다는 측정은 아직 없다(선형 대 MLP 오프라인 비교는 분할 1개뿐). 헤드를 따로 읽는 `vip_stg_reward.py`(캐시 VIP 예측기, `obs_parts`)는
 공유 백본 경로가 아니라 바꾸지 않았다.
+
+### ADR-011: 자체 하네스를 agent-harness 템플릿(copier)으로 교체
+**결정**: `scripts/execute.py`·`merge_to_main.py`·`scheduler.py`와 레포 안에서 고쳐 쓰던 `CLAUDE.md`·harness 스킬을 지우고, [agent-harness](https://github.com/hymmni/agent-harness) 템플릿을 copier로 설치한다(`research: true`, `main_via_pr: true`, `with_docker: false`). 규칙은 `AGENTS.md`·`docs/RESEARCH.md`, 플랜 실행은 superpowers의 executing-plans/subagent-driven-development가 맡는다. 템플릿에 없는 프로젝트 전용 규칙은 `README.md` 4절에 둔다.
+**이유**: 하네스를 여러 레포·에이전트(Claude Code, Codex, Antigravity)에서 같은 규칙으로 쓰고 `copier update`로 한꺼번에 갱신하기 위해서다. 위험 명령 차단과 브랜치·커밋 규칙을 지침이 아니라 hook으로 강제한다.
+**트레이드오프**: 하네스 파일은 이 레포에서 직접 고치지 않고 템플릿 레포에서 고쳐 받아야 한다. main 반영이 PR로만 가능해져 사람도 main에 직접 커밋·push할 수 없다. 브랜치 이름이 `feat|fix|refactor|docs|chore/<주제>`로 제한돼, Claude Code 워크트리 서브에이전트가 만드는 `worktree-agent-*` 브랜치에서는 커밋이 막힌다. 실험 기록 경로가 `experiments/<브랜치>/YYYY-MM-DD-주제.md`로 바뀌고, 이전 기록은 옛 경로에 그대로 둔다.

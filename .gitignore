@@ -1,28 +1,12 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
-# Docker 환경변수 (WandB API 키 등)
-.env
-
-# Harness — CLAUDE.md, docs/(private/ 제외), scripts/, .claude/skills/는 git 추적,
-# 나머지 하네스 파일은 로컬 전용.
-# 앞에 '/'를 붙여 레포 루트에만 적용시킨다 — 앵커 없이 'docs/'처럼 두면 square_assembly/docs/,
-# square_assembly/src/square_assembly/scripts/ 같은 서브프로젝트 내부의 같은 이름 디렉토리까지 전부
-# 무시돼버린다(square_assembly 통합 때 실제로 발견됨: square_assembly의 scripts/train.py가 이 규칙 때문에
-# 조용히 추적 안 될 뻔했다).
-/.claude/*
-!/.claude/skills/
-/docs/private/
-/experiments/
+# 프로젝트 전용 제외 규칙. 하네스 공통 규칙(.claude/, docs/private/, experiments/, references/,
+# 대용량 파일, wandb/, outputs/, .env)은 아래 managed 블록에 있다 — 블록 안은 .harness/setup.py가 덮어쓴다.
+# 앞에 '/'를 붙여 레포 루트에만 적용시킨다 — 앵커 없이 두면 서브프로젝트 내부의 같은 이름 디렉토리까지 무시된다.
 /phases/
-/references/
-continuation_plan.md
-
-# 대용량 데이터/체크포인트 (ADR-002)
-*.zarr
-*.hdf5
-*.pth
 checkpoints/
 
 # pointmass_notebook.ipynb 실행 시 생성되는 런타임 산출물 (재실행으로 재생성 가능)
@@ -30,12 +14,30 @@ pointmass_dataset*.pkl
 ten_tight_pointmass_*.png
 __temp__.mp4
 
-# 관찰 도구 산출물 (플롯 등, 재생성 가능)
-outputs/
-
 # 데모 데이터셋 (재생성 가능, ADR-002)
 data/
 
-# W&B 로컬 런 로그 (재생성 가능)
-wandb/
+# Notion 동기화 캐시
 *.notion.json
+
+# >>> harness gitignore (managed) >>>
+/.claude/*
+!/.claude/skills/
+!/.claude/settings.json
+/docs/private/
+/references/
+/scratch/
+/continuation_plan.md
+/.superpowers/
+.env
+/experiments/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.zarr
+*.hdf5
+*.h5
+wandb/
+outputs/
+# <<< harness gitignore (managed) <<<

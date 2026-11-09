@@ -1,0 +1,3 @@
+#!/bin/sh
+# 병합 커밋에도 pre-commit과 같은 규칙을 적용한다.
+exec "$(dirname "$0")/pre-commit"
