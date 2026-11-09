@@ -17,9 +17,9 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
   RuntimeError를 낼 수 있다(2026-09-09 서버에서 실측) — `NUMBA_CACHE_DIR=/tmp/numba_cache`
   같은 쓰기 가능한 경로를 지정해 우회한다.
 
-사용(컨테이너 WORKDIR=/workspace, 즉 레포 루트에서 실행 기준):
+사용(컨테이너 WORKDIR=/workspace, 즉 레포 루트에서 실행 기준. 이미지에 venv가 둘이라 PATH에 python이 없다 — torch venv를 쓴다):
     MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache \
-    python -m square_assembly.scripts.collect_square_scripted_intervention \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.collect_square_scripted_intervention \
         --base-ckpt projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt \
         --episodes 20 --max-steps 700 \
         --out data/square_scripted_intv_v1.hdf5
