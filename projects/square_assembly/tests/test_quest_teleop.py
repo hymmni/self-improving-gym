@@ -187,10 +187,17 @@ def test_mouse_input_disabled_ignores_motion_and_wheel():
 
     _, c = _make()
     interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
-    before = (c.target_xy, c.target_yaw)
+    calls = []
+    c.set_cursor = lambda *a, **k: calls.append("set_cursor")   # 가드가 없으면 여기로 들어온다
+    c.wheel = lambda *a, **k: calls.append("wheel")
+    interv._cur = np.zeros(2)   # _apply_target이 set_cursor까지 가도록
+    xy = None if c.target_xy is None else np.array(c.target_xy, float)
+    yaw = c.target_yaw
     interv._on_motion(100, 100)
     interv._on_wheel(3)
-    assert (c.target_xy, c.target_yaw) == before
+    assert calls == []
+    assert (c.target_xy is None) if xy is None else np.testing.assert_array_equal(c.target_xy, xy) is None
+    assert c.target_yaw == yaw
     assert not interv._magnet_on()
     assert "Quest" in interv._HELP[1]
 
