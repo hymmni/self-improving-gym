@@ -119,8 +119,11 @@ class QuestTeleopController(MouseTeleopController):
         super().take_over(state)
         self._ref, self._armed = None, False
         self._prev_p = np.asarray(state["grip"], float).copy()
-        self.target_p, self.target_R = self._prev_p.copy(), Rot.from_matrix(state["R"])
+        self._latch(self._prev_p, Rot.from_matrix(state["R"]))
         self._sync_hud()
+
+    def _latch(self, p, R):
+        self.target_p, self.target_R = p.copy(), R
 
     def set_cursor(self, world_xy):
         pass
@@ -144,25 +147,30 @@ class QuestTeleopController(MouseTeleopController):
 
         pose = np.asarray(pose, float)
         valid = pose.shape == (7,) and np.all(np.isfinite(pose)) and np.linalg.norm(pose[3:]) > 1e-6
+        if self.target_p is None:   # reset 뒤 첫 스텝 — 지금 EE를 한 번 잡아 둔다
+            self._latch(p, R)
         if grip < self.grip_threshold:
+            if self._ref is not None:   # 놓는 스텝 — 그 순간의 실제 EE를 목표로 고정한다
+                self._latch(p, R)
             self._armed, self._ref = True, None
         if self._ref is None and valid and self._armed and grip >= self.grip_threshold:
             cp, cR = self.axes @ pose[:3], Rot.from_matrix(self.axes @ Rot.from_quat(pose[3:]).as_matrix() @ self.axes.T)
             self._ref = (cp, cR, p.copy(), R)
             self._fp.x_prev = self._fr.x_prev = None
+            self._fp.dx_prev, self._fr.dx_prev = np.zeros(3), np.zeros(3)
             self._rv, self._a_rot = np.zeros(3), np.zeros(3)
 
-        if self._ref is None:   # 안 잡았다 — 실제 EE에 서 있는다
-            self.target_p, self.target_R = p.copy(), R
-        elif valid:
+        if self._ref is not None and not valid:
+            # 잡은 채 포즈를 못 읽었다 — 목표는 직전 것을 그대로 두고, 놓은 것으로 쳐서 다시 잡아야 따라간다
+            # (낡은 기준·필터 상태로 재개돼 튀는 것을 막는다)
+            self._armed, self._ref = False, None
+        if self._ref is not None:   # 안 잡았으면 목표는 놓는 순간 고정한 것 그대로 — 실제 EE를 따라가지 않는다
             ref_cp, ref_cR, ref_p, ref_R = self._ref
             cp = self.axes @ pose[:3]
             cR = Rot.from_matrix(self.axes @ Rot.from_quat(pose[3:]).as_matrix() @ self.axes.T)
             self._rv = _near((cR * ref_cR.inv()).as_rotvec(), self._rv)
             self.target_p = ref_p + self.pos_scale * (self._fp.filter(cp) - ref_cp)
             self.target_R = Rot.from_rotvec(self.rot_scale * self._fr.filter(self._rv)) * ref_R
-        else:                   # 포즈를 못 읽었다 — 직전 목표 대신 제자리
-            self.target_p, self.target_R = p.copy(), R
         self._sync_hud()
 
         a[:3] = np.clip((self.kp * (self.target_p - p) - self.kd * v) / _POS_SCALE, -self.pos_cap, self.pos_cap)

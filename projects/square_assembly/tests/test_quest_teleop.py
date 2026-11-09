@@ -94,9 +94,32 @@ def test_release_holds_actual_pose():
     r.set(pos=[0.05, 0, 0])
     c.action(_state())
     r.set(grip=0.0)
-    c.action(_state(pos=(0.0, 0.0, 1.0 + 0.0)))  # 놓는 스텝
-    a = c.action(_state(pos=(0.0, 0.02, 1.0)))
-    np.testing.assert_allclose(a[:3], 0, atol=1e-6)
+    c.action(_state(pos=(0.0, 0.02, 1.0)))  # 놓는 스텝: EE는 0.02m만 감
+    np.testing.assert_allclose(c.target_p, [0.0, 0.02, 1.0], atol=1e-9)
+    a = c.action(_state(pos=(0.0, 0.02, 0.99)))  # 처짐: 목표는 고정이라 밀어 올려야 한다
+    np.testing.assert_allclose(c.target_p, [0.0, 0.02, 1.0], atol=1e-9)
+    assert a[2] > 0 and abs(a[0]) < 1e-6 and abs(a[1]) < 1e-6
+
+
+def test_take_over_holds_pose():
+    r, c = _make(kp=1.0, kd=0.0)
+    c.take_over(_state())
+    a = c.action(_state(pos=(0.0, 0.0, 0.99)))
+    assert a[2] > 0
+    np.testing.assert_allclose(c.target_p, [0, 0, 1.0], atol=1e-9)
+
+
+def test_invalid_pose_while_held_requires_regrip():
+    r, c = _make(kp=1.0, kd=0.0)
+    _engage(r, c)
+    r.set(pos=[0.01, 0, 0])
+    c.action(_state())
+    r.set(pos=[5, 5, 5], quat=[0, 0, 0, 0])
+    c.action(_state())
+    held = c.target_p.copy()  # 직전 목표 유지
+    r.set(quat=_ID)  # 포즈 복귀 — 그립은 그대로 눌림: 재개해도 목표가 튀지 않는다
+    c.action(_state())
+    np.testing.assert_array_equal(c.target_p, held)
 
 
 def test_action_is_clipped():
@@ -152,6 +175,8 @@ def test_rotation_near_pi_is_continuous():
 
 def test_set_cursor_and_wheel_are_noops():
     r, c = _make()
+    c.take_over(_state())
+    before = c.target_xy.copy()
     c.set_cursor((1.0, 1.0))
     assert c.wheel(3) is False
-    assert c.target_xy is None or not np.allclose(c.target_xy, [1.0, 1.0])
+    np.testing.assert_array_equal(c.target_xy, before)
