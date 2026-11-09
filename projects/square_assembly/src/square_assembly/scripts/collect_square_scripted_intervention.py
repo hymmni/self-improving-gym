@@ -45,7 +45,8 @@ mouse와 같은 Tk 창·키 조작을 쓰되 마우스는 무시하고 Quest 3S 
   2. Quest XRoboToolkit 앱에서 이 PC의 IP를 선택한다.
   3. **모니터를 정면으로 본 채** 오른쪽 Meta 버튼을 길게 눌러 recenter한다.
   4. `--mode quest [--human-only --task can]`으로 실행한다. 그립을 누른 동안 팔이 따라오고, 트리거로 그리퍼를
-     조작한다. 쥔 물체를 넘겨받을 때는 트리거를 당긴 채 Tab을 누른다.
+     조작한다. 쥔 물체를 넘겨받을 때는 트리거를 당긴 채 Tab을 누른다. 손목은 수직 아래로 고정되고 오른쪽
+     조이스틱 좌우로 야우를 돌린다(컨트롤러 회전을 따르게 하려면 `--quest-rot pose`).
 
 창이 작으면 최대화 버튼을 누르거나 테두리를 끌어 키운다 — 다 그린 화면을 창에 맞춰 늘려 띄운다. `--zoom 1.5`는 처음 창 크기,
 `--fullscreen`은 전체화면으로 시작(실행 중 F11로 오간다).
@@ -642,7 +643,10 @@ def main():
     ap.add_argument("--task", choices=["square", "can"], default="square",
                     help="--human-only에서만 쓴다(정책이 있으면 체크포인트의 task를 쓴다)")
     ap.add_argument("--quest-pos-scale", type=float, default=1.0, help="[quest] 손 이동 배율(1.0=1:1)")
-    ap.add_argument("--quest-rot-scale", type=float, default=1.0, help="[quest] 손 회전 배율")
+    ap.add_argument("--quest-rot-scale", type=float, default=1.0, help="[quest] 손 회전 배율(--quest-rot pose일 때)")
+    ap.add_argument("--quest-rot", choices=["stick", "pose"], default="stick",
+                    help="[quest] stick: 손목 아래 고정 + 오른쪽 조이스틱 좌우로 야우, pose: 컨트롤러 회전 추종")
+    ap.add_argument("--quest-yaw-rate", type=float, default=60.0, help="[quest] 조이스틱 끝까지 밀 때 야우 속도(도/s)")
     ap.add_argument("--quest-grip-threshold", type=float, default=0.9, help="[quest] 이 이상 쥐면 클러치 연결")
     ap.add_argument("--quest-grip-release-threshold", type=float, default=0.7,
                     help="[quest] 클러치가 물린 뒤 이 미만으로 내려가야 놓음(히스테리시스)")
@@ -661,7 +665,8 @@ def main():
                    grip_threshold=args.quest_grip_threshold,
                    trigger_threshold=args.quest_trigger_threshold,
                    grip_release_threshold=args.quest_grip_release_threshold,
-                   euro_min_cutoff=args.quest_euro_min_cutoff, euro_beta=args.quest_euro_beta),
+                   euro_min_cutoff=args.quest_euro_min_cutoff, euro_beta=args.quest_euro_beta,
+                   rot_source=args.quest_rot, yaw_rate=np.deg2rad(args.quest_yaw_rate)),
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step), rot_cap=args.rot_cap))
 

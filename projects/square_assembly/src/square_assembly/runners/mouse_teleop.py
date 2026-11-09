@@ -244,6 +244,14 @@ class MouseTeleopController:
         self._z_err_sum = float(np.clip(self._z_err_sum + err, -0.1, 0.1))
         a[2] = np.clip((self.kp_z * err + self.ki_z * self._z_err_sum) / _POS_SCALE, -self.z_cap, self.z_cap)
 
+        a[3:6] = self.yaw_rot(state, R)
+
+        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
+        a[6] = self.grip_cmd
+        return a
+
+    def yaw_rot(self, state, R):
+        """손목 수직 아래 + target_yaw(손목 범위 안으로 접음)로 가는 회전 delta 액션(3)."""
         lo, hi = self.yaw_limits(state)
         yaw = self.yaw
         if self.target_yaw is not None:
@@ -253,11 +261,7 @@ class MouseTeleopController:
                 self.target_yaw = float(near[np.argmin(np.abs(same - near))])
             # 반 바퀴 안쪽만 앞세운다 — rot_delta_toward는 가까운 쪽으로 돌므로, 이래야 굴린 방향으로 돈다
             yaw = yaw + np.clip(self.target_yaw - yaw, -2.5, 2.5)
-        a[3:6], _ = rot_delta_toward(R, yaw, self.rot_cap)
-
-        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
-        a[6] = self.grip_cmd
-        return a
+        return rot_delta_toward(R, yaw, self.rot_cap)[0]
 
 
 class TopDownMap:
@@ -928,7 +932,8 @@ class MouseTeleopIntervention:
         row2 = [("key", "S"), ("text", "pause"), ("key", "Q"), ("text", "give up")]
         row2 += ([("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"), ("key", "Wheel"), ("text", "yaw"),
                   ("key", "LMB"), ("text", "grip")] if self.mouse_input else
-                 [("text", "Quest:"), ("key", "Grip"), ("text", "move"), ("key", "Trigger"), ("text", "gripper")])
+                 [("text", "Quest:"), ("key", "Grip"), ("text", "move"), ("key", "Trigger"), ("text", "gripper"),
+                  ("key", "Stick"), ("text", "yaw")])
         hud.row(d, (lx, ly + 64 * k), row2, size=sz)
         now = time.time()
         if self._toast is not None and now < self._toast[1]:

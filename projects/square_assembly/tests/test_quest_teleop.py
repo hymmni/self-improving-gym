@@ -14,8 +14,11 @@ _ID = [0, 0, 0, 1.0]
 class FakeReader:
     def __init__(self):
         self.pose, self.grip, self.trigger = np.array([0, 0, 0, *_ID], float), 0.0, 0.0
+        self.stick = np.zeros(2)
 
-    def set(self, pos=None, quat=None, grip=None, trigger=None):
+    def set(self, pos=None, quat=None, grip=None, trigger=None, stick=None):
+        if stick is not None:
+            self.stick = np.asarray(stick, float)
         if pos is not None:
             self.pose[:3] = pos
         if quat is not None:
@@ -26,7 +29,7 @@ class FakeReader:
             self.trigger = trigger
 
     def __call__(self):
-        return self.pose.copy(), self.grip, self.trigger
+        return self.pose.copy(), self.grip, self.trigger, self.stick.copy()
 
 
 def _state(pos=(0.0, 0.0, 1.0), R=_DOWN):
@@ -36,6 +39,7 @@ def _state(pos=(0.0, 0.0, 1.0), R=_DOWN):
 def _make(**kw):
     r = FakeReader()
     kw.setdefault("euro_min_cutoff", 1e6)  # 필터를 사실상 끈다
+    kw.setdefault("rot_source", "pose")  # 기존 테스트는 컨트롤러 회전 추종 기준
     return r, QuestTeleopController(reader=r, **kw)
 
 
@@ -257,3 +261,33 @@ def test_floor_clamps_target_z():
     c.action(_state(pos=(0, 0, 0.9)))
     assert c.target_p[2] >= c.z_min - 1e-12
     assert c.target_p[2] == c.z_min
+
+
+def test_stick_mode_ignores_controller_rotation_and_levels_wrist():
+    tilted = Rot.from_rotvec([0.2, 0, 0]).as_matrix() @ _DOWN
+    r, c = _make(rot_source="stick")
+    _engage(r, c, _state(R=tilted))
+    r.set(quat=Rot.from_rotvec([0, 0.5, 0]).as_quat())
+    a = c.action(_state(R=tilted))
+    assert a[3] < -1e-3 and abs(a[4]) < 1e-6 and abs(a[5]) < 1e-6  # 기운 x축만 되돌린다 — 컨트롤러 회전 무시
+
+
+def test_stick_mode_position_still_follows():
+    r, c = _make(rot_source="stick")
+    _engage(r, c)
+    r.set(pos=[0.01, 0, 0])
+    a = c.action(_state())
+    np.testing.assert_allclose(a[:3], [0, 0.01 / _POS_SCALE, 0], atol=1e-6)
+
+
+def test_stick_right_turns_yaw_negative_and_deadzone():
+    r, c = _make(rot_source="stick", yaw_rate=1.0)
+    c.take_over(_state())
+    y0 = c.target_yaw
+    r.set(stick=[0.1, 0])
+    c.action(_state())
+    assert c.target_yaw == y0  # deadzone
+    r.set(stick=[1.0, 0])
+    a = c.action(_state())
+    np.testing.assert_allclose(c.target_yaw, y0 - 0.05, atol=1e-9)
+    assert a[5] < 0  # 월드 z축 기준 −야우로 돈다

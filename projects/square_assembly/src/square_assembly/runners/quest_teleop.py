@@ -7,7 +7,8 @@
 - XR 좌표(x 오른쪽, y 위, −z 앞)는 행렬 M으로 월드(x 로봇 앞쪽 반대, y 오른쪽, z 위)로 옮긴다.
 - 위치와 (클러치 기준 대비) 상대 회전은 1-Euro 필터를 거친다. 회전은 rotvec이라 ±π 근처에서 부호가
   뒤집히므로, 필터 입력과 출력 액션 모두 직전 값에 가까운 쪽의 등가 rotvec을 고른다.
-- 손목은 마우스 텔레옵과 달리 수직 아래로 고정하지 않고 컨트롤러 회전을 그대로 따른다.
+- 회전 입력은 rot_source로 고른다. "stick"(기본): 컨트롤러 회전은 무시하고 손목을 마우스 텔레옵처럼 수직 아래로
+  고정한 채 오른쪽 조이스틱 좌우로 야우만 돌린다(손목 관절 범위에서 멈춘다). "pose": 컨트롤러 회전을 그대로 따른다.
 """
 
 import math
@@ -65,7 +66,8 @@ def xrt_reader():
         _xrt = xrt
     xrt = _xrt
     return lambda: (np.asarray(xrt.get_right_controller_pose(), dtype=float),
-                    float(xrt.get_right_grip()), float(xrt.get_right_trigger()))
+                    float(xrt.get_right_grip()), float(xrt.get_right_trigger()),
+                    np.asarray(xrt.get_right_axis(), dtype=float))
 
 
 def close_xrt():
@@ -88,7 +90,9 @@ class QuestTeleopController(MouseTeleopController):
     """(포즈, 그립, 트리거)를 7-dim 액션으로 바꾼다. 창·SDK 무관(reader만 바꿔 끼우면 된다).
 
     Args:
-        reader: () -> (pose7 [x,y,z,qx,qy,qz,qw], grip, trigger). None이면 xrt_reader().
+        reader: () -> (pose7 [x,y,z,qx,qy,qz,qw], grip, trigger, stick [x,y]). None이면 xrt_reader().
+        rot_source: "stick"(손목 아래 고정 + 조이스틱 야우) 또는 "pose"(컨트롤러 회전 추종).
+        yaw_rate: 조이스틱을 끝까지 밀었을 때 야우 속도(rad/s). stick_deadzone: 이 미만은 0으로 본다.
         pos_scale, rot_scale: 컨트롤러 이동/회전 → 목표 이동/회전 배율(1.0 == 1:1).
         grip_threshold, trigger_threshold: 클러치/그리퍼 판정 기준.
         grip_release_threshold: 클러치가 물린 뒤 이 미만으로 내려가야 놓은 것으로 친다(히스테리시스).
@@ -100,8 +104,11 @@ class QuestTeleopController(MouseTeleopController):
 
     def __init__(self, reader=None, pos_scale=1.0, rot_scale=1.0, pos_cap=1.0, rot_cap=0.4,
                  grip_threshold=0.9, trigger_threshold=0.5, axes=M, grip_release_threshold=0.7,
-                 euro_min_cutoff=1.0, euro_beta=0.01, euro_d_cutoff=1.0, dt=0.05):
+                 euro_min_cutoff=1.0, euro_beta=0.01, euro_d_cutoff=1.0, dt=0.05,
+                 rot_source="stick", yaw_rate=np.deg2rad(60.0), stick_deadzone=0.15):
         super().__init__(pos_cap=pos_cap, rot_cap=rot_cap, dt=dt)
+        assert rot_source in ("stick", "pose"), rot_source
+        self.rot_source, self.yaw_rate, self.stick_deadzone = rot_source, yaw_rate, stick_deadzone
         self.reader = reader if reader is not None else xrt_reader()
         self.pos_scale, self.rot_scale = pos_scale, rot_scale
         self.grip_release_threshold = grip_release_threshold
@@ -139,11 +146,12 @@ class QuestTeleopController(MouseTeleopController):
     def _sync_hud(self):
         self.target_xy = self.target_p[:2].copy()
         self.target_z = float(self.target_p[2])
-        self.target_yaw = float(np.arctan2(*self.target_R.as_matrix()[[1, 0], 0]))
+        if self.rot_source == "pose":   # stick이면 target_yaw는 조이스틱이 직접 갖고 있다
+            self.target_yaw = float(np.arctan2(*self.target_R.as_matrix()[[1, 0], 0]))
 
     def action(self, state):
         p, R = np.asarray(state["grip"], float), Rot.from_matrix(state["R"])
-        pose, grip, trig = self.reader()
+        pose, grip, trig, stick = self.reader()
         a = np.zeros(7, dtype=np.float32)
         a[6] = 1.0 if trig >= self.trigger_threshold else -1.0
         self.grip_cmd = float(a[6])
@@ -179,6 +187,13 @@ class QuestTeleopController(MouseTeleopController):
         self._sync_hud()
 
         a[:3] = np.clip((self.target_p - p) / _POS_SCALE, -self.pos_cap, self.pos_cap)
+        if self.rot_source == "stick":
+            sx = float(np.asarray(stick, float).reshape(-1)[0]) if np.size(stick) else 0.0
+            if np.isfinite(sx) and abs(sx) >= self.stick_deadzone and self.target_yaw is not None:
+                # 오른쪽으로 밀면 위에서 봐 시계 방향(−야우)
+                self.target_yaw = float(np.clip(self.target_yaw - sx * self.yaw_rate * self.dt, *self.yaw_lim))
+            a[3:6] = self.yaw_rot(state, state["R"])
+            return a
         rot = _near((self.target_R * R.inv()).as_rotvec(), self._a_rot)
         self._a_rot = rot
         a[3:6] = np.clip(rot / _ROT_SCALE, -self.rot_cap, self.rot_cap)
