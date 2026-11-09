@@ -21,7 +21,7 @@ ImageNet mean/std를 따로 적용하지 않는다(공식 레포 README 사용 �
 robomimic을 쓰지 않는다 — h5py로 hdf5를 직접 읽는다.
 
 사용:
-    python -m square_assembly.scripts.cache_vip_feats \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.cache_vip_feats \
         --hdf5 data/square_scale3_0_seed1.hdf5 \
         --out data/square_scale3_0_seed1.vip.h5
 """

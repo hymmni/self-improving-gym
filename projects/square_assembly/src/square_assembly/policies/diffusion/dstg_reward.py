@@ -21,7 +21,7 @@ succ/fail 두 체크포인트와 달리, 여기서는 succ 버전 하나뿐).
 separate Stage 1 checkpoint for reward computation and success detection").
 
 실행:
-  python -m square_assembly.policies.diffusion.dstg_reward \
+  /opt/venvs/torch/bin/python -m square_assembly.policies.diffusion.dstg_reward \
       --dstg-ckpt outputs/dstg/square_demo50_succ/predictor.pt \
       --hdf5-path /home/moai/hymm_ws/square_dataset/square_image_v15.hdf5 \
       [--statistic mean|cvar]

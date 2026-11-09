@@ -31,7 +31,7 @@ Black et al. 2023). 데이터 재사용이 없는 DDPO-SF(score function, 바닐
 계산에는 절대 들어가지 않는다(`compute_decision_reward`의 시그니처 자체가 그 경계다).
 
 실행:
-    python -m square_assembly.scripts.train_si \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train_si \
         policy_ckpt=/home/moai/hymm_ws/square_ckpt/policy_epoch1060.pt \
         dstg_ckpt=outputs/dstg/square_demo50_succ/predictor.pt \
         iterations=1 episodes_per_iter=2 \

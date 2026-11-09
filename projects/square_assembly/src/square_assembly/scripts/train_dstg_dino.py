@@ -9,7 +9,7 @@ robomimic도 필요 없다.
 같은 값을 기본값으로 둔다 — configs/train_dstg_dino.yaml 참고.
 
 사용:
-    python -m square_assembly.scripts.train_dstg_dino \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train_dstg_dino \
         cache_path=data/square_scale3_0_seed1.dino.h5 \
         out=outputs/dstg_dino/square_scale3_0_seed1/predictor.pt
 """

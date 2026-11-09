@@ -9,7 +9,7 @@ train_dstg_dino.py와 학습 루프·평가 지표·분할 규칙이 완전히 �
 DINO/ResNet 기준선과 같은 값을 기본값으로 둔다 — configs/train_dstg_vip.yaml 참고.
 
 사용:
-    python -m square_assembly.scripts.train_dstg_vip \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train_dstg_vip \
         cache_path=data/square_scale3_0_seed1.vip.h5 \
         out=outputs/dstg_vip/square_scale3_0_seed1/predictor.pt
 """

@@ -25,10 +25,10 @@ REINFORCE를 돌리면 정책이 망가진다 — MAE는 이 실패 모드를 �
 얼마나 근접하는지로 읽어야 하고, 단독 절대값으로 읽으면 안 된다.
 
 사용:
-    python -m square_assembly.scripts.eval_dstg \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval_dstg \
         --predictor outputs/dstg/square_r0/predictor.pt \
         --hdf5 data/square_demo50_mouse50.hdf5
-    python -m square_assembly.scripts.eval_dstg \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval_dstg \
         --predictor outputs/dstg_vip/square_r0/predictor.pt \
         --cache data/square_demo50_mouse50.vip.h5
 """

@@ -12,11 +12,11 @@ sim 상태(states)로 다시 렌더하므로 84픽셀 obs가 아니라 480 해�
     q 저장하고 종료. 표시할 때마다 바로 저장하고, 다시 켜면 아직 안 찍은 첫 인수인계부터 연다.
 
     # 컨테이너 안, 수집기와 같은 화면(DISPLAY=:1)
-    python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5
     # 찍은 결과 요약만
-    python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5 --summary
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5 --summary
     # 찍은 구간을 PREINTV로 바꾼 사본(원본은 그대로) — 학습·평가가 이 구간을 쓰게
-    python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5 \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.mark_preintv_onset --hdf5 data/square_mouse_intv_r0v3.hdf5 \
         --write-marked data/square_mouse_intv_r0v3.marked.hdf5
 """
 

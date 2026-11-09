@@ -15,7 +15,7 @@ r"""여러 hdf5(사람 시연 + 롤아웃/개입 수집분)를 학습용 데이�
 데이터셋에서 --env-args-from으로 가져와 붙인다.
 
 사용(컨테이너 WORKDIR=/workspace 기준):
-    python -m square_assembly.scripts.merge_demo_hdf5 \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.merge_demo_hdf5 \
         --sources data/square_scale3_0_seed1.hdf5 data/square_scripted_intv_v1.hdf5 \
         --env-args-from /home/moai/hymm_ws/square_dataset/square_image_v15.hdf5 \
         --out data/square_demo50_intv20.hdf5

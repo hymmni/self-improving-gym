@@ -7,7 +7,7 @@ r"""train_si.py가 저장한 자기개선 정책 체크포인트(predictor.pt / 
 동일 롤아웃이라 같다). `--hires 0`이면 정책이 실제로 보는 84x84 관측을 그대로(4배
 업샘플만) 써서, "정책이 뭘 보고 저 행동을 했는지"를 보여줄 때 쓴다.
 
-    python -m square_assembly.scripts.record_si_video \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.record_si_video \
         --si-ckpt outputs/si_full_env/predictor_best.pt \
         --base-ckpt /home/moai/hymm_ws/square_ckpt/policy_epoch1060.pt \
         --episodes 3 --hires 480 --out outputs/si_full_env/rollout_best_hires.mp4

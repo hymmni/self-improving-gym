@@ -9,10 +9,10 @@ attach_viewer로 달라 여기 대상 아님, save_gif로 대체). OpenVLA는 pr
 루프로 분기한다.
 
 사용:
-    python -m square_assembly.scripts.eval checkpoint_path=outputs/train/square_diffusion_unet/policy_epoch300.pt
-    python -m square_assembly.scripts.eval task=square_stage checkpoint_path=... render=true
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval checkpoint_path=outputs/train/square_diffusion_unet/policy_epoch300.pt
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval task=square_stage checkpoint_path=... render=true
     unset MUJOCO_GL  # low_dim 화면(mjviewer)일 때만 필요
-    python -m square_assembly.scripts.eval task=square policy_name=openvla policy=openvla \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval task=square policy_name=openvla policy=openvla \
         checkpoint_path=outputs/train/square_openvla/lora_final/policy \
         stats_path=outputs/train/square_openvla/normalization_stats.json save_gif=outputs/openvla_rollout.gif
 """

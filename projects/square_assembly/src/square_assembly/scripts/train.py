@@ -4,20 +4,20 @@ train_openvla_base.py(gitignore라 매번 유실됐던 스크립트들)를 대�
 
 사용:
     # DP(image), 기본 300 epoch
-    python -m square_assembly.scripts.train use_wandb=true
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train use_wandb=true
 
     # DP(image) + stage conditioning
-    python -m square_assembly.scripts.train task=square_stage
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train task=square_stage
 
     # DP(low_dim), 예전 M2 경로
-    python -m square_assembly.scripts.train task=lift_low_dim policy=diffusion_unet_lowdim policy_name=diffusion_lowdim
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train task=lift_low_dim policy=diffusion_unet_lowdim policy_name=diffusion_lowdim
 
     # OpenVLA round0
-    python -m square_assembly.scripts.train policy=openvla policy_name=openvla runner_name=openvla_trainer \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train policy=openvla policy_name=openvla runner_name=openvla_trainer \
         batch_size=2 max_steps=3000 use_wandb=true
 
     # 중단된 학습 이어받기(같은 output_dir의 최신 체크포인트/adapter에서)
-    python -m square_assembly.scripts.train resume=true
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train resume=true
 """
 
 import logging
