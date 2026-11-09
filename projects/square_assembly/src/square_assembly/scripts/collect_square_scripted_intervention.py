@@ -36,8 +36,16 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
 [q]는 그 에피소드를 건너뛴다. 성공으로 끝났을 때만 기존 에피소드를 새 것으로 바꾼다.
 
 정책 없이 사람 시연만 모으려면 `--mode mouse --human-only`: 체크포인트를 안 읽고(--base-ckpt 무시, task는
-configs/task/square.yaml) 에피소드마다 사람 제어로 멈춘 채 시작한다([s]로 시작, Tab은 안 먹는다). 모든 스텝이
+configs/task/{--task}.yaml, 기본 square) 에피소드마다 사람 제어로 멈춘 채 시작한다([s]로 시작, Tab은 안 먹는다). 모든 스텝이
 INTV로 라벨되고 attrs["sampler"]는 "human"이다.
+
+## Quest 컨트롤러(--mode quest)
+mouse와 같은 Tk 창·키 조작을 쓰되 마우스는 무시하고 Quest 3S 컨트롤러로 조종한다.
+  1. `bash /opt/apps/roboticsservice/runService.sh`
+  2. Quest XRoboToolkit 앱에서 이 PC의 IP를 선택한다.
+  3. **모니터를 정면으로 본 채** 오른쪽 Meta 버튼을 길게 눌러 recenter한다.
+  4. `--mode quest [--human-only --task can]`으로 실행한다. 그립을 누른 동안 팔이 따라오고, 트리거로 그리퍼를
+     조작한다. 쥔 물체를 넘겨받을 때는 트리거를 당긴 채 Tab을 누른다.
 
 창이 작으면 최대화 버튼을 누르거나 테두리를 끌어 키운다 — 다 그린 화면을 창에 맞춰 늘려 띄운다. `--zoom 1.5`는 처음 창 크기,
 `--fullscreen`은 전체화면으로 시작(실행 중 F11로 오간다).
@@ -324,18 +332,27 @@ def sampler_label(policy):
     return f"{name}{policy.num_inference_steps}" + ("" if eta is None else f" eta={eta:g}")
 
 
+def load_human_only_task_cfg(task):
+    """--human-only는 체크포인트가 없으므로 configs/task/{task}.yaml에서 task 설정을 읽는다."""
+    from omegaconf import OmegaConf
+
+    return OmegaConf.load(os.path.join(os.path.dirname(__file__), "..", "configs", "task", f"{task}.yaml"))
+
+
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False,
-        ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False, stg_ckpt=None):
+        ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False, stg_ckpt=None,
+        task="square", quest=None):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
-    if mode != "mouse":
+    human_ui = mode in ("mouse", "quest")   # 사람이 Tk 창에서 조종하는 모드 — quest도 같은 창을 쓴다
+    if not human_ui:
         open_window(window_name)
 
-    if redo and (mode != "mouse" or overwrite):
-        raise ValueError("--redo는 --mode mouse에서만, --overwrite 없이 쓴다")
-    if (human_only or stg_ckpt) and mode != "mouse":
-        raise ValueError("--human-only, --stg-ckpt는 --mode mouse에서만 쓴다")
+    if redo and (not human_ui or overwrite):
+        raise ValueError("--redo는 --mode mouse/quest에서만, --overwrite 없이 쓴다")
+    if (human_only or stg_ckpt) and not human_ui:
+        raise ValueError("--human-only, --stg-ckpt는 --mode mouse/quest에서만 쓴다")
     if display_size > _MAX_DISPLAY:
         raise ValueError(
             f"--display-size는 {_MAX_DISPLAY} 이하여야 한다(요청 {display_size}) — "
@@ -352,9 +369,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if human_only:   # 정책이 한 스텝도 안 움직인다 — 체크포인트 없이 task 설정만 읽는다
-        from omegaconf import OmegaConf
-
-        task_cfg = OmegaConf.load(os.path.join(os.path.dirname(__file__), "..", "configs", "task", "square.yaml"))
+        task_cfg = load_human_only_task_cfg(task)
         policy = normalizer = None
         obs_horizon = action_horizon = 1
         sampler = "human"
@@ -387,12 +402,18 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     env = wait_for_renderer(lambda: make_eval_env(task_cfg), camera, display_size)
     # 마우스 모드는 모든 카메라(--camera가 맨 위)를 맵 왼쪽에 쌓아 보여주고, 맵은 그 높이 합만큼 키운다.
-    shown = [camera] + [k for k in rgb_keys if k != camera] if mode == "mouse" else [camera]
+    shown = [camera] + [k for k in rgb_keys if k != camera] if human_ui else [camera]
     display_cameras = [k[: -len("_image")] for k in shown]
 
-    if mode == "mouse":
+    if human_ui:
+        if mode == "quest":
+            from square_assembly.runners.quest_teleop import QuestTeleopController
+
+            controller = QuestTeleopController(**(quest or {}))
+        else:
+            controller = MouseTeleopController(**(teleop or {}))
         interv = MouseTeleopIntervention(
-            env, controller=MouseTeleopController(**(teleop or {})), map_size=display_size * len(shown),
+            env, controller=controller, mouse_input=mode == "mouse", map_size=display_size * len(shown),
             window_name=window_name, quit_key=quit_key, human_only=human_only, zoom=zoom, fullscreen=fullscreen,
             stg_bins=stg_bins,
         )
@@ -566,6 +587,10 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         interv.close()
         if hasattr(env, "close"):
             env.close()
+        if mode == "quest":
+            from square_assembly.runners.quest_teleop import close_xrt
+
+            close_xrt()
 
     print(f"\n수집 완료: 성공 {outcomes['success']} / 실패 {outcomes['fail']} (총 {outcomes['success'] + outcomes['fail']}에피소드)  saved {out}")
 
@@ -580,9 +605,10 @@ def main():
     ap.add_argument("--max-steps", type=int, default=700)
     ap.add_argument("--out", default="data/square_scripted_intv.hdf5")
     ap.add_argument("--camera", default="agentview_image")
-    ap.add_argument("--mode", choices=["oracle", "mouse"], default="oracle",
+    ap.add_argument("--mode", choices=["oracle", "mouse", "quest"], default="oracle",
                     help="oracle: 트리거 키로 스크립트 오라클에 넘김 / mouse: 사람이 2D 맵 위에서 직접 조종"
-                         "(Tab=사람/정책 전환 ←=직전 전환점으로 s=일시정지, runners/mouse_teleop.py 참고)")
+                         "(Tab=사람/정책 전환 ←=직전 전환점으로 s=일시정지, runners/mouse_teleop.py 참고) / "
+                         "quest: Meta Quest 3S 컨트롤러로 조종(그립=이동, 트리거=그리퍼, runners/quest_teleop.py 참고)")
     ap.add_argument("--trigger-key", default="s", help="[oracle] 실패 판단 시 오라클에 넘기는 키")
     ap.add_argument("--kp", type=float, default=2.0, help="[mouse] xy P 게인")
     ap.add_argument("--kd", type=float, default=2.0, help="[mouse] xy D 게인(0이면 멈출 때 0.4~0.7cm 넘친다)")
@@ -613,6 +639,14 @@ def main():
                          "사람 제어로 멈춘 채 시작한다([s]로 시작)")
     ap.add_argument("--stg-ckpt", default=None,
                     help="[mouse] STG 예측기 체크포인트(VIP·ResNet) — 맵 오른쪽에 실시간 예측 패널을 띄운다(저장 데이터와 무관)")
+    ap.add_argument("--task", choices=["square", "can"], default="square",
+                    help="--human-only에서만 쓴다(정책이 있으면 체크포인트의 task를 쓴다)")
+    ap.add_argument("--quest-pos-scale", type=float, default=1.0, help="[quest] 손 이동 배율(1.0=1:1)")
+    ap.add_argument("--quest-rot-scale", type=float, default=1.0, help="[quest] 손 회전 배율")
+    ap.add_argument("--quest-kp", type=float, default=2.0, help="[quest] xy P 게인")
+    ap.add_argument("--quest-kd", type=float, default=2.0, help="[quest] xy D 게인")
+    ap.add_argument("--quest-grip-threshold", type=float, default=0.9, help="[quest] 이 이상 쥐면 클러치 연결")
+    ap.add_argument("--quest-trigger-threshold", type=float, default=0.5, help="[quest] 이 이상 당기면 그리퍼 닫힘")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
     args = ap.parse_args()
@@ -620,6 +654,10 @@ def main():
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
         mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta, redo=args.redo,
         human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen, stg_ckpt=args.stg_ckpt,
+        task=args.task,
+        quest=dict(pos_scale=args.quest_pos_scale, rot_scale=args.quest_rot_scale, kp=args.quest_kp,
+                   kd=args.quest_kd, grip_threshold=args.quest_grip_threshold,
+                   trigger_threshold=args.quest_trigger_threshold),
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step), rot_cap=args.rot_cap))
 

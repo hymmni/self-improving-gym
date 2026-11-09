@@ -308,9 +308,12 @@ class MouseTeleopIntervention:
                  back_key="b", restart_key="r", back_steps=20, state_fn=None,
                  snap_radius=0.025, field_radius=0.045, pull_rate=16.0, snap_hz=7.0, snap_zeta=0.65,
                  hold_gain=0.35, hold_tau=0.2, break_dist=0.045, pop_dist=0.012, human_only=False,
-                 zoom=1.0, fullscreen=False, stg_bins=None):
+                 zoom=1.0, fullscreen=False, stg_bins=None, mouse_input=True):
         self.raw = getattr(env, "env", env)
         self.human_only = human_only
+        self.mouse_input = mouse_input   # False(Quest): 마우스 이동·휠·좌클릭을 무시한다 — 자석·포인터 warp도 없다
+        if not mouse_input:
+            self._HELP = (self._HELP[0], "[s] pause   [q] give up   Quest: grip=move  trigger=gripper")
         self.stg_bins = stg_bins
         self.stg_show = {"bars": True, "mean": True}  # 분포 막대 / 기댓값 곡선
         self._bar = None           # 체크박스 띠(Tk) — 화면 배율을 잴 때 그 높이를 뺀다
@@ -527,11 +530,12 @@ class MouseTeleopIntervention:
         view.pack(expand=True)        # 비율이 안 맞아 남는 자리는 검게, 화면은 가운데
         c = self.controller
 
-        view.bind("<Motion>", lambda e: self._on_motion(e.x, e.y))
-        view.bind("<ButtonPress-1>", lambda e: setattr(c, "grip_pressed", True))
-        view.bind("<ButtonRelease-1>", lambda e: setattr(c, "grip_pressed", False))
-        view.bind("<Button-4>", lambda e: self._on_wheel(+1))   # X11 휠 위
-        view.bind("<Button-5>", lambda e: self._on_wheel(-1))   # X11 휠 아래
+        if self.mouse_input:
+            view.bind("<Motion>", lambda e: self._on_motion(e.x, e.y))
+            view.bind("<ButtonPress-1>", lambda e: setattr(c, "grip_pressed", True))
+            view.bind("<ButtonRelease-1>", lambda e: setattr(c, "grip_pressed", False))
+            view.bind("<Button-4>", lambda e: self._on_wheel(+1))   # X11 휠 위
+            view.bind("<Button-5>", lambda e: self._on_wheel(-1))   # X11 휠 아래
         root.bind("<KeyPress>", lambda e: self._on_key(e.keysym, True))
         root.bind("<KeyRelease>", lambda e: self._on_key(e.keysym, False))
         root.bind("<FocusOut>", lambda e: setattr(c, "z_up", False) or setattr(c, "z_down", False))
@@ -557,11 +561,13 @@ class MouseTeleopIntervention:
         self._tick_t = None
 
     def _magnet_on(self):
-        return self._paused and self._active
+        return self.mouse_input and self._paused and self._active
 
     def _on_motion(self, x, y):
         """왼쪽 카메라 열 위에서는 목표를 안 바꾼다 — 맵은 그 오른쪽에 붙어 있다.
         멈춘 사람 모드에선 손이 움직인 양만 받아 자석에 넘기고 포인터를 바로 옮긴다(모듈 docstring '붙잡기')."""
+        if not self.mouse_input:
+            return
         if self._suppress_motion:  # 우리가 포인터를 옮기며 Tk가 바로 부르는 합성 이벤트
             return
         x, y = x / self._z, y / self._z  # 늘린 화면의 좌표 -> 캔버스 좌표
@@ -644,6 +650,8 @@ class MouseTeleopIntervention:
     def _on_wheel(self, notches):
         """휠 = 야우 목표. 자석에 붙어 있는 동안엔 끈적하게 비틀기만 하고 원래 각도로 돌아온다(모듈 docstring).
         사람이 그리퍼를 쥐고 있으면(조종 중·붙어 있음) 손목 범위에서 멈추고, 막힌 쪽을 _bump에 남긴다."""
+        if not self.mouse_input:
+            return
         c = self.controller
         self._wheel_t = time.time()
         if not (self._magnet_on() and self._snapped):
@@ -912,9 +920,11 @@ class MouseTeleopIntervention:
                                        ("text", "last switch"), ("key", "B"), ("text", "back 1s"),
                                        ("key", "R"), ("text", "restart"), ("key", "F11"), ("text", "fullscreen")],
                 size=sz)
-        hud.row(d, (lx, ly + 64 * k), [("key", "S"), ("text", "pause"), ("key", "Q"), ("text", "give up"),
-                                       ("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"),
-                                       ("key", "Wheel"), ("text", "yaw"), ("key", "LMB"), ("text", "grip")], size=sz)
+        row2 = [("key", "S"), ("text", "pause"), ("key", "Q"), ("text", "give up")]
+        row2 += ([("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"), ("key", "Wheel"), ("text", "yaw"),
+                  ("key", "LMB"), ("text", "grip")] if self.mouse_input else
+                 [("text", "Quest:"), ("key", "Grip"), ("text", "move"), ("key", "Trigger"), ("text", "gripper")])
+        hud.row(d, (lx, ly + 64 * k), row2, size=sz)
         now = time.time()
         if self._toast is not None and now < self._toast[1]:
             f = hud.font(round(15 * k), True)

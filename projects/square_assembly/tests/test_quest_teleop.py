@@ -180,3 +180,23 @@ def test_set_cursor_and_wheel_are_noops():
     c.set_cursor((1.0, 1.0))
     assert c.wheel(3) is False
     np.testing.assert_array_equal(c.target_xy, before)
+
+
+def test_mouse_input_disabled_ignores_motion_and_wheel():
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    _, c = _make()
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
+    before = (c.target_xy, c.target_yaw)
+    interv._on_motion(100, 100)
+    interv._on_wheel(3)
+    assert (c.target_xy, c.target_yaw) == before
+    assert not interv._magnet_on()
+    assert "Quest" in interv._HELP[1]
+
+
+def test_human_only_task_cfg_selects_can():
+    from square_assembly.scripts.collect_square_scripted_intervention import load_human_only_task_cfg
+
+    assert load_human_only_task_cfg("can").env_name == "PickPlaceCan"
+    assert load_human_only_task_cfg("square").env_name == "NutAssemblySquare"
