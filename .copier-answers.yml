@@ -1,0 +1,6 @@
+# copier가 관리한다. 직접 수정하지 말고 `copier update`로 바꾼다.
+_commit: v0.2.3
+_src_path: gh:hymmni/agent-harness
+main_via_pr: true
+research: true
+with_docker: false

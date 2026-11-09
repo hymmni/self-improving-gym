@@ -121,3 +121,21 @@ off가 기본이지만 DPPO 런에선 켠다(스모크 실측 adv_std=32). 두 �
 실행한 스텝만 **평균**한다(`dppo.reduce_logp`). 클립 0.01은 이 평균을 전제로 한 값이라, 합으로 재던 이전
 0.2와 숫자만으로 비교할 수 없다. 원본과 여전히 다른 점: 얼린 인코더 위의 MLP 크리틱, 환경 1개, 크리틱 워밍업
 없음, STG 보상(환경 보상 아님). 근거·실측은 `experiments/2026-10-01_dppo-ddim-alignment.md`.
+
+### ADR-010: 공유 백본 STG 헤드는 MLP + 이미지 특징만 읽고, 옵션 키가 없으면 legacy로 동작한다
+**결정**: `DiffusionPolicyImageStg`에 `stg_head_hidden`, `stg_image_only`를 추가한다(설정 `policy.stg.head_hidden`, `policy.stg.image_only`).
+`diffusion_unet_vip_stg.yaml`의 신규 학습 기본값은 논문 구성(`[256, 256]` MLP, 이미지 특징만)이고, 코드와 registry의 기본값은 legacy
+(`()` = 선형 한 층, `False` = `global_cond` 전체)다. UNet은 그대로 proprio를 포함한 `global_cond`를 받는다. `export_dstg_ckpt`는
+은닉 크기(`head_hidden`)와 `image_only`를 predictor.pt에 적고, `DstgReward`/`DstgPredictor`가 이를 읽어 헤드 입력을 `stg_input(global_cond)`로 만든다.
+
+**이유**: 논문 서술(STG 헤드는 MLP, 이미지 특징만 입력, proprio는 UNet에만)에 코드를 맞추되, 헤드 상태 키 이름(`stg_head.{0,2,4}.weight`)을 `DstgPredictor.head`와
+같게 두어 내보내기·보상 경로를 바꾸지 않는다. 옵션 키가 없는 기존 run_config/체크포인트는 선형 헤드·전체 입력으로 그대로 로드된다(ADR-005).
+
+**트레이드오프**: 논문 구성 헤드는 입력 차원이 달라(4114 -> 4096) 기존 `diffusion_stg` 체크포인트의 헤드를 이어받지 못하므로 새로 학습해야 한다. 같은 공유 구조에서
+MLP/이미지-only가 선형/전체 입력보다 낫다는 측정은 아직 없다(선형 대 MLP 오프라인 비교는 분할 1개뿐). 헤드를 따로 읽는 `vip_stg_reward.py`(캐시 VIP 예측기, `obs_parts`)는
+공유 백본 경로가 아니라 바꾸지 않았다.
+
+### ADR-011: 자체 하네스를 agent-harness 템플릿(copier)으로 교체
+**결정**: `scripts/execute.py`·`merge_to_main.py`·`scheduler.py`와 레포 안에서 고쳐 쓰던 `CLAUDE.md`·harness 스킬을 지우고, [agent-harness](https://github.com/hymmni/agent-harness) 템플릿을 copier로 설치한다(`research: true`, `main_via_pr: true`, `with_docker: false`). 규칙은 `AGENTS.md`·`docs/RESEARCH.md`, 플랜 실행은 superpowers의 executing-plans/subagent-driven-development가 맡는다. 템플릿에 없는 프로젝트 전용 규칙은 `README.md` 4절에 둔다.
+**이유**: 하네스를 여러 레포·에이전트(Claude Code, Codex, Antigravity)에서 같은 규칙으로 쓰고 `copier update`로 한꺼번에 갱신하기 위해서다. 위험 명령 차단과 브랜치·커밋 규칙을 지침이 아니라 hook으로 강제한다.
+**트레이드오프**: 하네스 파일은 이 레포에서 직접 고치지 않고 템플릿 레포에서 고쳐 받아야 한다. main 반영이 PR로만 가능해져 사람도 main에 직접 커밋·push할 수 없다. 브랜치 이름이 `feat|fix|refactor|docs|chore/<주제>`로 제한돼, Claude Code 워크트리 서브에이전트가 만드는 `worktree-agent-*` 브랜치에서는 커밋이 막힌다. 실험 기록 경로가 `experiments/<브랜치>/YYYY-MM-DD-주제.md`로 바뀌고, 이전 기록은 옛 경로에 그대로 둔다.

@@ -1,0 +1,16 @@
+#!/bin/sh
+# main으로의 push를 막는다. 개인 fork(원격 이름 personal), 원격에 main이 아직 없는 첫 push,
+# 태그 push는 허용한다.
+[ "$1" = personal ] && exit 0
+# main_via_pr: false로 설치한 프로젝트는 사람이 main을 push한다. git은 hook을 저장소 루트에서 실행한다.
+grep -qx 'main_via_pr: false' .copier-answers.yml 2>/dev/null && exit 0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = refs/heads/main ] || continue
+  case $remote_sha in
+    *[!0]*)
+      echo "BLOCKED: main으로 직접 push할 수 없습니다. 브랜치를 push하고 PR로 합치세요." >&2
+      exit 1
+      ;;
+  esac
+done

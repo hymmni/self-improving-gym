@@ -34,16 +34,18 @@ graph LR
 
 ## 3. 디렉토리 구조 및 Git 추적 정책
 
-**git은 gym 환경 코드 + 하네스 정책 문서(`CLAUDE.md`, `docs/ARCHITECTURE.md`, `docs/ADR.md`)를 추적한다.** 이 레포는 public이므로, PC/GPU 구성처럼 로컬 인프라에 관한 내용은 `docs/private/`에 두고 `.gitignore`로 제외한다. `scripts/`(하네스 실행기 자체)와 `.claude/skills/`(스킬 정의)도 예외적으로 추적한다 — 나머지 하네스 파일(`.claude/` 하위 그 외, `experiments/`, `phases/`, `references/`)은 여전히 로컬 전용이다. 작업 코드는 harness 파일이 없다고 생각하고 **레포 루트**에 배치한다.
+**git은 gym 환경 코드 + 하네스 파일을 추적한다.** 하네스는 agent-harness 템플릿을 copier로 설치한 것이다(ADR-011, 설치 답은 `.copier-answers.yml`). 이 레포는 public이므로, PC/GPU 구성처럼 로컬 인프라에 관한 내용은 `docs/private/`에 두고 `.gitignore`로 제외한다. `experiments/`, `phases/`, `references/`, `scratch/`, `.claude/`의 settings.json·skills/ 외 파일은 로컬 전용이다. 작업 코드는 harness 파일이 없다고 생각하고 **레포 루트**에 배치한다.
 
 ```
 requirements.txt (또는 environment.yml)  # 실행 환경 정의
 .gitignore                       # (추적됨)
-CLAUDE.md                        # (추적됨) 작업 규칙
+AGENTS.md                        # (추적됨) 작업 규칙 (하네스, 직접 수정 금지) — CLAUDE.md는 `@AGENTS.md` 한 줄
 docs/                            # (추적됨) 본 문서, ADR, docs/superpowers/(브레인스토밍 스펙·플랜)
   private/                       #   (미추적, 로컬 전용) ENVIRONMENT.md 등 인프라 정보
-scripts/                         # (추적됨) 하네스 실행기 (execute.py, merge_to_main.py 등)
-.claude/skills/                  # (추적됨) 스킬 정의 (harness/SKILL.md 등)
+scripts/                         # (추적됨) 레포 유틸 (sync_remote.py, notion_sync.py 등)
+.agents/ .claude/ .codex/        # (추적됨) 공용 harness 스킬, 에이전트별 설정·위험 명령 차단 hook
+.githooks/ .harness/             # (추적됨) 브랜치·커밋 규칙 hook, setup.py·block_dangerous.py·LOG_TEMPLATE.md
+.github/                         # (추적됨) release-please 릴리즈 PR 워크플로
 --- 이하 git 미추적 (로컬 전용 harness) ---
 references/                      # 원본 참조 (읽기 전용, 수정 금지)
   self-improving-efms.github.io/ #   공식 웹사이트 레포 (노트북 + 웹 파일)
@@ -51,7 +53,7 @@ references/                      # 원본 참조 (읽기 전용, 수정 금지)
 experiments/                     # 실험 기록
 phases/                          # (레거시) 과거 phase의 step 정의·실행 기록 —
                                   #   새 작업은 docs/superpowers/plans/*.md +
-                                  #   <plan>.state.json을 쓴다 (harness 스킬 참고)
+                                  #   superpowers:executing-plans로 실행한다 (harness 스킬 참고)
 projects/                        # 연구 프로젝트 폴더 모음
   pointmass/                     #   최초 트랙(휴면): 클린 버전 (원본 그대로 복사) —
                                   #     pointmass_core.py, pointmass_notebook.ipynb.

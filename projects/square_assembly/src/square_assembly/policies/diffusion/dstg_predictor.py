@@ -33,8 +33,10 @@ class DstgPredictor(nn.Module):
     액션은 입력에 없다(논문 식(1) 그대로).
     """
 
-    def __init__(self, frozen_policy, num_bins, head_hidden=(256, 256), train_encoder=False):
+    def __init__(self, frozen_policy, num_bins, head_hidden=(256, 256), train_encoder=False, image_only=False):
         super().__init__()
+        # image_only: 헤드가 global_cond 대신 frozen_policy.stg_input(DiffusionPolicyImageStg)의 이미지 특징만 읽는다.
+        self.image_only = image_only
         self.frozen_policy = frozen_policy
         self.train_encoder = train_encoder
         # requires_grad_(False) + forward()의 torch.no_grad() 이중 안전판(아래) — 인코더가
@@ -45,7 +47,8 @@ class DstgPredictor(nn.Module):
         if train_encoder:
             self.frozen_policy.encoders.requires_grad_(True)
 
-        global_cond_dim = _global_cond_dim(frozen_policy)
+        global_cond_dim = (frozen_policy.obs_horizon * frozen_policy._img_dim if image_only
+                           else _global_cond_dim(frozen_policy))
         layers = []
         in_dim = global_cond_dim
         for h in head_hidden:
@@ -60,4 +63,6 @@ class DstgPredictor(nn.Module):
         """
         with torch.set_grad_enabled(self.train_encoder and torch.is_grad_enabled()):
             global_cond = self.frozen_policy.get_global_cond(obs)
+        if self.image_only:
+            global_cond = self.frozen_policy.stg_input(global_cond)
         return self.head(global_cond)
