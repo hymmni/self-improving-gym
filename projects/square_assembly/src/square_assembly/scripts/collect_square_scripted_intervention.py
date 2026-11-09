@@ -643,8 +643,6 @@ def main():
                     help="--human-only에서만 쓴다(정책이 있으면 체크포인트의 task를 쓴다)")
     ap.add_argument("--quest-pos-scale", type=float, default=1.0, help="[quest] 손 이동 배율(1.0=1:1)")
     ap.add_argument("--quest-rot-scale", type=float, default=1.0, help="[quest] 손 회전 배율")
-    ap.add_argument("--quest-kp", type=float, default=2.0, help="[quest] xyz P 게인")
-    ap.add_argument("--quest-kd", type=float, default=2.0, help="[quest] xyz D 게인")
     ap.add_argument("--quest-grip-threshold", type=float, default=0.9, help="[quest] 이 이상 쥐면 클러치 연결")
     ap.add_argument("--quest-grip-release-threshold", type=float, default=0.7,
                     help="[quest] 클러치가 물린 뒤 이 미만으로 내려가야 놓음(히스테리시스)")
@@ -659,8 +657,8 @@ def main():
         mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta, redo=args.redo,
         human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen, stg_ckpt=args.stg_ckpt,
         task=args.task,
-        quest=dict(pos_scale=args.quest_pos_scale, rot_scale=args.quest_rot_scale, kp=args.quest_kp,
-                   kd=args.quest_kd, grip_threshold=args.quest_grip_threshold,
+        quest=dict(pos_scale=args.quest_pos_scale, rot_scale=args.quest_rot_scale,
+                   grip_threshold=args.quest_grip_threshold,
                    trigger_threshold=args.quest_trigger_threshold,
                    grip_release_threshold=args.quest_grip_release_threshold,
                    euro_min_cutoff=args.quest_euro_min_cutoff, euro_beta=args.quest_euro_beta),

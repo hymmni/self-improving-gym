@@ -94,13 +94,14 @@ class QuestTeleopController(MouseTeleopController):
         grip_release_threshold: 클러치가 물린 뒤 이 미만으로 내려가야 놓은 것으로 친다(히스테리시스).
         axes: XR -> 월드 축 변환 행렬.
         euro_*: 1-Euro 필터 파라미터. dt는 제어 주기(s).
-        kp, kd, pos_cap, rot_cap: 마우스 텔레옵과 같은 PD 게인·상한. 회전은 남은 각을 rot_cap으로만 자른다.
+        pos_cap, rot_cap: 한 스텝 액션 상한. PD 없이 목표와 현재 EE의 차이를 그대로 위치·회전 명령으로 보낸다
+            (goal_update_mode="achieved"라 OSC 목표 = 현재 EE + 차이 = 목표 포즈).
     """
 
-    def __init__(self, reader=None, pos_scale=1.0, rot_scale=1.0, kp=2.0, kd=2.0, pos_cap=1.0, rot_cap=0.4,
+    def __init__(self, reader=None, pos_scale=1.0, rot_scale=1.0, pos_cap=1.0, rot_cap=0.4,
                  grip_threshold=0.9, trigger_threshold=0.5, axes=M, grip_release_threshold=0.7,
                  euro_min_cutoff=1.0, euro_beta=0.01, euro_d_cutoff=1.0, dt=0.05):
-        super().__init__(kp=kp, kd=kd, pos_cap=pos_cap, rot_cap=rot_cap, dt=dt)
+        super().__init__(pos_cap=pos_cap, rot_cap=rot_cap, dt=dt)
         self.reader = reader if reader is not None else xrt_reader()
         self.pos_scale, self.rot_scale = pos_scale, rot_scale
         self.grip_release_threshold = grip_release_threshold
@@ -112,7 +113,6 @@ class QuestTeleopController(MouseTeleopController):
         super().reset()
         self._armed = True      # 그립이 한 번 threshold 아래로 내려가야 다시 물린다(take_over 직후 False)
         self._ref = None        # 클러치 기준 (컨트롤러 월드 위치, 컨트롤러 월드 회전, EE 위치, EE 회전)
-        self._prev_p = None
         self._rv = np.zeros(3)  # 연속화한 상대 rotvec(필터 입력)
         self._a_rot = np.zeros(3)  # 직전 회전 액션 rotvec(연속화 기준)
         self.target_p = self.target_R = None
@@ -120,8 +120,7 @@ class QuestTeleopController(MouseTeleopController):
     def take_over(self, state):
         super().take_over(state)
         self._ref, self._armed = None, False
-        self._prev_p = np.asarray(state["grip"], float).copy()
-        self._latch(self._prev_p, Rot.from_matrix(state["R"]))
+        self._latch(np.asarray(state["grip"], float), Rot.from_matrix(state["R"]))
         self._sync_hud()
 
     @property
@@ -145,8 +144,6 @@ class QuestTeleopController(MouseTeleopController):
     def action(self, state):
         p, R = np.asarray(state["grip"], float), Rot.from_matrix(state["R"])
         pose, grip, trig = self.reader()
-        v = p - self._prev_p if self._prev_p is not None else np.zeros(3)
-        self._prev_p = p.copy()
         a = np.zeros(7, dtype=np.float32)
         a[6] = 1.0 if trig >= self.trigger_threshold else -1.0
         self.grip_cmd = float(a[6])
@@ -181,7 +178,7 @@ class QuestTeleopController(MouseTeleopController):
             self.target_R = Rot.from_rotvec(self.rot_scale * self._fr.filter(self._rv)) * ref_R
         self._sync_hud()
 
-        a[:3] = np.clip((self.kp * (self.target_p - p) - self.kd * v) / _POS_SCALE, -self.pos_cap, self.pos_cap)
+        a[:3] = np.clip((self.target_p - p) / _POS_SCALE, -self.pos_cap, self.pos_cap)
         rot = _near((self.target_R * R.inv()).as_rotvec(), self._a_rot)
         self._a_rot = rot
         a[3:6] = np.clip(rot / _ROT_SCALE, -self.rot_cap, self.rot_cap)

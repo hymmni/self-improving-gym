@@ -56,7 +56,7 @@ def test_clutch_engage_does_not_jump():
 
 
 def test_one_to_one_position():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     _engage(r, c)
     r.set(pos=[0.01, 0, 0])
     a = c.action(_state())
@@ -65,7 +65,7 @@ def test_one_to_one_position():
 
 
 def test_axes_forward_is_minus_world_x():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     _engage(r, c)
     r.set(pos=[0, 0, -0.01])
     a = c.action(_state())
@@ -73,7 +73,7 @@ def test_axes_forward_is_minus_world_x():
 
 
 def test_pos_scale_halves_motion():
-    r, c = _make(kp=1.0, kd=0.0, pos_scale=0.5)
+    r, c = _make(pos_scale=0.5)
     _engage(r, c)
     r.set(pos=[0.01, 0, 0])
     c.action(_state())
@@ -81,7 +81,7 @@ def test_pos_scale_halves_motion():
 
 
 def test_rotation_follows_controller():
-    r, c = _make(kp=5.0)
+    r, c = _make()
     _engage(r, c)
     r.set(quat=Rot.from_rotvec([0, 0.1, 0]).as_quat())
     a = c.action(_state())
@@ -89,7 +89,7 @@ def test_rotation_follows_controller():
 
 
 def test_release_holds_actual_pose():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     _engage(r, c)
     r.set(pos=[0.05, 0, 0])
     c.action(_state())
@@ -102,7 +102,7 @@ def test_release_holds_actual_pose():
 
 
 def test_take_over_holds_pose():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     c.take_over(_state())
     a = c.action(_state(pos=(0.0, 0.0, 0.99)))
     assert a[2] > 0
@@ -110,7 +110,7 @@ def test_take_over_holds_pose():
 
 
 def test_invalid_pose_while_held_requires_regrip():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     _engage(r, c)
     r.set(pos=[0.01, 0, 0])
     c.action(_state())
@@ -141,7 +141,7 @@ def test_trigger_binary_and_independent_of_grip():
 
 
 def test_take_over_requires_regrip():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     r.set(grip=0.95)
     c.take_over(_state())
     r.set(pos=[0.02, 0, 0])
@@ -213,7 +213,7 @@ def test_human_only_task_cfg_selects_can():
 def test_pause_resume_requires_regrip():
     from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
 
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
     interv._active = True
     _engage(r, c)
@@ -239,7 +239,7 @@ def test_pause_resume_mouse_mode_does_not_resync():
 
 
 def test_grip_hysteresis():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     _engage(r, c)
     for g in (0.85, 0.95, 0.85, 0.95):
         r.set(grip=g)
@@ -251,7 +251,7 @@ def test_grip_hysteresis():
 
 
 def test_floor_clamps_target_z():
-    r, c = _make(kp=1.0, kd=0.0)
+    r, c = _make()
     _engage(r, c, _state(pos=(0, 0, 0.9)))
     r.set(pos=[0, -0.5, 0])   # 손을 크게 내린다(XR y 아래)
     c.action(_state(pos=(0, 0, 0.9)))
