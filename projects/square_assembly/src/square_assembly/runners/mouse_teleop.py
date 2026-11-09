@@ -486,6 +486,8 @@ class MouseTeleopIntervention:
             self._paused = not self._paused
             if not self._paused:
                 self._rewound = None
+                if not self.mouse_input:   # Quest: 멈춘 동안 손이 움직였으면 재개 때 목표가 튄다 — 다시 잡게 한다
+                    self._resync = True
         elif what == "quit":
             self._quit_requested = True
         elif what == "last_switch":
@@ -844,6 +846,9 @@ class MouseTeleopIntervention:
         label = "HUMAN" if self._active else "POLICY"
         x = hud.pill(d, (x0 + 16 * k, 16 * k), label, mode_col + (255,),
                      color=(255, 255, 255) if self._active else (16, 24, 18), size=round(18 * k))
+        if self._active and not self.mouse_input:   # Quest 클러치 상태
+            x = hud.pill(d, (x + 8 * k, 16 * k), "CLUTCH ON" if c.clutched else "GRIP TO MOVE",
+                         hud.PANEL, color=hud.TEXT, size=round(13 * k), bold=False, pad=(10, 6))
         if self._paused:
             x = hud.pill(d, (x + 8 * k, 16 * k), "PAUSED", hud.PAUSED + (255,), size=round(18 * k))
             msg = "S  resume"

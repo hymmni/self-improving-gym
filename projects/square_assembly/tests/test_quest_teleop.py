@@ -116,7 +116,8 @@ def test_invalid_pose_while_held_requires_regrip():
     c.action(_state())
     r.set(pos=[5, 5, 5], quat=[0, 0, 0, 0])
     c.action(_state())
-    held = c.target_p.copy()  # 직전 목표 유지
+    np.testing.assert_allclose(c.target_p, [0, 0, 1.0], atol=1e-9)  # 실제 EE에 고정(놓을 때와 같다)
+    held = c.target_p.copy()
     r.set(quat=_ID)  # 포즈 복귀 — 그립은 그대로 눌림: 재개해도 목표가 튀지 않는다
     c.action(_state())
     np.testing.assert_array_equal(c.target_p, held)
@@ -207,3 +208,52 @@ def test_human_only_task_cfg_selects_can():
 
     assert load_human_only_task_cfg("can").env_name == "PickPlaceCan"
     assert load_human_only_task_cfg("square").env_name == "NutAssemblySquare"
+
+
+def test_pause_resume_requires_regrip():
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    r, c = _make(kp=1.0, kd=0.0)
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
+    interv._active = True
+    _engage(r, c)
+    interv._handle_key("s")       # 멈춤 — 그립은 계속 쥔 채
+    r.set(pos=[0.0, 0.5, 0.0])    # 멈춘 동안 손이 멀리 움직인다
+    interv._handle_key("s")       # 재개
+    a = interv(0, {})
+    np.testing.assert_allclose(a[:6], 0, atol=1e-6)
+    r.set(grip=0.0)
+    interv(1, {})
+    r.set(grip=1.0)
+    np.testing.assert_allclose(interv(2, {})[:6], 0, atol=1e-6)
+
+
+def test_pause_resume_mouse_mode_does_not_resync():
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    _, c = _make()
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=True, state_fn=_state)
+    interv._handle_key("s")
+    interv._handle_key("s")
+    assert not interv._resync
+
+
+def test_grip_hysteresis():
+    r, c = _make(kp=1.0, kd=0.0)
+    _engage(r, c)
+    for g in (0.85, 0.95, 0.85, 0.95):
+        r.set(grip=g)
+        c.action(_state())
+        assert c.clutched
+    r.set(grip=0.6)
+    c.action(_state())
+    assert not c.clutched
+
+
+def test_floor_clamps_target_z():
+    r, c = _make(kp=1.0, kd=0.0)
+    _engage(r, c, _state(pos=(0, 0, 0.9)))
+    r.set(pos=[0, -0.5, 0])   # 손을 크게 내린다(XR y 아래)
+    c.action(_state(pos=(0, 0, 0.9)))
+    assert c.target_p[2] >= c.z_min - 1e-12
+    assert c.target_p[2] == c.z_min

@@ -91,17 +91,19 @@ class QuestTeleopController(MouseTeleopController):
         reader: () -> (pose7 [x,y,z,qx,qy,qz,qw], grip, trigger). None이면 xrt_reader().
         pos_scale, rot_scale: 컨트롤러 이동/회전 → 목표 이동/회전 배율(1.0 == 1:1).
         grip_threshold, trigger_threshold: 클러치/그리퍼 판정 기준.
+        grip_release_threshold: 클러치가 물린 뒤 이 미만으로 내려가야 놓은 것으로 친다(히스테리시스).
         axes: XR -> 월드 축 변환 행렬.
         euro_*: 1-Euro 필터 파라미터. dt는 제어 주기(s).
         kp, kd, pos_cap, rot_cap: 마우스 텔레옵과 같은 PD 게인·상한. 회전은 남은 각을 rot_cap으로만 자른다.
     """
 
     def __init__(self, reader=None, pos_scale=1.0, rot_scale=1.0, kp=2.0, kd=2.0, pos_cap=1.0, rot_cap=0.4,
-                 grip_threshold=0.9, trigger_threshold=0.5, axes=M,
+                 grip_threshold=0.9, trigger_threshold=0.5, axes=M, grip_release_threshold=0.7,
                  euro_min_cutoff=1.0, euro_beta=0.01, euro_d_cutoff=1.0, dt=0.05):
         super().__init__(kp=kp, kd=kd, pos_cap=pos_cap, rot_cap=rot_cap, dt=dt)
         self.reader = reader if reader is not None else xrt_reader()
         self.pos_scale, self.rot_scale = pos_scale, rot_scale
+        self.grip_release_threshold = grip_release_threshold
         self.grip_threshold, self.trigger_threshold, self.axes = grip_threshold, trigger_threshold, np.asarray(axes)
         eu = dict(rate=1.0 / dt, min_cutoff=euro_min_cutoff, beta=euro_beta, d_cutoff=euro_d_cutoff)
         self._fp, self._fr = OneEuroFilter(3, **eu), OneEuroFilter(3, **eu)
@@ -121,6 +123,10 @@ class QuestTeleopController(MouseTeleopController):
         self._prev_p = np.asarray(state["grip"], float).copy()
         self._latch(self._prev_p, Rot.from_matrix(state["R"]))
         self._sync_hud()
+
+    @property
+    def clutched(self):
+        return self._ref is not None
 
     def _latch(self, p, R):
         self.target_p, self.target_R = p.copy(), R
@@ -149,7 +155,7 @@ class QuestTeleopController(MouseTeleopController):
         valid = pose.shape == (7,) and np.all(np.isfinite(pose)) and np.linalg.norm(pose[3:]) > 1e-6
         if self.target_p is None:   # reset 뒤 첫 스텝 — 지금 EE를 한 번 잡아 둔다
             self._latch(p, R)
-        if grip < self.grip_threshold:
+        if grip < (self.grip_release_threshold if self._ref is not None else self.grip_threshold):
             if self._ref is not None:   # 놓는 스텝 — 그 순간의 실제 EE를 목표로 고정한다
                 self._latch(p, R)
             self._armed, self._ref = True, None
@@ -161,8 +167,9 @@ class QuestTeleopController(MouseTeleopController):
             self._rv, self._a_rot = np.zeros(3), np.zeros(3)
 
         if self._ref is not None and not valid:
-            # 잡은 채 포즈를 못 읽었다 — 목표는 직전 것을 그대로 두고, 놓은 것으로 쳐서 다시 잡아야 따라간다
-            # (낡은 기준·필터 상태로 재개돼 튀는 것을 막는다)
+            # 잡은 채 포즈를 못 읽었다 — 놓을 때처럼 실제 EE에 고정하고, 다시 잡아야 따라간다
+            # (낡은 기준·필터 상태로 재개돼 튀거나 접촉 중 계속 미는 것을 막는다)
+            self._latch(p, R)
             self._armed, self._ref = False, None
         if self._ref is not None:   # 안 잡았으면 목표는 놓는 순간 고정한 것 그대로 — 실제 EE를 따라가지 않는다
             ref_cp, ref_cR, ref_p, ref_R = self._ref
@@ -170,6 +177,7 @@ class QuestTeleopController(MouseTeleopController):
             cR = Rot.from_matrix(self.axes @ Rot.from_quat(pose[3:]).as_matrix() @ self.axes.T)
             self._rv = _near((cR * ref_cR.inv()).as_rotvec(), self._rv)
             self.target_p = ref_p + self.pos_scale * (self._fp.filter(cp) - ref_cp)
+            self.target_p[2] = max(self.target_p[2], self.z_min)   # 테이블에 박지 않는다
             self.target_R = Rot.from_rotvec(self.rot_scale * self._fr.filter(self._rv)) * ref_R
         self._sync_hud()
 

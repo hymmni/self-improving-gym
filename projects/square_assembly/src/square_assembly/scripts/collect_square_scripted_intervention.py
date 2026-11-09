@@ -643,9 +643,13 @@ def main():
                     help="--human-only에서만 쓴다(정책이 있으면 체크포인트의 task를 쓴다)")
     ap.add_argument("--quest-pos-scale", type=float, default=1.0, help="[quest] 손 이동 배율(1.0=1:1)")
     ap.add_argument("--quest-rot-scale", type=float, default=1.0, help="[quest] 손 회전 배율")
-    ap.add_argument("--quest-kp", type=float, default=2.0, help="[quest] xy P 게인")
-    ap.add_argument("--quest-kd", type=float, default=2.0, help="[quest] xy D 게인")
+    ap.add_argument("--quest-kp", type=float, default=2.0, help="[quest] xyz P 게인")
+    ap.add_argument("--quest-kd", type=float, default=2.0, help="[quest] xyz D 게인")
     ap.add_argument("--quest-grip-threshold", type=float, default=0.9, help="[quest] 이 이상 쥐면 클러치 연결")
+    ap.add_argument("--quest-grip-release-threshold", type=float, default=0.7,
+                    help="[quest] 클러치가 물린 뒤 이 미만으로 내려가야 놓음(히스테리시스)")
+    ap.add_argument("--quest-euro-min-cutoff", type=float, default=1.0, help="[quest] 1-Euro 필터 min_cutoff(Hz)")
+    ap.add_argument("--quest-euro-beta", type=float, default=0.01, help="[quest] 1-Euro 필터 beta")
     ap.add_argument("--quest-trigger-threshold", type=float, default=0.5, help="[quest] 이 이상 당기면 그리퍼 닫힘")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
@@ -657,7 +661,9 @@ def main():
         task=args.task,
         quest=dict(pos_scale=args.quest_pos_scale, rot_scale=args.quest_rot_scale, kp=args.quest_kp,
                    kd=args.quest_kd, grip_threshold=args.quest_grip_threshold,
-                   trigger_threshold=args.quest_trigger_threshold),
+                   trigger_threshold=args.quest_trigger_threshold,
+                   grip_release_threshold=args.quest_grip_release_threshold,
+                   euro_min_cutoff=args.quest_euro_min_cutoff, euro_beta=args.quest_euro_beta),
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step), rot_cap=args.rot_cap))
 
