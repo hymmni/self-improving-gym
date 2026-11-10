@@ -63,18 +63,33 @@ def _head_yaw(q):
     return float(Rot.from_quat(q).as_euler("YXZ")[0])
 
 
-def undo_origin_yaw(ctrl, head, yaw0):
-    """앱이 기준점(XR Origin)을 헤드셋 위치 축으로 돌린 만큼(헤드셋 yaw − yaw0) 컨트롤러 포즈를 되돌린다.
+class OriginTurnUndo:
+    """XRoboToolkit 앱이 조이스틱 좌우로 기준점(XR Origin)을 돌린 것만 되돌린다.
 
-    XRoboToolkit 앱은 오른쪽 조이스틱 좌우로 기준점을 헤드셋 둘레로 돌린다(2026-11-10 실측: 헤드셋·컨트롤러
-    yaw가 함께 약 100도/s, 헤드셋 위치는 그대로). 헤드셋이 실제로 돌아도(목에 건 채 몸을 돌림) 같이 되돌리므로
-    그때는 몸 기준으로 조작하게 된다.
+    앱은 오른쪽 조이스틱 x를 밀면 기준점을 헤드셋 위치 둘레로 약 100도/s 돌린다(2026-11-10 실측: 헤드셋·
+    컨트롤러 yaw가 함께 돌고 헤드셋 위치는 그대로, 조이스틱이 0일 때는 돌지 않음). 그래서 이번이나 직전 샘플에서
+    |조이스틱 x| > stick_thr일 때의 헤드셋 yaw 변화만 앱 회전으로 보고 누적해 되돌린다. 조이스틱을 놓고 고개나
+    몸을 돌린 것은 그대로 둔다. 조이스틱을 미는 동안 실제로 고개를 돌린 양은 앱 회전과 같이 되돌려진다.
     """
-    d = Rot.from_rotvec([0.0, -_wrap(_head_yaw(head[3:]) - yaw0), 0.0])
-    out = np.array(ctrl, dtype=float)
-    out[:3] = d.apply(out[:3] - head[:3]) + head[:3]
-    out[3:] = (d * Rot.from_quat(out[3:])).as_quat()
-    return out
+
+    def __init__(self, stick_thr=0.1):
+        self.stick_thr = stick_thr
+        self.R, self.t = Rot.identity(), np.zeros(3)  # 보정 변환: 보정 = R·raw + t
+        self._yaw = self._sx = None
+
+    def update(self, head, sx):
+        yaw = _head_yaw(head[3:])
+        if self._yaw is not None and max(abs(sx), abs(self._sx)) > self.stick_thr:
+            d = Rot.from_rotvec([0.0, -_wrap(yaw - self._yaw), 0.0])  # raw에서 헤드셋 둘레로 되돌리는 회전
+            self.t = self.R.apply(head[:3] - d.apply(head[:3])) + self.t
+            self.R = self.R * d
+        self._yaw, self._sx = yaw, sx
+
+    def __call__(self, ctrl):
+        out = np.array(ctrl, dtype=float)
+        out[:3] = self.R.apply(out[:3]) + self.t
+        out[3:] = (self.R * Rot.from_quat(out[3:])).as_quat()
+        return out
 
 
 def _pose_ok(x):
@@ -83,24 +98,24 @@ def _pose_ok(x):
 
 def xrt_reader(headset_yaw_comp=True):
     """XRoboToolkit SDK로 오른쪽 컨트롤러를 읽는 reader를 돌려준다. SDK는 여기서 처음 import·init한다.
-    headset_yaw_comp면 처음 읽은 헤드셋 yaw 기준으로 undo_origin_yaw를 건다(헤드셋을 못 읽은 스텝은 직전 값)."""
+    headset_yaw_comp면 앱이 조이스틱으로 돌린 기준점을 OriginTurnUndo로 되돌린다(헤드셋을 못 읽은 스텝은 보정량 유지)."""
     global _xrt
     if _xrt is None:
         import xrobotoolkit_sdk as xrt
         xrt.init()
         _xrt = xrt
-    xrt, st = _xrt, {}
+    xrt, undo = _xrt, OriginTurnUndo()
 
     def read():
         c = np.asarray(xrt.get_right_controller_pose(), dtype=float)
+        stick = np.asarray(xrt.get_right_axis(), dtype=float)
         if headset_yaw_comp:
             h = np.asarray(xrt.get_headset_pose(), dtype=float)
             if _pose_ok(h):
-                st["h"] = h
-                st.setdefault("yaw0", _head_yaw(h[3:]))
-            if "h" in st and _pose_ok(c):
-                c = undo_origin_yaw(c, st["h"], st["yaw0"])
-        return c, float(xrt.get_right_grip()), float(xrt.get_right_trigger()), np.asarray(xrt.get_right_axis(), dtype=float)
+                undo.update(h, float(stick[0]))
+            if _pose_ok(c):
+                c = undo(c)
+        return c, float(xrt.get_right_grip()), float(xrt.get_right_trigger()), stick
     return read
 
 
@@ -132,7 +147,7 @@ class QuestTeleopController(MouseTeleopController):
     Args:
         reader: () -> (pose7 [x,y,z,qx,qy,qz,qw], grip, trigger, stick [x,y]). None이면 xrt_reader().
         rot_source: "stick"(컨트롤러 야우 + 조이스틱 롤·피치) 또는 "pose"(컨트롤러 회전 추종).
-        headset_yaw_comp: SDK reader에서 앱이 조이스틱으로 돌린 기준점을 헤드셋 yaw로 되돌린다(undo_origin_yaw).
+        headset_yaw_comp: SDK reader에서 앱이 조이스틱으로 돌린 기준점을 헤드셋 yaw로 되돌린다(OriginTurnUndo).
         max_tilt: 조이스틱을 끝까지 밀었을 때 기울기(rad). stick_deadzone: 조이스틱 기울기가 이 미만이면 0으로 본다.
         pos_scale, rot_scale: 컨트롤러 이동/회전 → 목표 이동/회전 배율(1.0 == 1:1).
         grip_threshold, trigger_threshold: 클러치/그리퍼 판정 기준.

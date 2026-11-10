@@ -3,7 +3,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
-from square_assembly.runners.quest_teleop import QuestTeleopController, undo_origin_yaw
+from square_assembly.runners.quest_teleop import OriginTurnUndo, QuestTeleopController
 from square_assembly.runners.square_oracle import _POS_SCALE, _ROT_SCALE
 
 M = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)  # XR(x右,y上,-z前) -> 월드
@@ -304,14 +304,30 @@ def test_stick_tilts_like_a_helicopter_and_returns_level():
     np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0, 0, -1], atol=1e-6)
 
 
-def test_undo_origin_yaw_cancels_app_turn_about_headset():
+def _turn_about(pose, head, turn):
+    out = pose.copy()
+    out[:3] = turn.apply(pose[:3] - head[:3]) + head[:3]
+    out[3:] = (turn * Rot.from_quat(pose[3:])).as_quat()
+    return out
+
+
+def test_origin_turn_undo_cancels_only_stick_turns():
     head = np.array([0.03, -0.5, 0.69, *Rot.from_rotvec([0, 0.3, 0]).as_quat()])
     ctrl = np.array([0.2, -0.56, 0.4, *Rot.from_rotvec([0.1, -0.2, 0.05]).as_quat()])
-    turn = Rot.from_rotvec([0, 1.2, 0])  # 앱이 기준점을 헤드셋 둘레로 1.2rad 돌림
-    h2, c2 = head.copy(), ctrl.copy()
-    h2[3:] = (turn * Rot.from_quat(head[3:])).as_quat()
-    c2[:3] = turn.apply(ctrl[:3] - head[:3]) + head[:3]
-    c2[3:] = (turn * Rot.from_quat(ctrl[3:])).as_quat()
-    out = undo_origin_yaw(c2, h2, yaw0=0.3)
+    u = OriginTurnUndo()
+    u.update(head, 0.0)
+    # 조이스틱을 민 채 앱이 기준점을 헤드셋 둘레로 0.1rad씩 12번 돌림 → 원래 컨트롤러 포즈로 되돌아와야 한다
+    h, c = head, ctrl
+    for _ in range(12):
+        step = Rot.from_rotvec([0, 0.1, 0])
+        h, c = _turn_about(h, h, step), _turn_about(c, h, step)
+        u.update(h, -1.0)
+    u.update(h, 0.0)
+    out = u(c)
     np.testing.assert_allclose(out[:3], ctrl[:3], atol=1e-9)
     assert (Rot.from_quat(out[3:]) * Rot.from_quat(ctrl[3:]).inv()).magnitude() < 1e-9
+    # 조이스틱을 놓고 고개만 0.5rad 돌림 → 보정량이 그대로여야 한다
+    h2 = h.copy()
+    h2[3:] = (Rot.from_rotvec([0, 0.5, 0]) * Rot.from_quat(h[3:])).as_quat()
+    u.update(h2, 0.0)
+    np.testing.assert_allclose(u(c)[:3], ctrl[:3], atol=1e-9)

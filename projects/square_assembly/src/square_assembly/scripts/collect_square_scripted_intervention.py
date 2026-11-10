@@ -649,7 +649,7 @@ def main():
     ap.add_argument("--quest-rot", choices=["stick", "pose"], default="stick",
                     help="[quest] stick: 컨트롤러 야우 + 오른쪽 조이스틱 롤·피치(헬기식), pose: 컨트롤러 회전 추종")
     ap.add_argument("--quest-no-yaw-comp", action="store_true",
-                    help="[quest] 조이스틱이 돌린 앱 기준점을 헤드셋 yaw로 되돌리지 않는다(헤드셋을 쓰고 고개를 돌릴 때)")
+                    help="[quest] 조이스틱 좌우로 앱 기준점이 돈 것을 되돌리지 않는다")
     ap.add_argument("--quest-max-tilt", type=float, default=30.0, help="[quest] 조이스틱 끝까지 밀 때 기울기(도)")
     ap.add_argument("--quest-grip-threshold", type=float, default=0.9, help="[quest] 이 이상 쥐면 클러치 연결")
     ap.add_argument("--quest-grip-release-threshold", type=float, default=0.7,
