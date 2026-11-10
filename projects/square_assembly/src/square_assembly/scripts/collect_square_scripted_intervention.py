@@ -648,6 +648,8 @@ def main():
     ap.add_argument("--quest-rot-scale", type=float, default=1.0, help="[quest] 손 회전 배율(--quest-rot pose일 때)")
     ap.add_argument("--quest-rot", choices=["stick", "pose"], default="stick",
                     help="[quest] stick: 컨트롤러 야우 + 오른쪽 조이스틱 롤·피치(헬기식), pose: 컨트롤러 회전 추종")
+    ap.add_argument("--quest-no-yaw-comp", action="store_true",
+                    help="[quest] 조이스틱이 돌린 앱 기준점을 헤드셋 yaw로 되돌리지 않는다(헤드셋을 쓰고 고개를 돌릴 때)")
     ap.add_argument("--quest-max-tilt", type=float, default=30.0, help="[quest] 조이스틱 끝까지 밀 때 기울기(도)")
     ap.add_argument("--quest-grip-threshold", type=float, default=0.9, help="[quest] 이 이상 쥐면 클러치 연결")
     ap.add_argument("--quest-grip-release-threshold", type=float, default=0.7,
@@ -668,7 +670,8 @@ def main():
                    trigger_threshold=args.quest_trigger_threshold,
                    grip_release_threshold=args.quest_grip_release_threshold,
                    euro_min_cutoff=args.quest_euro_min_cutoff, euro_beta=args.quest_euro_beta,
-                   rot_source=args.quest_rot, max_tilt=np.deg2rad(args.quest_max_tilt)),
+                   rot_source=args.quest_rot, max_tilt=np.deg2rad(args.quest_max_tilt),
+                   headset_yaw_comp=not args.quest_no_yaw_comp),
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step), rot_cap=args.rot_cap))
 

@@ -3,7 +3,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
-from square_assembly.runners.quest_teleop import QuestTeleopController
+from square_assembly.runners.quest_teleop import QuestTeleopController, undo_origin_yaw
 from square_assembly.runners.square_oracle import _POS_SCALE, _ROT_SCALE
 
 M = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)  # XR(x右,y上,-z前) -> 월드
@@ -302,3 +302,16 @@ def test_stick_tilts_like_a_helicopter_and_returns_level():
     r.set(stick=[0.1, 0])  # deadzone → 수직
     c.action(_state())
     np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0, 0, -1], atol=1e-6)
+
+
+def test_undo_origin_yaw_cancels_app_turn_about_headset():
+    head = np.array([0.03, -0.5, 0.69, *Rot.from_rotvec([0, 0.3, 0]).as_quat()])
+    ctrl = np.array([0.2, -0.56, 0.4, *Rot.from_rotvec([0.1, -0.2, 0.05]).as_quat()])
+    turn = Rot.from_rotvec([0, 1.2, 0])  # 앱이 기준점을 헤드셋 둘레로 1.2rad 돌림
+    h2, c2 = head.copy(), ctrl.copy()
+    h2[3:] = (turn * Rot.from_quat(head[3:])).as_quat()
+    c2[:3] = turn.apply(ctrl[:3] - head[:3]) + head[:3]
+    c2[3:] = (turn * Rot.from_quat(ctrl[3:])).as_quat()
+    out = undo_origin_yaw(c2, h2, yaw0=0.3)
+    np.testing.assert_allclose(out[:3], ctrl[:3], atol=1e-9)
+    assert (Rot.from_quat(out[3:]) * Rot.from_quat(ctrl[3:]).inv()).magnitude() < 1e-9
