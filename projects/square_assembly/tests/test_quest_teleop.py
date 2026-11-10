@@ -370,3 +370,20 @@ def test_grip_held_through_manual_pause_needs_fresh_press():
     r.set(grip=0.0); interv._quest_gate()
     r.set(grip=1.0); interv._quest_gate()
     assert not interv._paused
+
+
+def test_b_button_restarts_once_per_press():
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    pressed = [False]
+    r = FakeReader()
+    c = QuestTeleopController(reader=r, euro_min_cutoff=1e6, restart_button=lambda: pressed[0])
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
+    interv._quest_buttons()
+    assert not interv._restart
+    pressed[0] = True
+    interv._quest_buttons()
+    assert interv._restart and interv._paused          # R 키와 같다
+    interv._restart = False
+    interv._quest_buttons()
+    assert not interv._restart                          # 누르고 있는 동안 한 번만

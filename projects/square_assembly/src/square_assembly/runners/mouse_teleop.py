@@ -317,7 +317,7 @@ class MouseTeleopIntervention:
         self.human_only = human_only
         self.mouse_input = mouse_input   # False(Quest): 마우스 이동·휠·좌클릭을 무시한다 — 자석·포인터 warp도 없다
         if not mouse_input:
-            self._HELP = (self._HELP[0], "[s] pause   [q] give up   Quest: grip=move  trigger=gripper")
+            self._HELP = (self._HELP[0], "[s] pause   [q] give up   Quest: grip=move  trigger=gripper  B=restart")
         self.stg_bins = stg_bins
         self.stg_show = {"bars": True, "mean": True}  # 분포 막대 / 기댓값 곡선
         self._bar = None           # 체크박스 띠(Tk) — 화면 배율을 잴 때 그 높이를 뺀다
@@ -332,6 +332,7 @@ class MouseTeleopIntervention:
         self.map_extent = map_extent
         self.window_name = window_name
         self.back_steps = back_steps
+        self.restart_key = restart_key
         self.keys = {toggle_key: "toggle", switch_key: "last_switch",
                      pause_key: "pause", quit_key: "quit",
                      back_key: "back", restart_key: "restart", "Return": "confirm", "Escape": "cancel",
@@ -352,6 +353,7 @@ class MouseTeleopIntervention:
         self._active = False
         self._paused = False
         self._grip_low = False     # Quest: 멈춘 뒤 그립을 놓은 것을 봤는지 — 새로 당겨야 풀린다
+        self._b_prev = False       # Quest: 직전에 B 버튼이 눌려 있었는지 — 누르는 순간 한 번만
         self._quit_requested = False
         self._back, self._restart, self._switches, self._resync = 0, False, 0, False
         self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
@@ -504,6 +506,16 @@ class MouseTeleopIntervention:
         elif what == "restart":
             self._restart = True
             self._paused = True
+
+    def _quest_buttons(self):
+        """Quest 컨트롤러 버튼 → 키. B는 [r](에피소드 처음으로)과 같다."""
+        f = None if self.mouse_input else getattr(self.controller, "restart_button", None)
+        if f is None:
+            return
+        b = f()
+        if b and not self._b_prev:
+            self._handle_key(self.restart_key)
+        self._b_prev = b
 
     def _quest_gate(self):
         """Quest 사람 모드에선 클러치(중지 그립)를 잡은 동안만 시뮬레이터가 돈다. 놓으면 멈추고, 멈춘 동안
@@ -776,6 +788,7 @@ class MouseTeleopIntervention:
             else:
                 self._photo.paste(img)
             self._root.update()
+            self._quest_buttons()
             self._quest_gate()
             if (self._quit_requested or self.redo_requested or not self._paused
                     or self._back or self._restart or self._switches):
@@ -954,7 +967,7 @@ class MouseTeleopIntervention:
         row2 += ([("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"), ("key", "Wheel"), ("text", "yaw"),
                   ("key", "LMB"), ("text", "grip")] if self.mouse_input else
                  [("text", "Quest:"), ("key", "Grip"), ("text", "move"), ("key", "Trigger"), ("text", "gripper"),
-                  ("key", "Stick"), ("text", "tilt")])
+                  ("key", "Stick"), ("text", "tilt"), ("key", "B"), ("text", "restart")])
         hud.row(d, (lx, ly + 64 * k), row2, size=sz)
         now = time.time()
         if self._toast is not None and now < self._toast[1]:
