@@ -7,8 +7,9 @@
 - XR 좌표(x 오른쪽, y 위, −z 앞)는 행렬 M으로 월드(x 로봇 앞쪽 반대, y 오른쪽, z 위)로 옮긴다.
 - 위치와 (클러치 기준 대비) 상대 회전은 1-Euro 필터를 거친다. 회전은 rotvec이라 ±π 근처에서 부호가
   뒤집히므로, 필터 입력과 출력 액션 모두 직전 값에 가까운 쪽의 등가 rotvec을 고른다.
-- 회전 입력은 rot_source로 고른다. "stick"(기본): 컨트롤러 회전은 무시하고 손목을 마우스 텔레옵처럼 수직 아래로
-  고정한 채 오른쪽 조이스틱 좌우로 야우만 돌린다(손목 관절 범위에서 멈춘다). "pose": 컨트롤러 회전을 그대로 따른다.
+- 회전 입력은 rot_source로 고른다. "stick"(기본): 야우는 클러치 동안 컨트롤러가 수평으로 돈 각(앞 방향의 방위각)을
+  따르고(손목 관절 범위에서 멈춘다), 롤·피치는 오른쪽 조이스틱이 헬기처럼 정한다 — 민 만큼(끝까지 = max_tilt)
+  그리퍼 끝이 그쪽으로 기울고 놓으면 수직 아래로 돌아온다. "pose": 컨트롤러 회전을 그대로 따른다.
 """
 
 import math
@@ -16,8 +17,8 @@ import math
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
-from square_assembly.runners.mouse_teleop import MouseTeleopController
-from square_assembly.runners.square_oracle import _POS_SCALE, _ROT_SCALE
+from square_assembly.runners.mouse_teleop import MouseTeleopController, _wrap
+from square_assembly.runners.square_oracle import _POS_SCALE, _ROT_SCALE, yaw_of
 
 # XR(x 오른쪽, y 위, −z 앞) -> 월드(+x 로봇에서 사람 쪽, +y 오른쪽, +z 위)
 M = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)
@@ -77,6 +78,12 @@ def close_xrt():
         _xrt = None
 
 
+def _ctrl_yaw(cR):
+    """월드로 옮긴 컨트롤러 회전의 앞 방향(XR −z = 월드 −x)이 월드 xy 평면에서 향하는 각."""
+    f = cR.as_matrix() @ np.array([-1.0, 0.0, 0.0])
+    return float(np.arctan2(f[1], f[0]))
+
+
 def _near(rv, prev):
     """rv와 같은 회전인 rotvec(rv, rv−2π·축) 중 prev에 가까운 쪽 — ±π 근처 부호 뒤집힘 방지."""
     n = np.linalg.norm(rv)
@@ -91,8 +98,8 @@ class QuestTeleopController(MouseTeleopController):
 
     Args:
         reader: () -> (pose7 [x,y,z,qx,qy,qz,qw], grip, trigger, stick [x,y]). None이면 xrt_reader().
-        rot_source: "stick"(손목 아래 고정 + 조이스틱 야우) 또는 "pose"(컨트롤러 회전 추종).
-        yaw_rate: 조이스틱을 끝까지 밀었을 때 야우 속도(rad/s). stick_deadzone: 이 미만은 0으로 본다.
+        rot_source: "stick"(컨트롤러 야우 + 조이스틱 롤·피치) 또는 "pose"(컨트롤러 회전 추종).
+        max_tilt: 조이스틱을 끝까지 밀었을 때 기울기(rad). stick_deadzone: 조이스틱 기울기가 이 미만이면 0으로 본다.
         pos_scale, rot_scale: 컨트롤러 이동/회전 → 목표 이동/회전 배율(1.0 == 1:1).
         grip_threshold, trigger_threshold: 클러치/그리퍼 판정 기준.
         grip_release_threshold: 클러치가 물린 뒤 이 미만으로 내려가야 놓은 것으로 친다(히스테리시스).
@@ -105,10 +112,10 @@ class QuestTeleopController(MouseTeleopController):
     def __init__(self, reader=None, pos_scale=1.0, rot_scale=1.0, pos_cap=1.0, rot_cap=0.4,
                  grip_threshold=0.9, trigger_threshold=0.5, axes=M, grip_release_threshold=0.7,
                  euro_min_cutoff=1.0, euro_beta=0.01, euro_d_cutoff=1.0, dt=0.05,
-                 rot_source="stick", yaw_rate=np.deg2rad(60.0), stick_deadzone=0.15):
+                 rot_source="stick", max_tilt=np.deg2rad(30.0), stick_deadzone=0.15):
         super().__init__(pos_cap=pos_cap, rot_cap=rot_cap, dt=dt)
         assert rot_source in ("stick", "pose"), rot_source
-        self.rot_source, self.yaw_rate, self.stick_deadzone = rot_source, yaw_rate, stick_deadzone
+        self.rot_source, self.max_tilt, self.stick_deadzone = rot_source, max_tilt, stick_deadzone
         self.reader = reader if reader is not None else xrt_reader()
         self.pos_scale, self.rot_scale = pos_scale, rot_scale
         self.grip_release_threshold = grip_release_threshold
@@ -170,6 +177,8 @@ class QuestTeleopController(MouseTeleopController):
             self._fp.x_prev = self._fr.x_prev = None
             self._fp.dx_prev, self._fr.dx_prev = np.zeros(3), np.zeros(3)
             self._rv, self._a_rot = np.zeros(3), np.zeros(3)
+            self._cy, self._dyaw = _ctrl_yaw(cR), 0.0   # stick: 클러치 동안 컨트롤러가 돈 야우(접지 않음)
+            self._yaw0 = self.target_yaw if self.target_yaw is not None else yaw_of(state["R"])
 
         if self._ref is not None and not valid:
             # 잡은 채 포즈를 못 읽었다 — 놓을 때처럼 실제 EE에 고정하고, 다시 잡아야 따라간다
@@ -180,20 +189,32 @@ class QuestTeleopController(MouseTeleopController):
             ref_cp, ref_cR, ref_p, ref_R = self._ref
             cp = self.axes @ pose[:3]
             cR = Rot.from_matrix(self.axes @ Rot.from_quat(pose[3:]).as_matrix() @ self.axes.T)
-            self._rv = _near((cR * ref_cR.inv()).as_rotvec(), self._rv)
             self.target_p = ref_p + self.pos_scale * (self._fp.filter(cp) - ref_cp)
             self.target_p[2] = max(self.target_p[2], self.z_min)   # 테이블에 박지 않는다
-            self.target_R = Rot.from_rotvec(self.rot_scale * self._fr.filter(self._rv)) * ref_R
+            if self.rot_source == "pose":
+                self._rv = _near((cR * ref_cR.inv()).as_rotvec(), self._rv)
+                self.target_R = Rot.from_rotvec(self.rot_scale * self._fr.filter(self._rv)) * ref_R
+            else:
+                cy = _ctrl_yaw(cR)
+                self._dyaw += _wrap(cy - self._cy)
+                self._cy = cy
+                self.target_yaw = self._yaw0 + self.rot_scale * float(self._fr.filter([self._dyaw, 0.0, 0.0])[0])
         self._sync_hud()
 
         a[:3] = np.clip((self.target_p - p) / _POS_SCALE, -self.pos_cap, self.pos_cap)
         if self.rot_source == "stick":
-            sx = float(np.asarray(stick, float).reshape(-1)[0]) if np.size(stick) else 0.0
-            if np.isfinite(sx) and abs(sx) >= self.stick_deadzone and self.target_yaw is not None:
-                # 오른쪽으로 밀면 위에서 봐 시계 방향(−야우)
-                self.target_yaw = float(np.clip(self.target_yaw - sx * self.yaw_rate * self.dt, *self.yaw_lim))
-            a[3:6] = self.yaw_rot(state, state["R"])
-            return a
+            lo, hi = self.yaw_limits(state)
+            if self.target_yaw is None:
+                self.target_yaw = self.yaw
+            # 손목 범위 안으로 자르고, 반 바퀴 안쪽만 앞세운다(마우스 텔레옵 yaw_rot과 같다)
+            yaw = self.yaw + np.clip(np.clip(self.target_yaw, lo, hi) - self.yaw, -2.5, 2.5)
+            x, z = np.array([np.cos(yaw), np.sin(yaw), 0.0]), np.array([0.0, 0.0, -1.0])
+            s = np.asarray(stick, float).reshape(-1)[:2] if np.size(stick) >= 2 else np.zeros(2)
+            if not np.all(np.isfinite(s)) or np.linalg.norm(s) < self.stick_deadzone:
+                s = np.zeros(2)
+            # 앞(+y 스틱) → 끝이 월드 −x(로봇 쪽)로: +y축 회전. 오른쪽(+x 스틱) → 끝이 월드 +y로: +x축 회전
+            self.target_R = Rot.from_rotvec(self.max_tilt * np.array([s[0], s[1], 0.0])) * \
+                Rot.from_matrix(np.column_stack([x, np.cross(z, x), z]))
         rot = _near((self.target_R * R.inv()).as_rotvec(), self._a_rot)
         self._a_rot = rot
         a[3:6] = np.clip(rot / _ROT_SCALE, -self.rot_cap, self.rot_cap)

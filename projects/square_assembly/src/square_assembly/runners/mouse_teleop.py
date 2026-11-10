@@ -933,7 +933,7 @@ class MouseTeleopIntervention:
         row2 += ([("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"), ("key", "Wheel"), ("text", "yaw"),
                   ("key", "LMB"), ("text", "grip")] if self.mouse_input else
                  [("text", "Quest:"), ("key", "Grip"), ("text", "move"), ("key", "Trigger"), ("text", "gripper"),
-                  ("key", "Stick"), ("text", "yaw")])
+                  ("key", "Stick"), ("text", "tilt")])
         hud.row(d, (lx, ly + 64 * k), row2, size=sz)
         now = time.time()
         if self._toast is not None and now < self._toast[1]:

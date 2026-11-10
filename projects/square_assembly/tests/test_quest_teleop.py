@@ -263,13 +263,13 @@ def test_floor_clamps_target_z():
     assert c.target_p[2] == c.z_min
 
 
-def test_stick_mode_ignores_controller_rotation_and_levels_wrist():
+def test_stick_mode_ignores_controller_pitch_and_levels_wrist():
     tilted = Rot.from_rotvec([0.2, 0, 0]).as_matrix() @ _DOWN
     r, c = _make(rot_source="stick")
     _engage(r, c, _state(R=tilted))
-    r.set(quat=Rot.from_rotvec([0, 0.5, 0]).as_quat())
+    r.set(quat=Rot.from_rotvec([0.5, 0, 0]).as_quat())  # XR x축(피치) — 야우가 아니므로 무시
     a = c.action(_state(R=tilted))
-    assert a[3] < -1e-3 and abs(a[4]) < 1e-6 and abs(a[5]) < 1e-6  # 기운 x축만 되돌린다 — 컨트롤러 회전 무시
+    assert a[3] < -1e-3 and abs(a[4]) < 1e-6 and abs(a[5]) < 1e-6  # 기운 x축만 되돌린다
 
 
 def test_stick_mode_position_still_follows():
@@ -280,14 +280,25 @@ def test_stick_mode_position_still_follows():
     np.testing.assert_allclose(a[:3], [0, 0.01 / _POS_SCALE, 0], atol=1e-6)
 
 
-def test_stick_right_turns_yaw_negative_and_deadzone():
-    r, c = _make(rot_source="stick", yaw_rate=1.0)
-    c.take_over(_state())
+def test_stick_mode_yaw_follows_controller_yaw():
+    r, c = _make(rot_source="stick")
+    _engage(r, c)
     y0 = c.target_yaw
-    r.set(stick=[0.1, 0])
-    c.action(_state())
-    assert c.target_yaw == y0  # deadzone
-    r.set(stick=[1.0, 0])
+    r.set(quat=Rot.from_rotvec([0, 0.1, 0]).as_quat())  # XR y(위)축 = 월드 z축 +0.1rad
     a = c.action(_state())
-    np.testing.assert_allclose(c.target_yaw, y0 - 0.05, atol=1e-9)
-    assert a[5] < 0  # 월드 z축 기준 −야우로 돈다
+    np.testing.assert_allclose(c.target_yaw, y0 + 0.1, atol=1e-6)
+    assert a[5] > 0 and abs(a[3]) < 1e-6 and abs(a[4]) < 1e-6
+
+
+def test_stick_tilts_like_a_helicopter_and_returns_level():
+    r, c = _make(rot_source="stick", max_tilt=np.deg2rad(30))
+    _engage(r, c)
+    r.set(stick=[0, 1.0])  # 앞
+    c.action(_state())
+    np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [-0.5, 0, -np.cos(np.deg2rad(30))], atol=1e-6)
+    r.set(stick=[1.0, 0])  # 오른쪽
+    c.action(_state())
+    np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0, 0.5, -np.cos(np.deg2rad(30))], atol=1e-6)
+    r.set(stick=[0.1, 0])  # deadzone → 수직
+    c.action(_state())
+    np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0, 0, -1], atol=1e-6)
