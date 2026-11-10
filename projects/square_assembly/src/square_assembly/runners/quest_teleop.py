@@ -180,11 +180,15 @@ class QuestTeleopController(MouseTeleopController):
         self._a_rot = np.zeros(3)  # 직전 회전 액션 rotvec(연속화 기준)
         self.target_p = self.target_R = None
 
-    def take_over(self, state):
+    def take_over(self, state, armed=False):
+        """armed면 이미 쥐고 있는 그립으로 바로 잡는다(멈춘 동안 새로 당겨 재개할 때)."""
         super().take_over(state)
-        self._ref, self._armed = None, False
+        self._ref, self._armed = None, armed
         self._latch(np.asarray(state["grip"], float), Rot.from_matrix(state["R"]))
         self._sync_hud()
+
+    def read_grip(self):
+        return float(self.reader()[1])
 
     @property
     def clutched(self):

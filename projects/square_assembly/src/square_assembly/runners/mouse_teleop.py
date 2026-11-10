@@ -351,6 +351,7 @@ class MouseTeleopIntervention:
     def reset(self):
         self._active = False
         self._paused = False
+        self._grip_low = False     # Quest: 멈춘 뒤 그립을 놓은 것을 봤는지 — 새로 당겨야 풀린다
         self._quit_requested = False
         self._back, self._restart, self._switches, self._resync = 0, False, 0, False
         self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
@@ -503,6 +504,24 @@ class MouseTeleopIntervention:
         elif what == "restart":
             self._restart = True
             self._paused = True
+
+    def _quest_gate(self):
+        """Quest 사람 모드에선 클러치(중지 그립)를 잡은 동안만 시뮬레이터가 돈다. 놓으면 멈추고, 멈춘 동안
+        그립을 놓았다가 새로 당기면 풀린다([s]·되감기로 멈춘 것도 같다). 풀 때 지금 EE에서 새로 잡아 손이
+        멈춘 동안 움직인 만큼 튀지 않는다."""
+        if self.mouse_input or not self._active or self._confirm_redo:
+            return
+        c = self.controller
+        if not self._paused:
+            if not c.clutched:
+                self._paused, self._grip_low = True, False
+            return
+        g = c.read_grip()
+        if g < c.grip_release_threshold:
+            self._grip_low = True
+        elif self._grip_low and g >= c.grip_threshold:
+            self._paused, self._rewound, self._resync = False, None, False
+            c.take_over(self._state_fn(), armed=True)
 
     def _on_key(self, keysym, down):
         """Tk 누름/뗌 이벤트. 올리기/내리기 키는 누르고 있는 동안만 z를 움직이고, 나머지는 누를 때 한 번."""
@@ -733,6 +752,7 @@ class MouseTeleopIntervention:
 
         if self._root is None:
             self._open_window()
+        self._grip_low = False   # 이 장면에서 멈췄다면 그립을 새로 당겨야 풀린다
         frames = frame if isinstance(frame, (list, tuple, dict)) else [frame]
         while True:
             arr = self._compose(frames)
@@ -756,6 +776,7 @@ class MouseTeleopIntervention:
             else:
                 self._photo.paste(img)
             self._root.update()
+            self._quest_gate()
             if (self._quit_requested or self.redo_requested or not self._paused
                     or self._back or self._restart or self._switches):
                 return not (self._quit_requested or self.redo_requested)
@@ -855,7 +876,7 @@ class MouseTeleopIntervention:
                          hud.PANEL, color=hud.TEXT, size=round(13 * k), bold=False, pad=(10, 6))
         if self._paused:
             x = hud.pill(d, (x + 8 * k, 16 * k), "PAUSED", hud.PAUSED + (255,), size=round(18 * k))
-            msg = "S  resume"
+            msg = "S  resume" if self.mouse_input or not self._active else "grip  resume"
             if self._rewound is not None:
                 msg = f"step {self._rewound[0]} \u2192 {self._rewound[1]}     " + msg
             if self._active and not self._snapped:

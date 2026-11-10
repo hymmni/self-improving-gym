@@ -331,3 +331,42 @@ def test_origin_turn_undo_cancels_only_stick_turns():
     h2[3:] = (Rot.from_rotvec([0, 0.5, 0]) * Rot.from_quat(h[3:])).as_quat()
     u.update(h2, 0.0)
     np.testing.assert_allclose(u(c)[:3], ctrl[:3], atol=1e-9)
+
+
+def test_grip_release_pauses_and_fresh_grip_resumes_without_jump():
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    r, c = _make()
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
+    interv._active = True
+    _engage(r, c)
+    interv._quest_gate()
+    assert not interv._paused             # 쥐고 있는 동안은 돈다
+    r.set(grip=0.0)
+    interv(0, {})                         # 놓는 스텝
+    interv._quest_gate()
+    assert interv._paused                 # 놓으면 멈춘다
+    r.set(pos=[0.0, 0.5, 0.0])            # 멈춘 동안 손이 멀리 움직인다
+    interv._quest_gate()
+    assert interv._paused
+    r.set(grip=1.0)
+    interv._quest_gate()
+    assert not interv._paused             # 다시 쥐면 풀린다
+    np.testing.assert_allclose(interv(1, {})[:6], 0, atol=1e-6)   # 그 자리에서 바로 잡힌다
+    assert c.clutched
+
+
+def test_grip_held_through_manual_pause_needs_fresh_press():
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    r, c = _make()
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
+    interv._active = True
+    _engage(r, c)
+    interv._handle_key("s")               # 쥔 채 [s]로 멈춤
+    interv._grip_low = False
+    interv._quest_gate()
+    assert interv._paused                 # 계속 쥐고 있으면 안 풀린다
+    r.set(grip=0.0); interv._quest_gate()
+    r.set(grip=1.0); interv._quest_gate()
+    assert not interv._paused
