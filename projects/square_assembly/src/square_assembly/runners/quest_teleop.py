@@ -8,8 +8,8 @@
 - 위치와 (클러치 기준 대비) 상대 회전은 1-Euro 필터를 거친다. 회전은 rotvec이라 ±π 근처에서 부호가
   뒤집히므로, 필터 입력과 출력 액션 모두 직전 값에 가까운 쪽의 등가 rotvec을 고른다.
 - 회전 입력은 rot_source로 고른다. "stick"(기본): 야우는 클러치 동안 컨트롤러가 수평으로 돈 각(앞 방향의 방위각)을
-  따르고(손목 관절 범위에서 멈춘다), 롤·피치는 오른쪽 조이스틱이 헬기처럼 정한다 — 민 만큼(끝까지 = max_tilt)
-  그리퍼 끝이 그쪽으로 기울고 놓으면 수직 아래로 돌아온다. "pose": 컨트롤러 회전을 그대로 따른다.
+  따르고(손목 관절 범위에서 멈춘다), 롤·피치는 오른쪽 조이스틱이 헬기처럼 정한다 — 민 쪽으로 손목 위가 기울고(끝까지 = max_tilt)
+  그리퍼 끝은 반대쪽을 향한다. 놓으면 수직 아래로 돌아온다. "pose": 컨트롤러 회전을 그대로 따른다.
 """
 
 import math
@@ -212,8 +212,8 @@ class QuestTeleopController(MouseTeleopController):
             s = np.asarray(stick, float).reshape(-1)[:2] if np.size(stick) >= 2 else np.zeros(2)
             if not np.all(np.isfinite(s)) or np.linalg.norm(s) < self.stick_deadzone:
                 s = np.zeros(2)
-            # 앞(+y 스틱) → 끝이 월드 −x(로봇 쪽)로: +y축 회전. 오른쪽(+x 스틱) → 끝이 월드 +y로: +x축 회전
-            self.target_R = Rot.from_rotvec(self.max_tilt * np.array([s[0], s[1], 0.0])) * \
+            # 헬기처럼 민 쪽으로 위가 기운다: 앞(+y 스틱) → 끝이 월드 +x(사람 쪽)로, 오른쪽(+x 스틱) → 끝이 월드 −y로
+            self.target_R = Rot.from_rotvec(-self.max_tilt * np.array([s[0], s[1], 0.0])) * \
                 Rot.from_matrix(np.column_stack([x, np.cross(z, x), z]))
         rot = _near((self.target_R * R.inv()).as_rotvec(), self._a_rot)
         self._a_rot = rot

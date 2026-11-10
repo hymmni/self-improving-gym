@@ -293,12 +293,12 @@ def test_stick_mode_yaw_follows_controller_yaw():
 def test_stick_tilts_like_a_helicopter_and_returns_level():
     r, c = _make(rot_source="stick", max_tilt=np.deg2rad(30))
     _engage(r, c)
-    r.set(stick=[0, 1.0])  # 앞
+    r.set(stick=[0, 1.0])  # 앞 — 위가 앞으로, 끝은 사람 쪽(+x)
     c.action(_state())
-    np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [-0.5, 0, -np.cos(np.deg2rad(30))], atol=1e-6)
-    r.set(stick=[1.0, 0])  # 오른쪽
+    np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0.5, 0, -np.cos(np.deg2rad(30))], atol=1e-6)
+    r.set(stick=[1.0, 0])  # 오른쪽 — 끝은 왼쪽(−y)
     c.action(_state())
-    np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0, 0.5, -np.cos(np.deg2rad(30))], atol=1e-6)
+    np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0, -0.5, -np.cos(np.deg2rad(30))], atol=1e-6)
     r.set(stick=[0.1, 0])  # deadzone → 수직
     c.action(_state())
     np.testing.assert_allclose(c.target_R.as_matrix()[:, 2], [0, 0, -1], atol=1e-6)
