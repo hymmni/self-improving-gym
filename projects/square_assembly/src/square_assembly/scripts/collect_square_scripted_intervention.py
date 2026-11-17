@@ -52,6 +52,9 @@ mouse와 같은 Tk 창·키 조작을 쓰되 마우스는 무시하고 Quest 3S 
      다시 당기면 그 자리에서 이어 잡으며 풀린다([s]·되감기로 멈춘 것도 그립을 놓았다 당기면 풀린다).
      B 버튼은 [r](에피소드 처음으로)과 같다.
 
+`--nut-yaw-exclude LO HI`면 너트 초기 yaw에서 그 구간(도)을 빼고 나머지에서 뽑는다. 값은 hdf5(data.attrs)에 남고
+merge_demo_hdf5가 env_args.env_kwargs로 옮기므로 그 데이터로 학습한 정책의 학습 중 평가·eval·train_si도 같은 범위를 쓴다.
+
 창이 작으면 최대화 버튼을 누르거나 테두리를 끌어 키운다 — 다 그린 화면을 창에 맞춰 늘려 띄운다. `--zoom 1.5`는 처음 창 크기,
 `--fullscreen`은 전체화면으로 시작(실행 중 F11로 오간다).
 
@@ -347,7 +350,7 @@ def load_human_only_task_cfg(task):
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False,
         ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False, stg_ckpt=None,
-        task="square", quest=None):
+        task="square", quest=None, nut_yaw_exclude=None):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
     human_ui = mode in ("mouse", "quest")   # 사람이 Tk 창에서 조종하는 모드 — quest도 같은 창을 쓴다
@@ -391,6 +394,15 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
         stats_path = os.path.join(os.path.dirname(base_ckpt), "normalization_stats.json")
         normalizer = MinMaxNormalizer(load_stats(stats_path))
+    if nut_yaw_exclude is not None:   # 초기 너트 yaw에서 뺄 구간(도) — make_image_env가 sampler에 건다
+        from omegaconf import OmegaConf
+
+        OmegaConf.set_struct(task_cfg, False)
+        ek = task_cfg.get("env_kwargs")
+        task_cfg.env_kwargs = {**(OmegaConf.to_container(ek, resolve=True) if ek else {}),
+                               "nut_yaw_exclude": [float(v) for v in nut_yaw_exclude]}
+    exclude = (task_cfg.get("env_kwargs") or {}).get("nut_yaw_exclude")   # 정책 run_config에 있던 것도
+    exclude = None if exclude is None else [float(v) for v in exclude]
     obs_keys = task_obs_keys(task_cfg)
     rgb_keys = list(task_cfg.rgb_keys) if is_image_task(task_cfg) else []
     if camera not in rgb_keys:
@@ -466,6 +478,12 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             print(f"--overwrite: 기존 {out}를 비우고 처음부터 모은다", flush=True)
         with h5py.File(out, "w" if overwrite else "a") as f:
             data_grp = f.require_group("data")
+            prev = data_grp.attrs.get("nut_yaw_exclude")
+            prev = None if prev is None else [float(v) for v in prev]
+            if any(k.startswith(("demo_", "fail_")) for k in data_grp.keys()) and prev != exclude:
+                raise ValueError(f"{out}의 너트 yaw 제외 구간({prev})과 이번 설정({exclude})이 다르다 — 다른 --out을 쓴다")
+            if exclude is not None:
+                data_grp.attrs["nut_yaw_exclude"] = exclude
             outcomes["success"] = sum(k.startswith("demo_") for k in data_grp.keys())
             outcomes["fail"] = sum(k.startswith("fail_") for k in data_grp.keys())
             total = int(data_grp.attrs.get("total", 0))
@@ -659,6 +677,9 @@ def main():
     ap.add_argument("--quest-euro-min-cutoff", type=float, default=1.0, help="[quest] 1-Euro 필터 min_cutoff(Hz)")
     ap.add_argument("--quest-euro-beta", type=float, default=0.01, help="[quest] 1-Euro 필터 beta")
     ap.add_argument("--quest-trigger-threshold", type=float, default=0.5, help="[quest] 이 이상 당기면 그리퍼 닫힘")
+    ap.add_argument("--nut-yaw-exclude", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="너트 초기 yaw에서 뺄 구간(도), 예: -10 125 — 손목 카메라에 구멍이 보이게 못 잡는 초기화. "
+                         "hdf5에 기록되고 merge_demo_hdf5가 env_args로 옮겨 학습 중 평가·RL까지 따라간다")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
     args = ap.parse_args()
@@ -666,7 +687,7 @@ def main():
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
         mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta, redo=args.redo,
         human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen, stg_ckpt=args.stg_ckpt,
-        task=args.task,
+        task=args.task, nut_yaw_exclude=args.nut_yaw_exclude,
         quest=dict(pos_scale=args.quest_pos_scale, rot_scale=args.quest_rot_scale,
                    grip_threshold=args.quest_grip_threshold,
                    trigger_threshold=args.quest_trigger_threshold,

@@ -22,6 +22,7 @@ r"""여러 hdf5(사람 시연 + 롤아웃/개입 수집분)를 학습용 데이�
 """
 
 import argparse
+import json
 
 import h5py
 import numpy as np
@@ -39,6 +40,15 @@ def _demo_order(grp):
 def merge(sources, out, env_args_from=None, only_success=True, first=None):
     """sources의 에피소드를 순서대로 out 하나에 이어붙인다. first면 소스마다 앞에서 그 개수만(성공 필터 뒤).
     반환: (에피소드 수, 프레임 수)."""
+    excludes = set()
+    for src in sources:
+        with h5py.File(src, "r") as fin:
+            v = fin["data"].attrs.get("nut_yaw_exclude")
+            excludes.add(None if v is None else tuple(float(x) for x in v))
+    if len(excludes) > 1:
+        raise ValueError(f"소스마다 너트 yaw 제외 구간이 다르다 — 초기화 분포가 섞인다: {excludes}")
+    exclude = excludes.pop() if excludes else None
+
     n_demo, n_frame = 0, 0
     with h5py.File(out, "w") as fout:
         data_out = fout.create_group("data")
@@ -82,7 +92,12 @@ def merge(sources, out, env_args_from=None, only_success=True, first=None):
         data_out.attrs["total"] = n_frame
         if env_args_from is not None:
             with h5py.File(env_args_from, "r") as fref:
-                data_out.attrs["env_args"] = fref["data"].attrs["env_args"]
+                env_args = json.loads(fref["data"].attrs["env_args"])
+            if exclude is not None:   # 수집 때의 초기화 범위가 학습 중 평가·RL 롤아웃까지 따라가게
+                env_args.setdefault("env_kwargs", {})["nut_yaw_exclude"] = list(exclude)
+            data_out.attrs["env_args"] = json.dumps(env_args)
+        if exclude is not None:
+            data_out.attrs["nut_yaw_exclude"] = list(exclude)
     return n_demo, n_frame
 
 
