@@ -36,8 +36,9 @@ def _demo_order(grp):
     return sorted(grp.keys(), key=lambda k: int(k.split("_")[-1]))
 
 
-def merge(sources, out, env_args_from=None, only_success=True):
-    """sources의 에피소드를 순서대로 out 하나에 이어붙인다. 반환: (에피소드 수, 프레임 수)."""
+def merge(sources, out, env_args_from=None, only_success=True, first=None):
+    """sources의 에피소드를 순서대로 out 하나에 이어붙인다. first면 소스마다 앞에서 그 개수만(성공 필터 뒤).
+    반환: (에피소드 수, 프레임 수)."""
     n_demo, n_frame = 0, 0
     with h5py.File(out, "w") as fout:
         data_out = fout.create_group("data")
@@ -45,6 +46,8 @@ def merge(sources, out, env_args_from=None, only_success=True):
             with h5py.File(src, "r") as fin:
                 kept = 0
                 for key in _demo_order(fin["data"]):
+                    if first is not None and kept >= first:
+                        break
                     demo = fin["data"][key]
                     if only_success and not bool(demo.attrs.get("is_success", True)):
                         continue
@@ -91,9 +94,10 @@ def main():
                     help="data.attrs['env_args']를 가져올 robomimic 원본 hdf5")
     ap.add_argument("--keep-failures", action="store_true",
                     help="is_success=False 에피소드도 포함(기본은 성공만)")
+    ap.add_argument("--first", type=int, default=None, help="소스마다 앞에서 N개만(demo 번호 순)")
     args = ap.parse_args()
 
-    n_demo, n_frame = merge(args.sources, args.out, args.env_args_from, not args.keep_failures)
+    n_demo, n_frame = merge(args.sources, args.out, args.env_args_from, not args.keep_failures, args.first)
     print(f"병합 완료: {n_demo}에피소드 {n_frame}프레임 -> {args.out}")
 
 
