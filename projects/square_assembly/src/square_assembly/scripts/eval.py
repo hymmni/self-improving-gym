@@ -306,7 +306,10 @@ def _run_dp_eval(cfg, device):
         for e, yaw in zip(metrics["episodes"], init_nut_yaws):
             e["init_nut_yaw"] = round(yaw, 2)
     if cfg.get("use_wandb", False):
-        _log_eval_to_wandb(cfg, metrics, policy, normalizer, device)
+        try:   # wandb는 부가 기록이다 — 실패해도 metrics.json/episodes.csv 저장은 막지 않는다(2026-11-17 yawlim30 평가 유실)
+            _log_eval_to_wandb(cfg, metrics, policy, normalizer, device)
+        except Exception as e:
+            logger.warning(f"wandb 기록 실패, 건너뜀: {e!r}")
     return metrics
 
 
