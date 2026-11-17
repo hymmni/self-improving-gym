@@ -52,8 +52,9 @@ def initial_nut_yaw(state):
     env = _NUT_ENV
     env.sim.set_state_from_flattened(np.asarray(state))
     env.sim.forward()
-    w, x, y, z = env.sim.data.body_xquat[env.sim.model.body_name2id(env.nuts[0].root_body)]
-    return float(np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))))
+    from square_assembly.envs.robomimic.factory import nut_yaw_deg
+
+    return nut_yaw_deg(env)
 
 
 def in_band(yaw_deg, band):

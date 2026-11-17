@@ -87,3 +87,17 @@ def test_merge_filters_unrestricted_source_by_initial_nut_yaw(tmp_path):
         kept = [f["data"][k]["actions"][0, 0] for k in ("demo_0", "demo_1")[:n]]
         assert list(f["data"].attrs["nut_yaw_exclude"]) == [-10.0, 125.0]
     assert n == 1 and kept == [200.0]   # 0°도 [-10, 125] 안이라 빠진다
+
+
+def test_eval_records_initial_nut_yaw_per_reset():
+    from square_assembly.envs.robomimic.factory import make_lowdim_env, nut_yaw_deg
+    from square_assembly.scripts.eval import _record_init_nut_yaw
+
+    env = make_lowdim_env("NutAssemblySquare", "Panda", ["robot0_eef_pos"])
+    yaws = _record_init_nut_yaw(env)
+    seen = []
+    for _ in range(3):
+        env.reset()
+        seen.append(nut_yaw_deg(env.env))
+        env.step(np.zeros(7))
+    assert yaws == seen and len(set(yaws)) == 3

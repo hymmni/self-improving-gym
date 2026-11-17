@@ -39,6 +39,9 @@ output_dir: null
 # 지정하면 rollout 직전 np.random.seed(eval_seed) 호출 — 너트 초기 위치 시퀀스를 고정해서
 # 서로 다른 체크포인트를 "같은 200개 시나리오"로 평가(공정 비교, 어려운 배치 쏠림 방지).
 eval_seed: null
+# true면 run_config의 task.env_kwargs.nut_yaw_exclude를 지우고 너트 yaw 전체 범위에서 평가한다
+# (yaw 제한으로 학습한 정책의 OOD 확인용). episodes.csv의 init_nut_yaw로 구간별 성공률을 다시 낸다.
+nut_yaw_full_range: false
 # 지정 안 하면 dirname(checkpoint_path)/normalization_stats.json로 추정(DP 저장 관례).
 # policy_name=openvla는 checkpoint_path가 {output_dir}/lora_final/policy라 dirname이
 # 한 단계 더 깊음(stats는 {output_dir}/normalization_stats.json) — 이 경우 명시 필수.

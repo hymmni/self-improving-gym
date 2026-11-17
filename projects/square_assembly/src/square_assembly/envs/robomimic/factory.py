@@ -20,6 +20,12 @@ def _ensure_obs_utils_initialized(obs_keys, rgb_keys=()):
     ObsUtils.initialize_obs_utils_with_obs_specs({"obs": {"low_dim": list(obs_keys), "rgb": list(rgb_keys)}})
 
 
+def nut_yaw_deg(rs_env):
+    """robosuite NutAssembly env의 현재 (첫) 너트 body yaw(도)."""
+    w, x, y, z = rs_env.sim.data.body_xquat[rs_env.sim.model.body_name2id(rs_env.nuts[0].root_body)]
+    return float(np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))))
+
+
 def _exclude_nut_yaw(env, exclude_deg):
     """NutAssembly 너트 초기 yaw에서 [lo, hi]도 구간을 빼고 나머지에서 균등하게 뽑는다.
 
