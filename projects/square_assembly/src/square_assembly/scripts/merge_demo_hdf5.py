@@ -37,17 +37,47 @@ def _demo_order(grp):
     return sorted(grp.keys(), key=lambda k: int(k.split("_")[-1]))
 
 
-def merge(sources, out, env_args_from=None, only_success=True, first=None):
+_NUT_ENV = None
+
+
+def initial_nut_yaw(state):
+    """에피소드 첫 sim 상태(flattened)에서 Square 너트 yaw(도). robosuite env를 한 번 만들어 재사용한다."""
+    global _NUT_ENV
+    if _NUT_ENV is None:
+        import robosuite as suite
+
+        _NUT_ENV = suite.make("NutAssemblySquare", robots="Panda", has_renderer=False,
+                              has_offscreen_renderer=False, use_camera_obs=False)
+        _NUT_ENV.reset()
+    env = _NUT_ENV
+    env.sim.set_state_from_flattened(np.asarray(state))
+    env.sim.forward()
+    w, x, y, z = env.sim.data.body_xquat[env.sim.model.body_name2id(env.nuts[0].root_body)]
+    return float(np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))))
+
+
+def in_band(yaw_deg, band):
+    lo, hi = band
+    return (yaw_deg - lo) % 360 < hi - lo
+
+
+def merge(sources, out, env_args_from=None, only_success=True, first=None, nut_yaw_exclude=None):
     """sources의 에피소드를 순서대로 out 하나에 이어붙인다. first면 소스마다 앞에서 그 개수만(성공 필터 뒤).
-    반환: (에피소드 수, 프레임 수)."""
+    nut_yaw_exclude=(lo, hi)면 첫 상태의 너트 yaw가 그 구간(도)인 에피소드를 빼고(제한 없이 모은 소스도 쓸 수 있게),
+    결과를 그 구간으로 모은 데이터로 기록한다. 반환: (에피소드 수, 프레임 수)."""
     excludes = set()
     for src in sources:
         with h5py.File(src, "r") as fin:
             v = fin["data"].attrs.get("nut_yaw_exclude")
             excludes.add(None if v is None else tuple(float(x) for x in v))
-    if len(excludes) > 1:
+    if nut_yaw_exclude is not None:   # 명시하면 구간 기록이 없는 소스는 걸러서 쓰고, 다른 구간으로 모은 소스만 막는다
+        exclude = tuple(float(v) for v in nut_yaw_exclude)
+        if excludes - {None, exclude}:
+            raise ValueError(f"다른 너트 yaw 제외 구간으로 모은 소스가 있다: {excludes - {None, exclude}}")
+    elif len(excludes) > 1:
         raise ValueError(f"소스마다 너트 yaw 제외 구간이 다르다 — 초기화 분포가 섞인다: {excludes}")
-    exclude = excludes.pop() if excludes else None
+    else:
+        exclude = excludes.pop() if excludes else None
 
     n_demo, n_frame = 0, 0
     with h5py.File(out, "w") as fout:
@@ -60,6 +90,8 @@ def merge(sources, out, env_args_from=None, only_success=True, first=None):
                         break
                     demo = fin["data"][key]
                     if only_success and not bool(demo.attrs.get("is_success", True)):
+                        continue
+                    if nut_yaw_exclude is not None and in_band(initial_nut_yaw(demo["states"][0]), exclude):
                         continue
                     T = int(demo.attrs["num_samples"])
                     grp = data_out.create_group(f"demo_{n_demo}")
@@ -110,9 +142,12 @@ def main():
     ap.add_argument("--keep-failures", action="store_true",
                     help="is_success=False 에피소드도 포함(기본은 성공만)")
     ap.add_argument("--first", type=int, default=None, help="소스마다 앞에서 N개만(demo 번호 순)")
+    ap.add_argument("--nut-yaw-exclude", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="첫 상태의 너트 yaw가 이 구간(도)인 에피소드를 빼고, 결과를 이 구간으로 모은 데이터로 기록")
     args = ap.parse_args()
 
-    n_demo, n_frame = merge(args.sources, args.out, args.env_args_from, not args.keep_failures, args.first)
+    n_demo, n_frame = merge(args.sources, args.out, args.env_args_from, not args.keep_failures, args.first,
+                           args.nut_yaw_exclude)
     print(f"병합 완료: {n_demo}에피소드 {n_frame}프레임 -> {args.out}")
 
 

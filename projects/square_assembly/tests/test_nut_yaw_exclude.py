@@ -63,3 +63,27 @@ def test_derive_keeps_nut_yaw_exclude():
     from square_assembly.utils.task_utils import _RELEVANT_ENV_KWARGS
 
     assert "nut_yaw_exclude" in _RELEVANT_ENV_KWARGS
+
+
+def test_merge_filters_unrestricted_source_by_initial_nut_yaw(tmp_path):
+    import robosuite as suite
+
+    env = suite.make("NutAssemblySquare", robots="Panda", has_renderer=False, has_offscreen_renderer=False,
+                     use_camera_obs=False)
+    sampler = env.placement_initializer.samplers["SquareNutSampler"]
+    src, out = tmp_path / "old.hdf5", tmp_path / "out.hdf5"
+    with h5py.File(src, "w") as f:   # 제한 없이 모은 옛 파일: 너트 yaw 0°, 100°(제외 구간), 200°
+        data = f.create_group("data")
+        for i, deg in enumerate([0.0, 100.0, 200.0]):
+            sampler.rotation = np.deg2rad(deg)
+            env.reset()
+            g = data.create_group(f"demo_{i}")
+            g.attrs["num_samples"], g.attrs["is_success"] = 1, True
+            g.create_dataset("actions", data=np.full((1, 7), deg))
+            g.create_dataset("states", data=env.sim.get_state().flatten()[None])
+            g.create_group("obs").create_dataset("robot0_eef_pos", data=np.zeros((1, 3)))
+    n, _ = merge([str(src)], str(out), nut_yaw_exclude=(-10, 125))
+    with h5py.File(out) as f:
+        kept = [f["data"][k]["actions"][0, 0] for k in ("demo_0", "demo_1")[:n]]
+        assert list(f["data"].attrs["nut_yaw_exclude"]) == [-10.0, 125.0]
+    assert n == 1 and kept == [200.0]   # 0°도 [-10, 125] 안이라 빠진다
