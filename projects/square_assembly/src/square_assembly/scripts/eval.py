@@ -133,7 +133,10 @@ def _apply_run_config(cfg):
     cfg.policy_name = saved.policy_name
     if cfg.get("nut_yaw_full_range", False) and cfg.task.get("env_kwargs"):
         # 너트 yaw 제한으로 학습한 정책도 전체 범위에서 평가한다(OOD 확인용, 2026-11-17)
-        cfg.task.env_kwargs.pop("nut_yaw_exclude", None)
+        from omegaconf import open_dict
+
+        with open_dict(cfg.task.env_kwargs):
+            cfg.task.env_kwargs.pop("nut_yaw_exclude", None)
     logger.info(f"run_config.yaml에서 자동 적용: task={saved.task.name} policy_name={saved.policy_name}")
     return cfg
 

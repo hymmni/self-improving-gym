@@ -101,3 +101,18 @@ def test_eval_records_initial_nut_yaw_per_reset():
         seen.append(nut_yaw_deg(env.env))
         env.step(np.zeros(7))
     assert yaws == seen and len(set(yaws)) == 3
+
+
+def test_eval_full_range_drops_saved_nut_yaw_exclude(monkeypatch):
+    from omegaconf import OmegaConf
+
+    import square_assembly.scripts.eval as ev
+
+    saved = OmegaConf.create({"task": {"name": "sq", "env_kwargs": {"nut_yaw_exclude": [-10, 125], "lite_physics": True}},
+                              "policy": {}, "policy_name": "diffusion"})
+    OmegaConf.set_struct(saved, True)
+    monkeypatch.setattr(ev, "load_run_config", lambda _: saved)
+    cfg = OmegaConf.create({"checkpoint_path": "x.pt", "nut_yaw_full_range": True, "task": {}, "policy": {}, "policy_name": ""})
+    OmegaConf.set_struct(cfg, True)
+    out = ev._apply_run_config(cfg)
+    assert "nut_yaw_exclude" not in out.task.env_kwargs and out.task.env_kwargs.lite_physics
