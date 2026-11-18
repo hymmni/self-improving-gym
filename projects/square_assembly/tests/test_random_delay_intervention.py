@@ -87,7 +87,7 @@ def test_delay_is_uniform_over_the_remaining_steps():
 def test_policy_keeps_driving_until_t0_then_human_keeps_control_past_max_steps():
     v = _viewer(random_delay=True, max_steps=50)
     v.reset()
-    r = _collect(v, _Env(), 50, {10: "Tab", 45: "Tab", 80: "q"})   # 45의 Tab은 넘겨받은 뒤라 안 돌려준다
+    r = _collect(v, _Env(), 50, {10: "Tab", 50: "Tab", 80: "q"})   # 50의 Tab은 넘겨받은 뒤(t0 ≤ 49)라 안 돌려준다
     rec = v.delay_record()
     t_press, t0 = rec["t_press"], rec["t0"]
     assert t_press == 10 and 0 <= rec["delay_d"] <= 39 and t0 == 10 + rec["delay_d"] and rec["max_delay"] == 39
@@ -138,3 +138,16 @@ def test_no_handback_keeps_human_control_without_random_delay():
     v._handle_key("Tab")
     v._handle_key("Tab")
     assert v(1, _OBS) is not None and v.num_triggers == 1
+
+
+def test_rewind_to_exactly_t0_keeps_the_takeover():
+    v = _viewer(random_delay=True, max_steps=700)
+    v.reset()
+    v._modes, v._active = [False] * 10 + [True] * 5, True
+    v.delay_events = [{"t_press": 3, "d": 7, "t0": 10, "max_delay": 696, "status": "taken"}]
+    v.rewind_to(10)                                # 넘겨받은 그 스텝 — 사람 제어 그대로
+    assert v.pop_rewind(15) == 10 and v._active
+    rec = v.delay_record()
+    assert v.delay_events[0]["status"] == "taken" and rec["t0"] == 10 and rec["t_press"] == 3
+    v.rewind_to(9)                                 # t0 이전 — 정책으로 돌아가니 넘겨받기 무효
+    assert v.pop_rewind(10) == 9 and not v._active and v.delay_events[0]["status"] == "rewound"

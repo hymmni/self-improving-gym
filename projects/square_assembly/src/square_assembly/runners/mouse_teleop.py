@@ -435,10 +435,11 @@ class MouseTeleopIntervention:
         if t < len(self._modes):
             self._active = self._modes[t]
             del self._modes[t:]
-        # 지워진 미래의 개입 요청: t 이후에 누른 것은 없던 일, 그 전에 눌렀지만 t0가 지워진 것은 rewound
+        # 지워진 미래의 개입 요청: t 이후에 누른 것은 없던 일, 그 전에 눌렀지만 정책 구간(t < t0)으로 돌아간 것은
+        # rewound. t == t0면 모드가 사람 그대로라 넘겨받기도 그대로다.
         self.delay_events = [e for e in self.delay_events if e["t_press"] < t]
         for e in self.delay_events:
-            if e["status"] == "pending" or (e["status"] == "taken" and e["t0"] >= t):
+            if e["status"] == "pending" or (e["status"] == "taken" and e["t0"] > t):
                 e["status"] = "rewound"
         self._delay_req = None
         self._resync = True
