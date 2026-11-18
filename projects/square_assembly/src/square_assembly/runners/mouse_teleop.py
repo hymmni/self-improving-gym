@@ -101,6 +101,7 @@ Tk 창은 Shift 단독과 떼기를 그대로 받으므로 "누름~뗌 사이 = 
 Space도 남겨둔다(로컬 키보드나 X11 클라이언트에선 된다).
 """
 
+import json
 import time
 
 import numpy as np
@@ -312,8 +313,13 @@ class MouseTeleopIntervention:
                  back_key="b", restart_key="r", back_steps=20, state_fn=None,
                  snap_radius=0.025, field_radius=0.045, pull_rate=16.0, snap_hz=7.0, snap_zeta=0.65,
                  hold_gain=0.35, hold_tau=0.2, break_dist=0.045, pop_dist=0.012, human_only=False,
-                 zoom=1.0, fullscreen=False, stg_bins=None, mouse_input=True):
+                 zoom=1.0, fullscreen=False, stg_bins=None, mouse_input=True,
+                 random_delay=False, max_steps=None, handback=True):
         self.raw = getattr(env, "env", env)
+        if random_delay and max_steps is None:
+            raise ValueError("random_delay는 max_steps가 있어야 한다 — 지연을 남은 스텝 안에서 뽑는다")
+        self.random_delay, self.max_steps = random_delay, max_steps
+        self.handback = handback and not random_delay   # 지연 개입은 넘겨받으면 끝까지 사람
         self.human_only = human_only
         self.mouse_input = mouse_input   # False(Quest): 마우스 이동·휠·좌클릭을 무시한다 — 자석·포인터 warp도 없다
         if not mouse_input:
@@ -368,6 +374,11 @@ class MouseTeleopIntervention:
         self._stg_probs = None     # 지금 스텝의 STG 분포
         self._release_grab()
         self.num_triggers = 0
+        self._next_step = 0        # 다음에 실행될 스텝 — 지금 Tab을 누르면 즉시 개입이 시작될 스텝(t_press)
+        self._delay_req = None       # 랜덤 지연 중인 개입 요청(delay_events의 한 항목)
+        self.delay_events = []     # 이번 에피소드의 개입 요청들: t_press, d, t0, max_delay, status
+        self.delay_seed = int(np.random.SeedSequence().entropy % 2**32)
+        self._rng = np.random.default_rng(self.delay_seed)
         self.controller.reset()
         if self.human_only:
             self.start_as_human()
@@ -424,6 +435,12 @@ class MouseTeleopIntervention:
         if t < len(self._modes):
             self._active = self._modes[t]
             del self._modes[t:]
+        # 지워진 미래의 개입 요청: t 이후에 누른 것은 없던 일, 그 전에 눌렀지만 t0가 지워진 것은 rewound
+        self.delay_events = [e for e in self.delay_events if e["t_press"] < t]
+        for e in self.delay_events:
+            if e["status"] == "pending" or (e["status"] == "taken" and e["t0"] >= t):
+                e["status"] = "rewound"
+        self._delay_req = None
         self._resync = True
         self._rewound = (step, t)
         return t
@@ -446,6 +463,10 @@ class MouseTeleopIntervention:
 
     def __call__(self, step, obs_raw):
         self._last_obs = obs_raw
+        self._next_step = step + 1
+        if self._delay_req is not None and step >= self._delay_req["t0"]:   # 지연이 끝났다 — 즉시 개입과 똑같이 넘겨받는다
+            self._delay_req["status"], self._delay_req = "taken", None
+            self._toggle()
         self._modes[step:] = [self._active]
         resync, self._resync = self._resync, False
         if not self._active:
@@ -483,12 +504,18 @@ class MouseTeleopIntervention:
             self._left_t = now
         if what == "toggle" and self.human_only:
             self._toast = ("human-only: no policy to hand over to", time.time() + 1.5)
+        elif what == "toggle" and self._delay_req is not None:   # 지연 중 다시 누르면 요청 취소
+            self._delay_req["status"], self._delay_req = "cancelled", None
+        elif what == "toggle" and self._active and not self.handback:
+            self._toast = ("no hand-back: human keeps control until the episode ends", time.time() + 1.5)
+        elif what == "toggle" and not self._active and self.random_delay:
+            # d ~ U{0, …, R−1}, R = 남은 스텝 — t0가 항상 max_steps 안에 들어 시간 제한 전에 넘겨받는다
+            t, R = self._next_step, max(1, self.max_steps - self._next_step)
+            d = int(self._rng.integers(0, R))
+            self._delay_req = {"t_press": t, "d": d, "t0": t + d, "max_delay": R - 1, "status": "pending"}
+            self.delay_events.append(self._delay_req)
         elif what == "toggle":
-            self._release_grab()
-            self._active = not self._active
-            if self._active:
-                self.num_triggers += 1
-                self.controller.take_over(self._state_fn())
+            self._toggle()
         elif what == "pause":
             self._paused = not self._paused
             if not self._paused:
@@ -506,6 +533,27 @@ class MouseTeleopIntervention:
         elif what == "restart":
             self._restart = True
             self._paused = True
+
+    def _toggle(self):
+        self._release_grab()
+        self._active = not self._active
+        if self._active:
+            self.num_triggers += 1
+            self.controller.take_over(self._state_fn())
+
+    def delay_record(self):
+        """에피소드 attrs로 남길 랜덤 지연 기록. t0=-1이면 넘겨받지 않았다; ended_during_delay면 지연 중에 끝났다
+        (정책이 그 사이 스스로 성공한 경우 등 — 무개입 성공과 구분). t_press·d·max_delay는 마지막 요청(-1 = 없음)."""
+        ev = [e for e in self.delay_events if e["status"] in ("taken", "pending")]
+        last = ev[-1] if ev else None
+        return {
+            "intv_random_delay": True, "delay_seed": self.delay_seed,
+            "t_press": last["t_press"] if last else -1, "delay_d": last["d"] if last else -1,
+            "max_delay": last["max_delay"] if last else -1,
+            "t0": last["t0"] if last and last["status"] == "taken" else -1,
+            "ended_during_delay": bool(last and last["status"] == "pending"),
+            "delay_events": json.dumps(self.delay_events),
+        }
 
     def _quest_buttons(self):
         """Quest 컨트롤러 버튼 → 키. B는 [r](에피소드 처음으로)과 같다."""
@@ -884,6 +932,9 @@ class MouseTeleopIntervention:
         label = "HUMAN" if self._active else "POLICY"
         x = hud.pill(d, (x0 + 16 * k, 16 * k), label, mode_col + (255,),
                      color=(255, 255, 255) if self._active else (16, 24, 18), size=round(18 * k))
+        if self._delay_req is not None:   # 랜덤 지연 중 — 남은 시간은 안 보여 준다
+            x = hud.pill(d, (x + 8 * k, 16 * k), "TAKEOVER PENDING   Tab  cancel", hud.PAUSED + (255,),
+                         size=round(15 * k), pad=(10, 6))
         if self._active and not self.mouse_input:   # Quest 클러치 상태
             x = hud.pill(d, (x + 8 * k, 16 * k), "CLUTCH ON" if c.clutched else "GRIP TO MOVE",
                          hud.PANEL, color=hud.TEXT, size=round(13 * k), bold=False, pad=(10, 6))

@@ -195,8 +195,12 @@ def collect_episode(
     pre_step_fn=None,
     reset_fn=None,
     resume=None,
+    limit_policy_only=False,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
+
+    limit_policy_only=True면 max_steps는 정책이 모는 동안에만 적용한다 — 사람이 넘겨받은 뒤엔 성공이나
+    종료키(should_end_fn)로만 끝난다(랜덤 지연 개입 수집, 2026-11-18).
 
     에피소드는 성공·env done·사람 종료(should_end_fn)·max_steps 중 먼저 오는 것에서 끝난다.
     배포 데이터 수집에선 max_steps=None(무제한)으로 두고 사람이 종료키로 끝내는 게 기본.
@@ -281,7 +285,8 @@ def collect_episode(
 
     try:
         step = start
-        while max_steps is None or step < max_steps:
+        while (max_steps is None or step < max_steps
+               or (limit_policy_only and mode_seq and mode_seq[-1] == LABEL_INTV)):
             if should_end_fn is not None and should_end_fn():
                 break
             rewound = pre_step_fn(step, obs_raw) if pre_step_fn is not None else None

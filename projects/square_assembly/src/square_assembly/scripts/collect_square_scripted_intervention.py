@@ -55,6 +55,13 @@ mouse와 같은 Tk 창·키 조작을 쓰되 마우스는 무시하고 Quest 3S 
 `--nut-yaw-exclude LO HI`면 너트 초기 yaw에서 그 구간(도)을 빼고 나머지에서 뽑는다. 값은 hdf5(data.attrs)에 남고
 merge_demo_hdf5가 env_args.env_kwargs로 옮기므로 그 데이터로 학습한 정책의 학습 중 평가·eval·train_si도 같은 범위를 쓴다.
 
+`--random-delay`(mouse/quest): Tab을 누른 스텝 t_press에서 d ~ U{0..max_steps−t_press−1}를 뽑아 t0 = t_press+d에
+넘겨받는다. 그동안 정책이 계속 몰고 화면엔 TAKEOVER PENDING만 뜬다(남은 시간은 안 보임). 지연 중 Tab을 다시 누르면 취소.
+넘겨받은 뒤엔 정책에 돌려주지 않고 max_steps도 안 걸린다(성공 또는 [q]). 개입 시점이 "실패를 알아챈 순간"에 몰리지 않고
+실패 경로 위에 퍼지게 하려는 것(2026-11-18). INTV/PREINTV 라벨은 t0 기준이라 학습 코드는 그대로다. 에피소드 attrs:
+t_press·delay_d·max_delay·t0(-1 = 안 넘겨받음)·ended_during_delay(지연 중 끝남, 예: 정책이 스스로 성공)·delay_seed·
+delay_events(JSON, 취소·되감기 포함).
+
 창이 작으면 최대화 버튼을 누르거나 테두리를 끌어 키운다 — 다 그린 화면을 창에 맞춰 늘려 띄운다. `--zoom 1.5`는 처음 창 크기,
 `--fullscreen`은 전체화면으로 시작(실행 중 F11로 오간다).
 
@@ -350,7 +357,7 @@ def load_human_only_task_cfg(task):
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False,
         ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False, stg_ckpt=None,
-        task="square", quest=None, nut_yaw_exclude=None):
+        task="square", quest=None, nut_yaw_exclude=None, random_delay=False, handback=True):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
     human_ui = mode in ("mouse", "quest")   # 사람이 Tk 창에서 조종하는 모드 — quest도 같은 창을 쓴다
@@ -359,6 +366,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     if redo and (not human_ui or overwrite):
         raise ValueError("--redo는 --mode mouse/quest에서만, --overwrite 없이 쓴다")
+    if random_delay and (not human_ui or human_only or redo):
+        raise ValueError("--random-delay는 --mode mouse/quest의 정책 롤아웃 수집에서만 쓴다(--human-only·--redo 제외)")
     if (human_only or stg_ckpt) and not human_ui:
         raise ValueError("--human-only, --stg-ckpt는 --mode mouse/quest에서만 쓴다")
     if display_size > _MAX_DISPLAY:
@@ -432,7 +441,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         interv = MouseTeleopIntervention(
             env, controller=controller, mouse_input=mode == "mouse", map_size=display_size * len(shown),
             window_name=window_name, quit_key=quit_key, human_only=human_only, zoom=zoom, fullscreen=fullscreen,
-            stg_bins=stg_bins,
+            stg_bins=stg_bins, random_delay=random_delay, max_steps=max_steps, handback=handback,
         )
     else:
         interv = ScriptedFailureIntervention(
@@ -464,7 +473,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             intervention_fn=interv, max_steps=max_steps, render=False, render_fn=track,
             pre_step_fn=pre_step, should_end_fn=interv.should_end, control_fps=control_fps,
             predict_fn=predict_fn, print_diagnostics=False,
-            reset_fn=reset_fn, resume=resume,
+            reset_fn=reset_fn, resume=resume, limit_policy_only=random_delay,
         )
         return result, obs_ep, states_ep, noise
 
@@ -593,6 +602,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                         demo_grp = data_grp[f"fail_{outcomes['fail']}"]
                     is_success = False
                 demo_grp.attrs["is_success"] = is_success
+                delay = interv.delay_record() if random_delay else None
+                for k, v in (delay or {}).items():
+                    demo_grp.attrs[k] = v
                 outcomes["success" if is_success else "fail"] += 1
                 total += T
                 name = demo_grp.name.split("/")[-1]
@@ -600,7 +612,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 redo_state = None
                 print(
                     f"ep {ep}: steps={T} success={is_success} triggers={interv.num_triggers}  "
-                    f"성공 {outcomes['success']}/{episodes} (시도 {ep + 1})",
+                    + (f"t_press={delay['t_press']} d={delay['delay_d']} t0={delay['t0']}"
+                       f"{' (지연 중 종료)' if delay['ended_during_delay'] else ''}  " if delay else "")
+                    + f"성공 {outcomes['success']}/{episodes} (시도 {ep + 1})",
                     flush=True,
                 )
                 ep += 1
@@ -680,6 +694,12 @@ def main():
     ap.add_argument("--nut-yaw-exclude", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                     help="너트 초기 yaw에서 뺄 구간(도), 예: -10 125 — 손목 카메라에 구멍이 보이게 못 잡는 초기화. "
                          "hdf5에 기록되고 merge_demo_hdf5가 env_args로 옮겨 학습 중 평가·RL까지 따라간다")
+    ap.add_argument("--random-delay", action="store_true",
+                    help="[mouse/quest] Tab을 누르면 d ~ U{0..max_steps−t_press−1} 스텝 뒤에 넘겨받는다(그동안 정책이 계속 몬다, "
+                         "다시 Tab = 취소). 넘겨받은 뒤엔 정책에 돌려주지 않고 max_steps도 안 걸린다(성공 또는 [q]로 끝). "
+                         "에피소드 attrs에 t_press·delay_d·t0·max_delay·delay_seed·delay_events를 남긴다")
+    ap.add_argument("--no-handback", action="store_true",
+                    help="[mouse/quest] 넘겨받은 뒤 Tab으로 정책에 돌려주지 않는다(--random-delay면 자동)")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
     args = ap.parse_args()
@@ -688,6 +708,7 @@ def main():
         mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta, redo=args.redo,
         human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen, stg_ckpt=args.stg_ckpt,
         task=args.task, nut_yaw_exclude=args.nut_yaw_exclude,
+        random_delay=args.random_delay, handback=not args.no_handback,
         quest=dict(pos_scale=args.quest_pos_scale, rot_scale=args.quest_rot_scale,
                    grip_threshold=args.quest_grip_threshold,
                    trigger_threshold=args.quest_trigger_threshold,
