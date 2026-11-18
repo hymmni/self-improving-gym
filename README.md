@@ -125,9 +125,13 @@ python -m square_assembly.scripts.train task=square
 
 ```bash
 xhost +local:docker            # 호스트에서, 재부팅 뒤 한 번 (수집 창 등 GUI용)
-docker compose up -d           # 컨테이너를 띄워 둔다
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d   # GPU 있는 PC (정책 추론이 GPU로)
+docker compose up -d                                                    # GPU 없는 PC
+docker compose exec dev /opt/venvs/torch/bin/python -c "import torch;print(torch.cuda.is_available())"   # True 확인
 docker compose exec dev bash   # 셸이 필요하면
 ```
+
+GPU 없이 띄우면 수집기가 조용히 CPU로 돌아 정책 추론이 몇 배 느려진다. 이미 떠 있는 컨테이너도 위 GPU 명령을 실행하면 다시 만들어진다(돌던 수집은 끊긴다).
 
 이미지에 venv가 둘이라 PATH에 `python`이 없다. 아래 명령은 모두 레포 루트에서 `docker compose exec dev /opt/venvs/torch/bin/python -m ...`로 실행한다(줄여서 `$PY`로 적는다).
 
