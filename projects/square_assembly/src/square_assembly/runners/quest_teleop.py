@@ -156,6 +156,7 @@ class QuestTeleopController(MouseTeleopController):
         euro_*: 1-Euro 필터 파라미터. dt는 제어 주기(s).
         restart_button: () -> bool, 누르면 키보드 [r](에피소드 처음으로)과 같다. None이면 SDK의 B 버튼
             (reader도 None일 때만 — 가짜 reader로 도는 테스트는 버튼 없음).
+        toggle_button: 같은 방식으로 키보드 Tab(넘겨받기/지연 요청·취소)과 같다. None이면 SDK의 A 버튼.
         pos_cap, rot_cap: 한 스텝 액션 상한. PD 없이 목표와 현재 EE의 차이를 그대로 위치·회전 명령으로 보낸다
             (goal_update_mode="achieved"라 OSC 목표 = 현재 EE + 차이 = 목표 포즈).
     """
@@ -164,14 +165,16 @@ class QuestTeleopController(MouseTeleopController):
                  grip_threshold=0.9, trigger_threshold=0.5, axes=M, grip_release_threshold=0.7,
                  euro_min_cutoff=1.0, euro_beta=0.01, euro_d_cutoff=1.0, dt=0.05,
                  rot_source="stick", max_tilt=np.deg2rad(30.0), stick_deadzone=0.15, headset_yaw_comp=True,
-                 restart_button=None):
+                 restart_button=None, toggle_button=None):
         super().__init__(pos_cap=pos_cap, rot_cap=rot_cap, dt=dt)
         assert rot_source in ("stick", "pose"), rot_source
         self.rot_source, self.max_tilt, self.stick_deadzone = rot_source, max_tilt, stick_deadzone
         self.reader = reader if reader is not None else xrt_reader(headset_yaw_comp)
         if restart_button is None and reader is None:
             restart_button = lambda: bool(_xrt.get_B_button())
-        self.restart_button = restart_button
+        if toggle_button is None and reader is None:
+            toggle_button = lambda: bool(_xrt.get_A_button())
+        self.restart_button, self.toggle_button = restart_button, toggle_button
         self.pos_scale, self.rot_scale = pos_scale, rot_scale
         self.grip_release_threshold = grip_release_threshold
         self.grip_threshold, self.trigger_threshold, self.axes = grip_threshold, trigger_threshold, np.asarray(axes)

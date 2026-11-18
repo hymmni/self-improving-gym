@@ -387,3 +387,18 @@ def test_b_button_restarts_once_per_press():
     interv._restart = False
     interv._quest_buttons()
     assert not interv._restart                          # 누르고 있는 동안 한 번만
+
+
+def test_a_button_acts_as_tab_once_per_press():
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    pressed = [False]
+    c = QuestTeleopController(reader=FakeReader(), euro_min_cutoff=1e6, toggle_button=lambda: pressed[0])
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
+    keys = []
+    interv._handle_key = keys.append
+    interv._quest_buttons()
+    pressed[0] = True
+    interv._quest_buttons()
+    interv._quest_buttons()                             # 누르고 있는 동안 한 번만
+    assert keys == ["Tab"]
