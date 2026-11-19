@@ -57,9 +57,11 @@ merge_demo_hdf5가 env_args.env_kwargs로 옮기므로 그 데이터로 학습�
 
 `--random-delay`(mouse/quest): Tab을 누른 스텝 t_press에서 d ~ U{0..max_steps−t_press−1}를 뽑아 t0 = t_press+d에
 넘겨받는다. 그동안 정책이 계속 몰고 화면엔 TAKEOVER PENDING만 뜬다(남은 시간은 안 보임). 지연 중 Tab을 다시 누르면 취소.
+지연 중 [g]는 "더는 못 기다린다": t_press..지금 사이에서 균등하게 뽑은 스텝으로 되감아 거기서 넘겨받는다(t_force에 기록,
+d_drawn은 원래 뽑힌 지연).
 넘겨받은 뒤엔 정책에 돌려주지 않고 max_steps도 안 걸린다(성공 또는 [q]). 개입 시점이 "실패를 알아챈 순간"에 몰리지 않고
 실패 경로 위에 퍼지게 하려는 것(2026-11-18). INTV/PREINTV 라벨은 t0 기준이라 학습 코드는 그대로다. 에피소드 attrs:
-t_press·delay_d·max_delay·t0(-1 = 안 넘겨받음)·ended_during_delay(지연 중 끝남, 예: 정책이 스스로 성공)·delay_seed·
+t_press·delay_d·max_delay·t0(-1 = 안 넘겨받음)·ended_during_delay(지연 중 끝남, 예: 정책이 스스로 성공)·t_force·delay_seed·
 delay_events(JSON, 취소·되감기 포함).
 
 창이 작으면 최대화 버튼을 누르거나 테두리를 끌어 키운다 — 다 그린 화면을 창에 맞춰 늘려 띄운다. `--zoom 1.5`는 처음 창 크기,

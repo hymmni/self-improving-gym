@@ -151,3 +151,46 @@ def test_rewind_to_exactly_t0_keeps_the_takeover():
     assert v.delay_events[0]["status"] == "taken" and rec["t0"] == 10 and rec["t_press"] == 3
     v.rewind_to(9)                                 # t0 이전 — 정책으로 돌아가니 넘겨받기 무효
     assert v.pop_rewind(10) == 9 and not v._active and v.delay_events[0]["status"] == "rewound"
+
+
+def test_give_up_key_rewinds_to_a_uniform_step_between_press_and_now_and_takes_over():
+    v = _viewer(random_delay=True, max_steps=700)
+    v.reset()
+    v._rng = np.random.default_rng(0)
+    ts = []
+    for _ in range(3000):
+        v._next_step, v._delay_req, v.delay_events, v._goto = 100, None, [], None
+        v._handle_key("Tab")
+        v._delay_req["t0"] = 600                   # 아직 지연 중
+        v._next_step = 110
+        v._handle_key("g")
+        ts.append(v._delay_req["t0"])
+    ts = np.array(ts)
+    assert ts.min() == 100 and ts.max() == 110 and np.bincount(ts - 100).min() > 200   # U{t_press..t_now}, 칸당 기대 273
+
+
+def test_give_up_key_takes_over_at_the_drawn_step_and_records_it():
+    v = _viewer(random_delay=True, max_steps=700)
+    v.reset()
+    v._modes = [False] * 120
+    v._next_step = 100
+    v._handle_key("Tab")
+    v._delay_req["t0"] = 600
+    v._next_step = 120
+    v._rng = np.random.default_rng(0)
+    v._handle_key("g")
+    t0 = v._delay_req["t0"]
+    assert 100 <= t0 <= 120 and v._delay_req["t_force"] == 120
+    if t0 < 120:
+        assert v.pop_rewind(120) == t0 and not v._active    # 되감은 직후엔 아직 정책 모드
+    v(t0, _OBS)                                            # 그 스텝에서 넘겨받는다
+    rec = v.delay_record()
+    assert v._active and rec["t0"] == t0 and rec["t_press"] == 100 and rec["delay_d"] == t0 - 100
+    assert rec["t_force"] == 120 and v.delay_events[0]["status"] == "taken"
+
+
+def test_give_up_key_does_nothing_outside_the_delay():
+    v = _viewer(random_delay=True, max_steps=700)
+    v.reset()
+    v._handle_key("g")
+    assert v._goto is None and v.delay_events == [] and v.delay_record()["t_force"] == -1

@@ -161,7 +161,7 @@ $PY -m square_assembly.scripts.collect_square_scripted_intervention \
     --mode quest --base-ckpt <policy_epochN.pt> --episodes 50 --max-steps 700 \
     --out data/square_intv_r1.hdf5 [--stg-ckpt <predictor.pt>]
 
-# 랜덤 지연 개입: Tab 뒤 U{0..max_steps−t_press−1} 스텝 지나 넘겨받는다(지연 중 Tab = 취소, 넘겨받은 뒤엔 돌려주지 않음)
+# 랜덤 지연 개입: Tab 뒤 U{0..max_steps−t_press−1} 스텝 지나 넘겨받는다(지연 중 Tab = 취소, g = t_press~지금 사이 랜덤 스텝으로 되감아 넘겨받기, 넘겨받은 뒤엔 돌려주지 않음)
 $PY -m square_assembly.scripts.collect_square_scripted_intervention \
     --mode quest --base-ckpt <policy_epochN.pt> --episodes 50 --max-steps <데모 최대 길이×2> \
     --random-delay --out data/square_intv_delay.hdf5
