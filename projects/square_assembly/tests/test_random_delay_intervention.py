@@ -128,7 +128,7 @@ def test_rewind_before_the_press_forgets_it_and_into_the_delay_marks_it_rewound(
     v._next_step = 30
     v._handle_key("Tab")
     v._delay_req["t0"] = 100                       # t0를 고정해 지연 한가운데로 되감는다
-    v.rewind_to(31)
+    v._goto = 31                                   # 사람이 고른 되감기(렌더 노이즈 복구 아님)
     assert v.pop_rewind(60) == 31 and v._delay_req is None and v.delay_events[0]["status"] == "rewound"
     assert v(31, _OBS) is None                     # 정책이 계속 몬다
 
@@ -145,11 +145,11 @@ def test_rewind_to_exactly_t0_keeps_the_takeover():
     v.reset()
     v._modes, v._active = [False] * 10 + [True] * 5, True
     v.delay_events = [{"t_press": 3, "d": 7, "t0": 10, "max_delay": 696, "status": "taken"}]
-    v.rewind_to(10)                                # 넘겨받은 그 스텝 — 사람 제어 그대로
+    v._goto = 10                                   # 넘겨받은 그 스텝 — 사람 제어 그대로
     assert v.pop_rewind(15) == 10 and v._active
     rec = v.delay_record()
     assert v.delay_events[0]["status"] == "taken" and rec["t0"] == 10 and rec["t_press"] == 3
-    v.rewind_to(9)                                 # t0 이전 — 정책으로 돌아가니 넘겨받기 무효
+    v._goto = 9                                    # t0 이전 — 정책으로 돌아가니 넘겨받기 무효
     assert v.pop_rewind(10) == 9 and not v._active and v.delay_events[0]["status"] == "rewound"
 
 
@@ -194,3 +194,23 @@ def test_give_up_key_does_nothing_outside_the_delay():
     v.reset()
     v._handle_key("g")
     assert v._goto is None and v.delay_events == [] and v.delay_record()["t_force"] == -1
+
+
+def test_render_noise_rewind_keeps_the_pending_wait_and_a_later_takeover():
+    v = _viewer(random_delay=True, max_steps=700)
+    v.reset()
+    v._modes = [False] * 60
+    v._next_step = 30
+    v._handle_key("Tab")
+    v._delay_req["t0"] = 100
+    v.rewind_to(50)                                # 렌더 노이즈 복구 — 지연 한가운데로
+    assert v.pop_rewind(60) == 50 and v._delay_req is v.delay_events[0] and v._delay_req["status"] == "pending"
+    v(99, _OBS)
+    assert not v._active
+    v(100, _OBS)                                   # 원래 뽑힌 t0에서 그대로 넘겨받는다
+    assert v._active and v.delay_record()["t0"] == 100 and v.delay_record()["t_press"] == 30
+    v._modes = [False] * 100 + [True] * 10
+    v.rewind_to(95)                                # 넘겨받은 뒤 노이즈로 t0 앞까지 되감기 — 다시 기다렸다 t0에서
+    assert v.pop_rewind(110) == 95 and not v._active and v.delay_events[0]["status"] == "pending"
+    v(100, _OBS)
+    assert v._active and v.delay_record()["t0"] == 100

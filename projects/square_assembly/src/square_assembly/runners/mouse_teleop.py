@@ -364,6 +364,7 @@ class MouseTeleopIntervention:
         self._quit_requested = False
         self._back, self._restart, self._switches, self._resync = 0, False, 0, False
         self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
+        self._goto_noise = False   # _goto가 rewind_to(렌더 노이즈 복구)에서 왔는지 — 지연 요청을 살린다
         self._modes = []           # 스텝별 사람 제어 여부 — 되감으면 그 스텝의 모드로 돌아간다
         self._rewound = None       # (되감기 전 스텝, 돌아간 스텝) — 멈춘 화면에 띄운다
         self._confirm_redo = self.redo_requested = False
@@ -397,8 +398,9 @@ class MouseTeleopIntervention:
         return self._quit_requested or self.redo_requested
 
     def rewind_to(self, step):
-        """수집기가 돌아갈 스텝을 직접 지정한다(렌더 노이즈 직전의 정상 스텝) — 되돌린 뒤 일시정지."""
-        self._goto = step
+        """수집기가 돌아갈 스텝을 직접 지정한다(렌더 노이즈 직전의 정상 스텝) — 되돌린 뒤 일시정지.
+        사람이 고른 되감기가 아니라서 랜덤 지연 요청(기다린 시간·뽑힌 t0)은 그대로 살린다."""
+        self._goto, self._goto_noise = step, True
         self._paused = True
 
     def idle(self, seconds):
@@ -431,7 +433,8 @@ class MouseTeleopIntervention:
             t = step
             for _ in range(self._switches):
                 t = self._last_switch_before(t)
-        self._back, self._restart, self._switches, self._goto = 0, False, 0, None
+        noise = self._goto_noise and self._goto is not None
+        self._back, self._restart, self._switches, self._goto, self._goto_noise = 0, False, 0, None, False
         self._release_grab()       # 되돌린 장면에선 그리퍼가 딴 데 있다
         if t < len(self._modes):
             self._active = self._modes[t]
@@ -442,6 +445,12 @@ class MouseTeleopIntervention:
         r = self._delay_req
         keep = r if r is not None and "t_force" in r and r["t0"] == t else None
         self.delay_events = [e for e in self.delay_events if e["t_press"] < t or e is keep]
+        if noise:   # 렌더 노이즈 복구: 기다리던 요청은 그대로, t 뒤에 넘겨받았던 것은 같은 t0로 다시 기다린다
+            for e in self.delay_events:
+                if e["status"] == "taken" and e["t0"] > t:
+                    e["status"] = "pending"
+            pend = [e for e in self.delay_events if e["status"] == "pending"]
+            keep = pend[-1] if pend else None
         for e in self.delay_events:
             if e is not keep and (e["status"] == "pending" or (e["status"] == "taken" and e["t0"] > t)):
                 e["status"] = "rewound"
