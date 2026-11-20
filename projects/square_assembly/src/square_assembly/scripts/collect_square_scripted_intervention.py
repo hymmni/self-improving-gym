@@ -371,8 +371,8 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     if redo and (not human_ui or overwrite):
         raise ValueError("--redo는 --mode mouse/quest에서만, --overwrite 없이 쓴다")
-    if replay_src and (not human_ui or redo or random_delay or human_only):
-        raise ValueError("--replay-src는 --mode mouse/quest에서만, --redo·--random-delay·--human-only 없이 쓴다")
+    if replay_src and (not human_ui or random_delay or human_only):
+        raise ValueError("--replay-src는 --mode mouse/quest에서만, --random-delay·--human-only 없이 쓴다")
     if replay_src:
         handback = False   # 시간 제한이 없어서 정책에 돌려주면 끝나지 않는다
     if random_delay and (not human_ui or human_only or redo):
@@ -516,11 +516,13 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             # ←← + Enter로 다시 모으기: 이번 실행에서 바로 전에 저장한 에피소드와, 지운 뒤 다시 시작할 상태
             # --redo: 저장된 에피소드를 마지막 개입 시작 상태에서 이어받아 다시 모으고, 성공했을 때만 바꾼다.
             # --replay-src: 다른 파일의 에피소드를 같은 방식으로 이어받되, 시작 스텝을 고르고 결과는 이 파일에 새로 쓴다.
-            jobs = [(data_grp[name], name, None) for name in redo or []]
+            # --replay-src와 같이 주면 --redo는 "이 이름들만 다시"(이미 저장했거나 [q]로 건너뛴 것도). 없으면 둘 다 건너뛴다.
             src_f = h5py.File(replay_src, "r") if replay_src else None
+            jobs = [] if src_f else [(data_grp[name], name, None) for name in redo or []]
+            done = set(data_grp) | set(json.loads(data_grp.attrs.get("replay_skipped", "[]")))
             for name in sorted(src_f["data"], key=lambda n: int(n.split("_")[-1])) if src_f else []:
                 g = src_f["data"][name]
-                if name in data_grp:
+                if (name not in redo) if redo else (name in done):
                     continue
                 if replay_at == "press":
                     pts = delay_points(g.attrs, np.asarray(g["action_mode"]))
@@ -561,7 +563,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 if not result["success"]:
                     print(f"  {name}: 성공으로 끝나지 않음 — " + ("건너뜀(replay_skipped에 기록)" if src_f
                                                               else "기존 에피소드를 그대로 둔다"), flush=True)
-                    if src_f:
+                    if src_f and name not in data_grp:   # --redo가 실패한 거면 기존 것을 그대로 둔다
                         skipped.append(name)
                         data_grp.attrs["replay_skipped"] = json.dumps(sorted(set(skipped)))
                         f.flush()
@@ -581,6 +583,12 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     for k in ("delay_events", "orig_t_press", "orig_t0", "seed"):
                         if k in old.attrs:
                             new.attrs[k] = old.attrs[k]
+                    if name in data_grp:   # --redo로 다시 모은 것 — 성공했을 때만 바꾼다
+                        total -= int(data_grp[name].attrs["num_samples"])
+                        del data_grp[name]
+                    if name in skipped:
+                        skipped.remove(name)
+                        data_grp.attrs["replay_skipped"] = json.dumps(sorted(set(skipped)))
                     data_grp.move("redo_tmp", name)
                     total += len(actions)
                     data_grp.attrs["total"] = total
