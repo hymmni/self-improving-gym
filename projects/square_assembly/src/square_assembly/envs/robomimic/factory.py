@@ -139,6 +139,9 @@ def make_image_env(env_name, robots, lowdim_keys, rgb_keys, camera_names, image_
 
     오프스크린 렌더이므로 MUJOCO_GL=egl 환경에서 실행한다.
     """
+    from square_assembly.envs.robomimic.render_fix import install
+
+    install()   # GC가 옛 렌더 컨텍스트를 치울 때 지금 env의 렌더가 깨지는 robosuite 결함(render_fix.py)
     _ensure_obs_utils_initialized(lowdim_keys, rgb_keys)
     kwargs = dict(env_kwargs) if env_kwargs else {}
     nut_yaw_exclude = kwargs.pop("nut_yaw_exclude", None)   # robosuite 인자가 아니다
