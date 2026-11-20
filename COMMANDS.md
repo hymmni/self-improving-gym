@@ -425,6 +425,8 @@ python -m square_assembly.scripts.eval_stg_scaling --predictor <predictor.pt> --
 - job 순서는 주 곡선(입력 all) → 입력 비교, 그 안에서 시드 슬롯 순. `--no-new-after` 이후엔 새 job을 시작하지 않는다.
 - `aggregate`는 `summary.csv`/`summary.json`(조건·n별 예측기 평균, 시드 표준편차, 평가 에피소드 부트스트랩 95%)과 `figures/`를 만든다.
 - `train_dstg_vip`의 관련 옵션: `num_steps`(고정 step), `train_episodes_file`(학습 에피소드 목록), `val_fraction=0`, `obs_parts=wrist_lowdim|agentview_lowdim`.
+- 학습 step 민감도(2026-11-21): `stg_scaling_sweep plan-sensitivity --root <본 스윕 root> --out <root>/sensitivity` → 같은 `run`/`aggregate`에 `--root <root>/sensitivity`. (E) n마다 반복 횟수를 맞춘 step, (G) n ∈ {0, 10, 최대} × {1000, 2000, 8000} step.
+- 짝지은 차이: `python -m square_assembly.scripts.stg_scaling_paired --set main --roots <root> --out <root>/paired_main`, step 비교는 `--set sensitivity --roots <root> <root>/sensitivity`. 같은 (순서, 시드)끼리 같은 평가 에피소드 재추출로 A − B와 95% 구간을 낸다(`excludes_zero`).
 
 ---
 
