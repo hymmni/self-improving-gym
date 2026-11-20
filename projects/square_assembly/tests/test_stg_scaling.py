@@ -69,3 +69,55 @@ def test_assemble_cache_keeps_source_names_modes_and_rejects_mixed_meta(tmp_path
         assemble_cache(str(tmp_path / "bad.vip.h5"), [dict(cache=demo_c, hdf5=demo_h, name="demo_0", role="demo"),
                                                       dict(cache=other_c, hdf5=other_h, name="demo_1", role="demo")])
 
+
+def _fake_plan(num_steps=100):
+    """개입 demo_0..39(공통 demo_0..34), 정책 단독 성공 demo_40..49, 평가용 개입 demo_0·demo_10, 성공 demo_40."""
+    from square_assembly.scripts.stg_scaling_sweep import plan_runs
+    intv = [f"demo_{k}" for k in range(40)]
+    pools = {"intv": intv, "solo": [f"demo_{k}" for k in range(40, 50)], "immediate": intv,
+             "timeout": intv[:35], "common": intv[:35]}
+    heldout = {"intervention": ["demo_0", "demo_10"], "policy_success": ["demo_40"]}
+    caches = {}
+    for kind in ("delay", "immediate", "timeout"):
+        names = pools["intv" if kind == "delay" else kind]
+        caches[kind] = {"path": f"c/{kind}.vip.h5", "demos": ["demo_0", "demo_1"],
+                        "intv": {n: f"intv_{n}" for n in names}, "solo": {n: f"solo_{n}" for n in pools["solo"]}}
+    return plan_runs("random30", pools, heldout, caches, num_steps, root="R")
+
+
+def test_selection_nests_and_keeps_intervention_sets_paired():
+    from square_assembly.scripts.stg_scaling_sweep import order_names, select
+    pool = [f"demo_{k}" for k in range(30)]
+    order, solo, eligible = order_names(pool, 3), {f"demo_{k}" for k in range(25, 30)}, set(pool) - {"demo_7"}
+    small, big = select(order, eligible, solo, 10, True), select(order, eligible, solo, 20, True)
+    assert big[:10] == small and "demo_7" not in big
+    assert select(order, eligible, solo, 20, False) == [x for x in big if x not in solo]
+    jobs, runs = _fake_plan()
+    by = {}
+    for r in runs:
+        if r["pairing"] == "same" and r["obs_parts"] == "all":
+            by.setdefault((r["n"], r["order"], r["seed"], r["with_success"]), set()).add(tuple(r["rollouts"]))
+    assert all(len(v) == 1 for v in by.values())          # 같은 에피소드 조건이면 세 개입 시점이 같은 원본 에피소드
+
+
+def test_n_grid_ends_at_the_pool():
+    from square_assembly.scripts.stg_scaling_sweep import n_grid
+    assert n_grid(68) == [0, 10, 20, 30, 40, 50, 60, 68]
+    assert n_grid(60) == [0, 10, 20, 30, 40, 50, 60]
+
+
+def test_build_jobs_counts_and_dedupes():
+    from square_assembly.scripts.stg_scaling_sweep import n_grid
+    jobs, runs = _fake_plan()
+    same, full = 33 + 9, 38 + 9   # 공통 35 - 평가 2 + 성공 9 / 개입 40 - 2 + 9
+    expected = (6 * len(n_grid(same)) + 4 * len(n_grid(full)) + 6 * len(n_grid(same))) * 10
+    assert len(runs) == expected
+    ids = [j["id"] for j in jobs]
+    assert len(ids) == len(set(ids)) and len(jobs) < len(runs)
+    zero = {r["job"] for r in runs if r["n"] == 0 and r["obs_parts"] == "all"}
+    assert len(zero) == 10                                  # n=0은 조건끼리 공유, 시드 10개
+    job = {j["id"]: j for j in jobs}
+    assert all(job[r["job"]]["train_episodes"][:2] == ["demo_0", "demo_1"] for r in runs)
+    assert all({"demo_0", "demo_10", "demo_40"}.isdisjoint(r["rollouts"]) for r in runs)
+    assert [j["priority"] for j in jobs] == sorted(j["priority"] for j in jobs)   # 주 곡선이 먼저
+    assert {j["num_bins"] for j in jobs} == {522} and {j["num_steps"] for j in jobs} == {100}

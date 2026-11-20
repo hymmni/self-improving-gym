@@ -144,14 +144,14 @@
   - `build_jobs(root: str, num_steps: int) -> tuple[list[dict], list[dict]]` — (job 목록, 논리 실행 목록). job = `{"id", "policy", "cache", "obs_parts", "seed", "train_episodes", "num_bins", "num_steps", "n_train_rollouts"}`; 논리 실행 = `{"policy", "kind", "pairing", "with_success", "obs_parts", "n", "order", "seed", "job"}`. n = 0은 지연 캐시로 통일해 조건끼리 공유된다.
   - CLI: `... stg_scaling_sweep plan --root R --num-steps S` → `R/jobs.json`.
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
   - `test_selection_nests_and_keeps_intervention_sets_paired` — n이 커지면 앞 집합 포함; 같은 n이면 성공 제외 = 성공 포함 − solo; 세 kind의 (가) 선택이 같은 원본 이름.
   - `test_n_grid_ends_at_the_pool` — `n_grid(68) == [0,10,…,60,68]`, `n_grid(60) == [0,…,60]`.
   - `test_build_jobs_counts_and_dedupes` — 가짜 풀(정책 둘)에서 논리 실행 수 = 조건·n·10의 합, n = 0 논리 실행은 입력별로 job 10개만 가리킨다, job id가 유일하다.
-- [ ] **Step 2: 실행해 실패 확인**
-- [ ] **Step 3: 구현**
-- [ ] **Step 4: 전체 테스트 통과 확인**
-- [ ] **Step 5: 커밋** `feat(stg): select pairing-preserving rollout subsets and plan the scaling sweep jobs`
+- [x] **Step 2: 실행해 실패 확인**
+- [x] **Step 3: 구현**
+- [x] **Step 4: 전체 테스트 통과 확인**
+- [x] **Step 5: 커밋** `feat(stg): select pairing-preserving rollout subsets and plan the scaling sweep jobs`
 
 ### Task 5: 평가 스크립트
 
