@@ -312,6 +312,22 @@ def test_wrist_selects_eye_in_hand_camera_only(tmp_path):
     np.testing.assert_array_equal(ds[2][0].numpy(), [20, 21, 30, 31])
 
 
+@pytest.mark.parametrize("parts,camera", [("wrist_lowdim", [10, 11]), ("agentview_lowdim", [90, 91])])
+def test_camera_plus_lowdim_parts_keep_one_camera_and_all_proprioception(tmp_path, parts, camera):
+    """손목+고유수용, agentview+고유수용(2026-11-20 롤아웃 규모 실험) — 카메라 열은 하나만, lowdim은 카메라 폭으로 자르지 않는다."""
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[2], feat_dim=4, low_dim=2)
+    with h5py.File(cache, "r+") as f:
+        f.attrs["meta"] = json.dumps({"rgb_keys": ["agentview_image", "robot0_eye_in_hand_image"]})
+        f["data/demo_0/feat"][:] = [[90, 91, 10, 11], [90, 91, 10, 11]]
+        f["data/demo_0/lowdim"][:] = [[-1, -2], [-1, -2]]
+    ds = DinoFeatureWindows(cache, 2, obs_parts=parts)
+    assert ds.frame_dim == 4
+    np.testing.assert_array_equal(ds[1][0].numpy(), (camera + [-1, -2]) * 2)
+
+
 @pytest.mark.parametrize("keys,width", [([], 4), (["wrist"], 4),
                                       (["agentview_image", "agentview_image"], 4),
                                       (["agentview_image", "wrist"], 3)])

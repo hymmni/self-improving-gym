@@ -72,11 +72,11 @@
 **Interfaces:**
 - Produces: `obs_parts` 값 `"wrist_lowdim"`, `"agentview_lowdim"` — 그 카메라 특징 열 + lowdim 전부.
 
-- [ ] **Step 1: 실패하는 테스트** `test_camera_plus_lowdim_parts_keep_one_camera_and_all_proprioception` — 가짜 캐시(`rgb_keys=["agentview_image","robot0_eye_in_hand_image"]`, feat 4열, lowdim 2열)에서 `wrist_lowdim`은 `frame_dim == 4`이고 창이 `[손목 2열, lowdim 2열] × 2프레임`, `agentview_lowdim`은 agentview 2열 + lowdim. lowdim 열은 카메라 폭으로 잘리지 않는다.
-- [ ] **Step 2: 실행해 실패 확인** (`ValueError: obs_parts는 ...`)
-- [ ] **Step 3: 구현** — 두 키를 `OBS_PARTS`(`("feat","lowdim")`)와 `CAMERA_PARTS`에 넣고, 카메라 열 자르기를 `part == "feat"`일 때만 한다.
-- [ ] **Step 4: 전체 테스트 통과 확인**
-- [ ] **Step 5: 커밋** `feat(stg): add wrist and agentview camera plus proprioception input combos`
+- [x] **Step 1: 실패하는 테스트** `test_camera_plus_lowdim_parts_keep_one_camera_and_all_proprioception` — 가짜 캐시(`rgb_keys=["agentview_image","robot0_eye_in_hand_image"]`, feat 4열, lowdim 2열)에서 `wrist_lowdim`은 `frame_dim == 4`이고 창이 `[손목 2열, lowdim 2열] × 2프레임`, `agentview_lowdim`은 agentview 2열 + lowdim. lowdim 열은 카메라 폭으로 잘리지 않는다.
+- [x] **Step 2: 실행해 실패 확인** (`ValueError: obs_parts는 ...`)
+- [x] **Step 3: 구현** — 두 키를 `OBS_PARTS`(`("feat","lowdim")`)와 `CAMERA_PARTS`에 넣고, 카메라 열 자르기를 `part == "feat"`일 때만 한다.
+- [x] **Step 4: 전체 테스트 통과 확인**
+- [x] **Step 5: 커밋** `feat(stg): add wrist and agentview camera plus proprioception input combos`
 
 ### Task 2: `train_dstg_vip.py`에 고정 step 수, 학습 에피소드 목록, 검증 분할 끄기
 
