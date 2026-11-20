@@ -151,7 +151,9 @@ def run_job(job, root, python, threads=1, deadline=None):
              f"hydra.run.dir={out / 'hydra'}"]
     evaluate = [python, "-m", "square_assembly.scripts.eval_stg_scaling", "--predictor", str(ckpt),
                 "--eval-cache", job["eval_cache"], "--out", str(out)]
-    timing = {"start": time.time()}
+    import socket
+
+    timing = {"start": time.time(), "host": socket.gethostname()}   # 어느 기계에서 돌았는지(로컬/Eddy) 구분용
     for name, cmd in (("train", train), ("eval", evaluate)):
         if name == "train" and ckpt.exists():
             continue

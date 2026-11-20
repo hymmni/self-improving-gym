@@ -225,6 +225,8 @@ def test_run_job_skips_finished_and_retries_failed(tmp_path, monkeypatch):
     assert not done.exists()
     monkeypatch.delenv("FAIL_TRAIN")
     assert run_jobs([job], root, workers=1, python=python) == {"done": 1} and done.exists()
+    import socket
+    assert json.loads((done.parent / "timing.json").read_text())["host"] == socket.gethostname()
     assert run_jobs([job], root, workers=1, python=python) == {"skipped": 1}
     other = dict(job, id="random30/all/delay/r00_s1_def")
     import datetime
