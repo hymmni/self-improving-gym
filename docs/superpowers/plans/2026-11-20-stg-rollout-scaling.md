@@ -92,14 +92,14 @@
   - `val_fraction: 0` — 검증 분할 없이 전부 학습. 마지막 val 평가는 건너뛰고 meta의 `val_*`는 `None`.
   - 체크포인트 meta에 `train_episodes`(실제 학습한 이름 정렬 목록)와 `num_steps` 추가.
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
   - `test_fixed_steps_train_exactly_that_many_batches` — `num_steps=7, batch_size=2, val_fraction=0`으로 학습하면 optimizer step이 7번(AdamW `state[p]["step"] == 7`), meta `num_steps == 7`, `val_mae is None`.
   - `test_train_episodes_file_keeps_only_listed_episodes` — 목록 `demo_1, demo_3` → meta `train_episodes == ["demo_1","demo_3"]`, `n_train_samples == 12`(길이 6 × 2).
   - `test_train_episodes_file_rejects_unknown_names` — 목록에 `demo_9` → `ValueError`.
-- [ ] **Step 2: 실행해 실패 확인**
-- [ ] **Step 3: 구현** (기본값이면 기존 경로 그대로)
-- [ ] **Step 4: 전체 테스트 통과 확인**
-- [ ] **Step 5: 커밋** `feat(stg): train cached STG heads for a fixed step count on a listed episode subset`
+- [x] **Step 2: 실행해 실패 확인**
+- [x] **Step 3: 구현** (기본값이면 기존 경로 그대로)
+- [x] **Step 4: 전체 테스트 통과 확인**
+- [x] **Step 5: 커밋** `feat(stg): train cached STG heads for a fixed step count on a listed episode subset`
 
 ### Task 3: 평가용 목록, 조건별 학습 캐시, 평가 캐시
 
