@@ -588,6 +588,12 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     replaced.append(name)
                     print(f"  {name}: 저장({len(actions)}스텝, step {t0}부터)", flush=True)
                     continue
+                for k, v in old.attrs.items():   # 랜덤 지연 기록(t_press·t0·delay_events 등)은 개입 시작 전 일이라 그대로 유효
+                    if k not in new.attrs:
+                        new.attrs[k] = v
+                if int(new.attrs.get("t0", -1)) >= 0:   # [b]·[←]로 더 앞에서 넘겨받았으면 그 스텝이 t0
+                    onset = last_intervention_onset(result["action_modes"])
+                    new.attrs["t0"], new.attrs["delay_d"] = onset, onset - int(new.attrs["t_press"])
                 new.attrs["redo_from_step"] = t0
                 del data_grp[name]
                 data_grp.move("redo_tmp", name)
