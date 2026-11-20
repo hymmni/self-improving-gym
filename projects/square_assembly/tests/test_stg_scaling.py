@@ -189,3 +189,68 @@ def test_auroc_ranks_failed_branch_frames_above_intervention_frames():
     m = frame_metrics(d, label, ep, t, episodes)
     assert m["auroc_fail_vs_intv"] == 1.0                  # 채점 구간 앞(0, 500)은 빠진다
     assert m["reward"]["intv"]["k1"]["reward_sign_acc"] == 1.0
+
+
+def test_shards_cover_every_job_once():
+    from square_assembly.scripts.stg_scaling_sweep import shard
+    jobs = [{"id": str(i)} for i in range(23)]
+    parts = [shard(jobs, [s], 3) for s in range(3)]
+    assert sorted(j["id"] for p in parts for j in p) == sorted(j["id"] for j in jobs)
+    assert shard(jobs, [0, 2], 3) == [j for j in jobs if int(j["id"]) % 3 != 1]   # 순서(우선순위)는 유지
+
+
+def _fake_python(tmp_path):
+    """train_dstg_vip이면 out=에 파일을 만들고(FAIL_TRAIN이면 실패), eval이면 --out 폴더에 metrics.json을 쓴다."""
+    script = tmp_path / "fakepy.sh"
+    script.write_text("""#!/bin/bash
+if [ "$2" = "square_assembly.scripts.train_dstg_vip" ]; then
+  [ -n "$FAIL_TRAIN" ] && exit 1
+  for a in "$@"; do case $a in out=*) touch "${a#out=}";; esac; done
+else
+  while [ $# -gt 0 ]; do [ "$1" = "--out" ] && echo '{}' > "$2/metrics.json"; shift; done
+fi
+""")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_run_job_skips_finished_and_retries_failed(tmp_path, monkeypatch):
+    from square_assembly.scripts.stg_scaling_sweep import run_jobs
+    job = {"id": "random30/all/delay/r00_s0_abc", "cache": "c.h5", "eval_cache": "e.h5", "obs_parts": "all",
+           "seed": 0, "num_bins": 522, "num_steps": 5, "train_episodes": ["demo_0"], "priority": 0}
+    python, root = _fake_python(tmp_path), str(tmp_path / "root")
+    done = tmp_path / "root/runs" / job["id"] / "metrics.json"
+    monkeypatch.setenv("FAIL_TRAIN", "1")
+    assert run_jobs([job], root, workers=1, python=python) == {"failed": 1}
+    assert not done.exists()
+    monkeypatch.delenv("FAIL_TRAIN")
+    assert run_jobs([job], root, workers=1, python=python) == {"done": 1} and done.exists()
+    assert run_jobs([job], root, workers=1, python=python) == {"skipped": 1}
+    other = dict(job, id="random30/all/delay/r00_s1_def")
+    import datetime
+    past = datetime.datetime.now().astimezone() - datetime.timedelta(minutes=1)
+    assert run_jobs([other], root, workers=1, python=python, deadline=past) == {"deadline": 1}
+
+
+def test_aggregate_averages_seeds_and_reports_ci(tmp_path):
+    from square_assembly.scripts.stg_scaling_sweep import aggregate
+    root = tmp_path / "root"
+    runs = []
+    for seed, mae in ((0, 10.0), (1, 20.0)):
+        job = f"random30/all/delay/r10_s{seed}_x"
+        runs.append({"policy": "random30", "kind": "delay", "pairing": "same", "with_success": True,
+                     "obs_parts": "all", "n": 10, "order": 0, "seed": seed, "job": job, "rollouts": ["demo_1"] * 10})
+        units = {f"rollout/demo_{k}": {"abs/intv_delay": mae * 5, "n/intv_delay": 5, "fp": 1.0, "nb": 2}
+                 for k in range(3)}
+        (root / "runs" / job).mkdir(parents=True)
+        (root / "runs" / job / "metrics.json").write_text(json.dumps(
+            {"units": units, "n_train_samples": 1000 + seed, "frame": {"auroc_fail_vs_intv": 0.6}}))
+    (root / "jobs.json").write_text(json.dumps({"num_steps": 5, "jobs": [], "runs": runs}))
+    rows = aggregate(str(root), n_boot=50, plots=False)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["n_predictors"] == 2 and row["success_mae_mean"] == pytest.approx(15.0)
+    assert row["success_mae_std"] == pytest.approx(np.std([10, 20], ddof=1))
+    assert row["success_mae_lo"] == pytest.approx(15.0) and row["false_progress_mean"] == pytest.approx(0.5)
+    assert row["n_train_samples_mean"] == pytest.approx(1000.5) and row["auroc_fail_vs_intv_mean"] == pytest.approx(0.6)
+    assert (root / "summary.csv").exists()

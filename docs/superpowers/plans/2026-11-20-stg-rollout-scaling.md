@@ -190,16 +190,17 @@
   - `shard(jobs: list[dict], shards: list[int], num_shards: int) -> list[dict]` — job 순서 i의 `i % num_shards ∈ shards`.
   - `run_job(job, root, python) -> bool` — `R/runs/<policy>/<id>/`에 `train_episodes.txt`, 학습(`train_dstg_vip`, hydra run dir = job 폴더, `use_wandb=false`), 평가, 로그, 소요 시간 `timing.json`. `metrics.json`이 있으면 건너뛴다. 실패하면 `metrics.json`을 남기지 않는다.
   - `aggregate(root) -> rows` — 논리 실행을 (정책, kind, pairing, 성공, 입력, n)으로 묶어 지표 평균·시드 표준편차·부트스트랩 구간·평균 학습 프레임 수 → `R/summary.csv`, `R/summary.json`, `R/figures/*.png`(정책별: 주 곡선, 짝 어블레이션, 입력 비교; x축 n과 학습 프레임 수).
-  - CLI: `... run --root R --shards 0 1 --num-shards 5 --workers K [--limit N] [--only-ids ...]`, `... aggregate --root R`.
+  - CLI: `... run --root R --shards 0 1 --num-shards 5 --workers K [--no-new-after ISO시각] [--limit N] [--only-ids ...]`, `... aggregate --root R`.
+  - (2026-11-20 추가 요구) job은 주 곡선 → 입력 비교 순, 그 안에서 시드 슬롯 순. `--no-new-after`(기계별 마감) 이후엔 새 job을 시작하지 않는다. 남은 job은 결과 폴더를 합친 뒤 다른 기계에서 같은 명령으로 이어 돈다(metrics.json이 있는 job은 건너뜀).
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
   - `test_shards_cover_every_job_once`.
   - `test_run_job_skips_finished_and_retries_failed` — 가짜 python(셸 스크립트)으로 성공·실패를 흉내 내 `metrics.json` 유무를 확인한다.
   - `test_aggregate_averages_seeds_and_reports_ci` — 가짜 metrics.json 두 개로 평균·표준편차·구간 열이 생긴다.
-- [ ] **Step 2: 실행해 실패 확인**
-- [ ] **Step 3: 구현**
-- [ ] **Step 4: 전체 테스트 통과 확인**
-- [ ] **Step 5: 커밋** `feat(stg): run the scaling sweep in resumable shards and summarize it into tables and curves`
+- [x] **Step 2: 실행해 실패 확인**
+- [x] **Step 3: 구현**
+- [x] **Step 4: 전체 테스트 통과 확인**
+- [x] **Step 5: 커밋** `feat(stg): run the scaling sweep in resumable shards and summarize it into tables and curves`
 
 ### Task 7: step 수 결정, 시험 실행, 시간 측정, 보고
 
