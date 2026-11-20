@@ -121,3 +121,71 @@ def test_build_jobs_counts_and_dedupes():
     assert all({"demo_0", "demo_10", "demo_40"}.isdisjoint(r["rollouts"]) for r in runs)
     assert [j["priority"] for j in jobs] == sorted(j["priority"] for j in jobs)   # 주 곡선이 먼저
     assert {j["num_bins"] for j in jobs} == {522} and {j["num_steps"] for j in jobs} == {100}
+
+
+def _frames(series):
+    """{에피소드: (d, label)} -> 평가 함수가 받는 프레임 배열들."""
+    d, label, ep, t = [], [], [], []
+    for name, (dd, ll) in series.items():
+        d += list(dd); label += list(ll); ep += [name] * len(dd); t += list(range(len(dd)))
+    return np.array(d, float), np.zeros(len(d)), np.array(label, float), np.array(ep), np.array(t)
+
+
+def _ep(role, source, score_from=0, is_success=True, hacky=False):
+    return {"role": role, "source_name": source, "score_from": score_from, "is_success": is_success, "hacky": hacky}
+
+
+def test_success_mae_pools_policy_success_and_intervention_tails_only():
+    from square_assembly.scripts.eval_stg_scaling import ratio_metrics, unit_stats
+    d, nll, label, ep, t = _frames({"a": ([3, 1, 0], [2, 1, 0]), "b": ([9, 9, 1, 2], [3, 2, 1, 0]),
+                                    "c": ([5, 5], [1, 0])})
+    episodes = {"a": _ep("policy_success", "demo_4"), "b": _ep("intv_delay", "demo_5", score_from=2),
+                "c": _ep("demo", "demo_30")}
+    m = ratio_metrics(unit_stats(d, nll, label, ep, t, episodes))
+    assert m["success_mae"] == pytest.approx((1 + 0 + 0 + 0 + 2) / 5)   # 개입 전 프레임(9, 9)과 데모는 빠진다
+    assert m["mae/intv_delay"] == pytest.approx(1.0) and m["mae/demo"] == pytest.approx(4.5)
+    assert m["mae/intv_timeout"] is None
+
+
+def test_false_progress_uses_chunk_means_and_skips_successful_branches():
+    from square_assembly.scripts.eval_stg_scaling import ratio_metrics, unit_stats
+    spike = [0, 0, 10] + [0] * 7 + [5] * 10            # 시작 한 프레임만 높다: W=1은 거짓 진전, W=8은 아니다
+    series = {"up": (list(range(20)), [0] * 20), "down": (list(range(20))[::-1], [0] * 20),
+              "spike": (spike, [0] * 20), "hk": ([9] * 20, [0] * 20), "ok": ([9] * 20, [0] * 20)}
+    episodes = {"up": _ep("branch_t0", "demo_1", 2, False), "down": _ep("branch_t0", "demo_2", 2, False),
+                "spike": _ep("branch_t_press", "demo_3", 2, False),
+                "hk": _ep("branch_t_press", "demo_4", 2, True, hacky=True), "ok": _ep("branch_t0", "demo_5", 2, True)}
+    stats = unit_stats(*_frames(series), episodes)
+    m = ratio_metrics(stats)
+    assert m["false_progress"] == pytest.approx(1 / 3) and m["false_progress_w1"] == pytest.approx(2 / 3)
+    assert m["false_progress/branch_t0"] == pytest.approx(0.5) and m["false_progress/branch_t_press"] == 0
+    assert sum(s.get("hacky", 0) for s in stats.values()) == 1
+    assert sum(s.get("branch_success", 0) for s in stats.values()) == 1
+    assert sum(s.get("nb", 0) for s in stats.values()) == 3
+
+
+def test_bootstrap_ci_brackets_the_point_and_is_reproducible():
+    from square_assembly.scripts.eval_stg_scaling import bootstrap_ci, ratio_metrics
+    rng = np.random.RandomState(0)
+    stats_list = []
+    for _ in range(2):
+        st = {f"rollout/demo_{k}": {"abs/intv_delay": rng.uniform(0, 100), "n/intv_delay": 10,
+                                    "fp": float(rng.rand() > 0.5), "nb": 2} for k in range(8)}
+        st["solo/demo_9"] = {"abs/policy_success": 30.0, "n/policy_success": 10}
+        stats_list.append(st)
+    ci = bootstrap_ci(stats_list, n_boot=500, seed=0)
+    point = np.mean([ratio_metrics(s)["success_mae"] for s in stats_list])
+    assert ci["success_mae"][0] <= point <= ci["success_mae"][1]
+    assert ci == bootstrap_ci(stats_list, n_boot=500, seed=0)
+    assert ci["mae/policy_success"] == [3.0, 3.0]          # 단위가 하나뿐인 층은 그 값 그대로
+    assert ci["mae/demo"] is None
+
+
+def test_auroc_ranks_failed_branch_frames_above_intervention_frames():
+    from square_assembly.scripts.eval_stg_scaling import frame_metrics
+    d, _, label, ep, t = _frames({"f": ([0, 0] + [300] * 10, [0] * 12), "i": ([500, 500] + list(range(9, -1, -1)),
+                                                                          list(range(11, -1, -1)))})
+    episodes = {"f": _ep("branch_t0", "demo_1", 2, False), "i": _ep("intv_delay", "demo_1", 2)}
+    m = frame_metrics(d, label, ep, t, episodes)
+    assert m["auroc_fail_vs_intv"] == 1.0                  # 채점 구간 앞(0, 500)은 빠진다
+    assert m["reward"]["intv"]["k1"]["reward_sign_acc"] == 1.0

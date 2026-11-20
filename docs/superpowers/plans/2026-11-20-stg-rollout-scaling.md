@@ -169,15 +169,15 @@
   - `frame_metrics(d, label, ep, t, episodes) -> dict` — AUROC, `reward_metrics` stride 1·8(정책 성공, 개입 구간, 데모).
   - CLI: `python -m square_assembly.scripts.eval_stg_scaling --predictor P --eval-cache C --out DIR` → `DIR/metrics.json`(점추정, 부트스트랩 구간, 단위 합계, 개수, `n_train_samples`), `DIR/pred.npz`(프레임별 d float16).
 
-- [ ] **Step 1: 실패하는 테스트** (합성 배열)
+- [x] **Step 1: 실패하는 테스트** (합성 배열)
   - `test_success_mae_pools_policy_success_and_intervention_tails_only` — 개입 에피소드의 `score_from` 앞 프레임과 데모는 ①에 안 들어간다; 값을 손으로 계산한 것과 같다.
   - `test_false_progress_uses_chunk_means_and_skips_successful_branches` — 실패 분기 하나는 d가 오르고(진전 아님) 하나는 내린다(거짓 진전) → 0.5; 야매 성공 분기·진짜 성공 분기는 분모에서 빠지고 `hacky`, `branch_success`로 센다; 끝 8프레임만 내리는 분기는 W=1과 W=8이 다르게 나온다.
   - `test_bootstrap_ci_brackets_the_point_and_is_reproducible` — 구간이 점추정을 포함하고, 같은 seed면 같다; 층 밖으로 재추출하지 않는다(단위가 하나뿐인 층은 그 값 그대로).
   - `test_auroc_ranks_failed_branch_frames_above_intervention_frames`.
-- [ ] **Step 2: 실행해 실패 확인**
-- [ ] **Step 3: 구현**
-- [ ] **Step 4: 전체 테스트 통과 확인**
-- [ ] **Step 5: 커밋** `feat(stg): score scaling-sweep predictors on held-out success paths and failed branches`
+- [x] **Step 2: 실행해 실패 확인**
+- [x] **Step 3: 구현**
+- [x] **Step 4: 전체 테스트 통과 확인**
+- [x] **Step 5: 커밋** `feat(stg): score scaling-sweep predictors on held-out success paths and failed branches`
 
 ### Task 6: 실행 묶음 — 기계 나눠 돌리기, 이어 하기, 결과 표·그림
 
