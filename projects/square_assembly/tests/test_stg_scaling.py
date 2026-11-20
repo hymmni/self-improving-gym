@@ -280,3 +280,36 @@ def test_sensitivity_plan_matches_epochs_and_adds_a_step_grid():
             if r["pairing"] == "same" and r["with_success"] and r["obs_parts"] == "all"}
     assert all(r["rollouts"] == same[(r["kind"], r["n"], r["order"], r["seed"])] for r in runs)   # 본 스윕과 같은 에피소드
     assert len(job) == len({j["id"] for j in jobs}) and len(e) == 3 * 6 * 10 and len(g) == 3 * 3 * 3 * 10
+
+
+def test_paired_differences_share_resamples_and_flag_cis_that_exclude_zero():
+    """짝(order, seed)마다 같은 재추출로 차이를 낸다: 단위마다 5스텝씩 나쁜 조건은 구간이 [5, 5], 같은 job이면 [0, 0]."""
+    from square_assembly.scripts.stg_scaling_paired import paired_rows
+
+    def units(offset):
+        return {f"rollout/demo_{k}": {"abs/intv_delay": (k + offset) * 10.0, "n/intv_delay": 10,
+                                      "fp": float(k % 2), "nb": 1} for k in range(6)}
+
+    runs, store = [], {}
+    for kind, offset in (("delay", 5), ("timeout", 0)):
+        for n in (0, 10):
+            for order, seed in ((0, 0), (0, 1), (1, 2)):
+                if kind == "timeout" and n == 10 and seed == 2:
+                    continue                                   # 짝이 없는 실행은 빠진다
+                job = f"n0_s{seed}" if n == 0 else f"{kind}_n{n}_s{seed}"
+                store[job] = units(0 if n == 0 else offset)
+                runs.append({"policy": "random30", "kind": kind, "n": n, "order": order, "seed": seed, "job": job})
+    comps = [{"name": "delay-timeout", "policy": "random30", "a": {"kind": "delay"}, "b": {"kind": "timeout"},
+              "by": ("n",)},
+             {"name": "improve", "policy": "random30", "a": {"kind": "delay", "n": 0},
+              "b": {"kind": "delay", "n": "max"}, "by": ()}]
+    rows = {(r["comparison"], str(r["n"]), r["metric"]): r
+            for r in paired_rows(runs, lambda r: store[r["job"]], comps, n_boot=200)}
+    same = rows[("delay-timeout", "0", "success_mae")]
+    assert same["diff"] == 0 and same["lo"] == same["hi"] == 0 and not same["excludes_zero"] and same["n_pairs"] == 3
+    worse = rows[("delay-timeout", "10", "success_mae")]
+    assert worse["n_pairs"] == 2 and worse["diff"] == pytest.approx(5.0)
+    assert worse["lo"] == pytest.approx(5.0) and worse["hi"] == pytest.approx(5.0) and worse["excludes_zero"]
+    assert rows[("delay-timeout", "10", "false_progress")]["diff"] == 0
+    up = rows[("improve", "0→10", "success_mae")]
+    assert up["diff"] == pytest.approx(-5.0) and up["a_mean"] == pytest.approx(2.5) and up["b_mean"] == pytest.approx(7.5)

@@ -88,9 +88,9 @@ def ratio_metrics(stats):
     return {name: _value(totals, num, den) for name, (num, den) in RATIOS.items()}
 
 
-def bootstrap_ci(stats_list, n_boot=1000, seed=0):
-    """예측기마다의 unit_stats 목록 -> 지표별 [2.5%, 97.5%]. 층(rollout/solo/demo) 안에서 단위를 복원 추출하고,
-    같은 재추출을 모든 예측기에 적용해 예측기 평균의 분포를 낸다. 분모가 늘 0인 지표는 None."""
+def bootstrap_values(stats_list, n_boot=1000, seed=0):
+    """예측기마다의 unit_stats 목록 -> {지표: (n_boot, 예측기 수) 배열}(분모 0이면 nan). 층(rollout/solo/demo) 안에서
+    단위를 복원 추출하고 같은 재추출을 모든 예측기에 적용한다 — 짝지은 차이도 이 배열을 양쪽에 같이 쓴다."""
     units = sorted(set().union(*stats_list))
     keys = sorted({k for num, den in RATIOS.values() for k in num + den})
     x = np.array([[[st.get(u, {}).get(k, 0.0) for k in keys] for u in units] for st in stats_list])   # (P, U, K)
@@ -109,7 +109,14 @@ def bootstrap_ci(stats_list, n_boot=1000, seed=0):
         n_ = sums[..., [col[k] for k in num]].sum(-1)
         d_ = sums[..., [col[k] for k in den]].sum(-1)
         with np.errstate(invalid="ignore", divide="ignore"):
-            vals = np.where(d_ > 0, n_ / np.where(d_ > 0, d_, 1), np.nan)
+            out[name] = np.where(d_ > 0, n_ / np.where(d_ > 0, d_, 1), np.nan)
+    return out
+
+
+def bootstrap_ci(stats_list, n_boot=1000, seed=0):
+    """예측기 평균의 [2.5%, 97.5%] (bootstrap_values의 같은 재추출). 분모가 늘 0인 지표는 None."""
+    out = {}
+    for name, vals in bootstrap_values(stats_list, n_boot, seed).items():
         if np.isnan(vals).all():
             out[name] = None
             continue
