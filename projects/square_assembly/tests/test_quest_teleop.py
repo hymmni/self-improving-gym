@@ -402,3 +402,21 @@ def test_a_button_acts_as_tab_once_per_press():
     interv._quest_buttons()
     interv._quest_buttons()                             # 누르고 있는 동안 한 번만
     assert keys == ["Tab"]
+
+
+def test_unwind_runs_without_the_clutch():
+    # Quest는 그립을 놓으면 시뮬이 멈춘다 — [u] 풀기는 그립 없이도 돌아야 한다(2026-11-20 실사용에서 안 풀림)
+    from square_assembly.runners.mouse_teleop import MouseTeleopIntervention
+
+    r, c = _make()
+    interv = MouseTeleopIntervention(env=object(), controller=c, mouse_input=False, state_fn=_state)
+    interv._active = True
+    r.set(grip=0.0)
+    interv._quest_gate()
+    assert interv._paused                 # 그립을 놓으면 멈춘다
+    interv._handle_key("u")
+    interv._quest_gate()
+    assert not interv._paused             # 풀기 중엔 그립 없이 돈다
+    interv._handle_key("u")
+    interv._quest_gate()
+    assert interv._paused                 # 풀기를 멈추면 다시 그립을 쥐어야 돈다

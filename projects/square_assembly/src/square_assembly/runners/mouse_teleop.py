@@ -638,6 +638,9 @@ class MouseTeleopIntervention:
         멈춘 동안 움직인 만큼 튀지 않는다."""
         if self.mouse_input or not self._active or self._confirm_redo:
             return
+        if self._unwinding:   # [u] 풀기는 그립 없이 돈다 — 끝나면 _resync로 다시 잡아야 이어진다
+            self._paused = False
+            return
         c = self.controller
         if not self._paused:
             if not c.clutched:
