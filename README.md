@@ -169,6 +169,16 @@ $PY -m square_assembly.scripts.collect_square_scripted_intervention \
 # 이미 저장한 에피소드를 개입 시작 상태부터 다시 모으기
 $PY -m square_assembly.scripts.collect_square_scripted_intervention \
     --mode mouse --base-ckpt <policy_epochN.pt> --out data/square_intv_r1.hdf5 --redo demo_113 demo_161
+
+# 반사실 분기: 랜덤 지연 에피소드를 t0(또는 t_press)에서 되살려 정책 혼자 timeout까지 (헤드리스, 야매 성공 자동 판정)
+$PY -m square_assembly.scripts.branch_rollout --src data/square_intv_delay.hdf5 \
+    --base-ckpt <policy_epochN.pt> --start t0 --out data/square_intv_delay_branch_t0.hdf5
+
+# 지연 어블레이션: 같은 버튼 시점에서 즉시 개입(press) / 정책이 timeout까지 간 끝에서 개입(end, 위를 --start t_press로 만든 파일)
+# 사람 시간 제한 없음, 성공 또는 [q](회복 불가 → data.attrs["replay_skipped"])로 끝. [r]은 원본 처음부터라 쓰지 않는다
+$PY -m square_assembly.scripts.collect_square_scripted_intervention \
+    --mode quest --base-ckpt <policy_epochN.pt> --replay-src data/square_intv_delay.hdf5 --replay-at press \
+    --out data/square_intv_immediate.hdf5
 ```
 
 - `--episodes`는 저장할 **성공** 에피소드 수다. 같은 `--out`에 다시 실행하면 이어서 저장하고, 새로 쓰려면 `--overwrite`.
