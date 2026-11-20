@@ -120,7 +120,7 @@ def main():
                 if isinstance(g, h5py.Group) and "states" in g and "obs" in g and "agentview_image" in g["obs"]:
                     jobs.append((p, n))
     print(f"{len(jobs)} episodes", flush=True)
-    reports, t0 = [], time.time()
+    reports, patches, t0 = [], [], time.time()
     with ProcessPoolExecutor(args.workers, mp_context=mp.get_context("spawn")) as ex:
         futs = {ex.submit(audit_episode, p, n): (p, n) for p, n in jobs}
         for i, fu in enumerate(as_completed(futs)):
@@ -131,21 +131,25 @@ def main():
                 reports.append({"file": p, "demo": n, "error": repr(e)[:300]})
                 print(f"  {p} {n}: ERROR {e!r}"[:300], flush=True)
                 continue
-            if patch and args.repair:
-                with h5py.File(p, "r+") as f:
-                    g = f["data"][n]
-                    for t, by_cam in patch.items():
-                        for c, im in by_cam.items():
-                            g["obs"][f"{c}_image"][t] = im
-                    prev = json.loads(g.attrs.get("render_repaired", "[]"))
-                    g.attrs["render_repaired"] = json.dumps(sorted(set(prev) | set(patch)))
-                rep["repaired"] = True
             reports.append(rep)
-            if rep["repair_steps"]:
+            if patch:
+                patches.append((p, n, patch))
                 print(f"  {p} {n}: render-bug steps {len(rep['repair_steps'])} {rep['counts']}", flush=True)
             if (i + 1) % 200 == 0:
                 print(f"[{i + 1}/{len(jobs)}] {time.time() - t0:.0f}s", flush=True)
     json.dump(reports, open(args.out, "w"))
+    errors = [r for r in reports if "error" in r]
+    if args.repair and errors:
+        print(f"{len(errors)} episodes failed to audit — not repairing anything", flush=True)
+    elif args.repair:   # 작업 프로세스가 모두 끝난 뒤에 쓴다 — 읽는 중인 파일을 열면 HDF5 잠금에 걸린다
+        for p, n, patch in patches:
+            with h5py.File(p, "r+") as f:
+                g = f["data"][n]
+                for t, by_cam in patch.items():
+                    for c, im in by_cam.items():
+                        g["obs"][f"{c}_image"][t] = im
+                prev = json.loads(g.attrs.get("render_repaired", "[]"))
+                g.attrs["render_repaired"] = json.dumps(sorted(set(prev) | set(patch)))
     bad = [r for r in reports if r.get("repair_steps")]
     print(f"done {len(jobs)} in {time.time() - t0:.0f}s — episodes with render-bug frames: {len(bad)}, "
           f"frames: {sum(len(r['repair_steps']) for r in bad)}{' (repaired)' if args.repair else ''}", flush=True)
