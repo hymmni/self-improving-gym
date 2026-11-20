@@ -107,13 +107,26 @@ import time
 import numpy as np
 
 from square_assembly.runners.square_oracle import (
-    _POS_SCALE, read_privileged_state, rot_delta_toward, yaw_of,
+    _POS_SCALE, _ROT_SCALE, read_privileged_state, rot_delta_toward, yaw_of,
 )
 
 # 손목 카메라(robot0_eye_in_hand)는 그리퍼 중심에서 5.8cm, 손가락 축에서 −90도 쪽에 달려 수직 아래를 본다
 # (2026-10-02 시뮬 실측: 그리퍼 site 좌표 [−1.1, 5.8, −8.7]cm, site +y = 야우 − 90도). 그쪽에 놓인 것이 화면에 잡힌다.
 _GUIDE_R = 0.075   # 손목 한계 가이드 고리의 반지름(m) — 카메라 표시 바로 바깥
 _STG_ASPECT = 21 / 9  # STG 패널을 붙인 화면 전체의 가로:세로 — 사용자 모니터(21:9)를 꽉 채우게 패널이 남는 폭을 쓴다
+
+
+def unwind_action(J, q, q_home, grip, step=0.05, pos_cap=1.0, rot_cap=0.4):
+    """관절을 처음 자세(q_home) 쪽으로 한 스텝(관절마다 최대 step rad) 옮기는 손끝 움직임을 OSC delta 액션(7)으로.
+
+    J: 손끝 site의 (6, 7) 야코비안(위치 3 + 회전 3, 월드). 손끝 명령으로 안 잡히는 나머지는 OSC의 영공간 항이
+    같은 처음 자세로 당긴다 — 관절이 한계에 붙어 꼬였을 때 사람 입력으로 못 풀던 것을 푼다(2026-11-20)."""
+    v = np.asarray(J) @ np.clip(np.asarray(q_home) - np.asarray(q), -step, step)
+    a = np.zeros(7, dtype=np.float32)
+    a[:3] = np.clip(v[:3] / _POS_SCALE, -pos_cap, pos_cap)
+    a[3:6] = np.clip(v[3:] / _ROT_SCALE, -rot_cap, rot_cap)
+    a[6] = grip
+    return a
 
 
 def _cam_dir(yaw):
@@ -305,7 +318,7 @@ class MouseTeleopIntervention:
         키 인자들은 Tk keysym이다("Tab", "Left", 소문자 한 글자).
     """
 
-    _HELP = ("[Tab] human/policy   [<-] last switch   [b] back 1s   [r] restart",
+    _HELP = ("[Tab] human/policy   [<-] last switch   [b] back 1s   [r] restart   [u] unwind",
              "[s] pause   [q] give up   Ctrl/Shift up/down   wheel yaw   LMB grip")
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
@@ -323,7 +336,7 @@ class MouseTeleopIntervention:
         self.human_only = human_only
         self.mouse_input = mouse_input   # False(Quest): 마우스 이동·휠·좌클릭을 무시한다 — 자석·포인터 warp도 없다
         if not mouse_input:
-            self._HELP = (self._HELP[0], "[s] pause   [q] give up   Quest: grip=move  trigger=gripper  B=restart")
+            self._HELP = (self._HELP[0], "[s] pause   [q] give up   [u] unwind   Quest: grip=move  trigger=gripper  B=restart")
         self.stg_bins = stg_bins
         self.stg_show = {"bars": True, "mean": True}  # 분포 막대 / 기댓값 곡선
         self._bar = None           # 체크박스 띠(Tk) — 화면 배율을 잴 때 그 높이를 뺀다
@@ -343,7 +356,7 @@ class MouseTeleopIntervention:
                      pause_key: "pause", quit_key: "quit",
                      back_key: "back", restart_key: "restart", force_key: "force",
                      "Return": "confirm", "Escape": "cancel",
-                     "F11": "fullscreen"}
+                     "F11": "fullscreen", "u": "unwind"}
         self.redo_label = None     # 다시 모을 수 있는 이전 에피소드 설명(수집기가 채움) — None이면 없음
         self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
         self._root = None          # Tk 창, render()에서 지연 생성(테스트는 창 없이 돈다)
@@ -363,6 +376,7 @@ class MouseTeleopIntervention:
         self._btn_prev = {}        # Quest: 버튼별로 직전에 눌려 있었는지 — 누르는 순간 한 번만
         self._quit_requested = False
         self._back, self._restart, self._switches, self._resync = 0, False, 0, False
+        self._unwinding = False    # [u] 관절 풀기 중 — 사람 입력 대신 처음 자세 쪽으로 간다
         self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
         self._goto_noise = False   # _goto가 rewind_to(렌더 노이즈 복구)에서 왔는지 — 지연 요청을 살린다
         self._modes = []           # 스텝별 사람 제어 여부 — 되감으면 그 스텝의 모드로 돌아간다
@@ -485,6 +499,11 @@ class MouseTeleopIntervention:
         resync, self._resync = self._resync, False
         if not self._active:
             return None
+        if self._unwinding:
+            a, left = self._unwind()
+            if left < 0.05:   # 다 풀었다 — 사람 입력으로 돌아간다(Quest는 다시 잡아야 따라간다)
+                self._stop_unwind()
+            return a
         if resync:  # 되감기 전 목표(커서·야우·그리퍼)를 들고 가면 재개하자마자 팔이 튄다
             self.controller.take_over(self._state_fn())
         return self.controller.action(self._state_fn())
@@ -545,6 +564,12 @@ class MouseTeleopIntervention:
                     self._resync = True
         elif what == "quit":
             self._quit_requested = True
+        elif what == "unwind" and self._active:
+            if self._unwinding:
+                self._stop_unwind()
+            else:
+                self._unwinding = True
+                self._toast = ("unwinding joints — [u] again to stop", time.time() + 2.0)
         elif what == "last_switch":
             self._switches += 1
             self._paused = True
@@ -554,6 +579,23 @@ class MouseTeleopIntervention:
         elif what == "restart":
             self._restart = True
             self._paused = True
+
+    def _stop_unwind(self):
+        self._unwinding, self._resync = False, True   # 풀기 전 목표를 들고 가면 팔이 꼬인 자세로 되돌아간다
+        self._toast = ("unwind done — grip to move", time.time() + 2.0)
+
+    def _unwind(self):
+        """(액션, 처음 자세까지 남은 최대 관절 차 rad)."""
+        import mujoco
+
+        sim, robot = self.raw.sim, self.raw.robots[0]
+        jp, jr = np.zeros((3, sim.model.nv)), np.zeros((3, sim.model.nv))
+        mujoco.mj_jacSite(sim.model._model, sim.data._data, jp, jr, robot.eef_site_id[robot.arms[0]])
+        cols, q = robot._ref_joint_vel_indexes, sim.data.qpos[robot._ref_joint_pos_indexes]
+        c = self.controller
+        a = unwind_action(np.vstack([jp[:, cols], jr[:, cols]]), q, robot.init_qpos, c.grip_cmd,
+                          pos_cap=c.pos_cap, rot_cap=c.rot_cap)
+        return a, float(np.abs(robot.init_qpos - q).max())
 
     def _toggle(self):
         self._release_grab()

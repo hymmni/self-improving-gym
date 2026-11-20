@@ -963,3 +963,24 @@ def test_stg_distribution_is_drawn_as_bars_only():
     panel = _stg_panel_after(10, at=20, mean=False)
     inside = panel[100:900, 60:-20].reshape(-1, 3)
     assert {tuple(c) for c in np.unique(inside, axis=0)} == {(30, 33, 36), (70, 120, 190)}
+
+
+def test_unwind_action_moves_joints_toward_home_through_the_jacobian():
+    from square_assembly.runners.mouse_teleop import unwind_action
+    from square_assembly.runners.square_oracle import _ROT_SCALE
+    J = np.zeros((6, 7)); J[0, 0] = 1.0; J[5, 6] = 1.0     # 관절 1 → 손끝 x, 관절 7 → 손끝 z축 회전
+    a = unwind_action(J, q=np.r_[0.0, np.zeros(5), -2.9], q_home=np.r_[0.01, np.zeros(5), 0.785], grip=1.0)
+    assert np.isclose(a[0], 0.01 / _POS_SCALE)              # 남은 차가 step보다 작으면 그만큼만
+    assert np.isclose(a[5], 0.05 / _ROT_SCALE)              # 크면 관절당 step(0.05 rad)까지
+    assert a[6] == 1.0
+
+
+def test_unwind_key_toggles_and_resyncs_on_stop():
+    interv = _make()
+    interv._handle_key("u")
+    assert not interv._unwinding                            # 정책이 몰 때는 무시
+    interv._handle_key("Tab"); interv(0, {})
+    interv._handle_key("u")
+    assert interv._unwinding
+    interv._handle_key("u")
+    assert not interv._unwinding and interv._resync         # 멈추면 사람 목표를 지금 자세로 다시 잡는다

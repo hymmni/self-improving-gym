@@ -176,6 +176,8 @@ $PY -m square_assembly.scripts.branch_rollout --src data/square_intv_delay.hdf5 
 
 # 지연 어블레이션: 같은 버튼 시점에서 즉시 개입(press) / 정책이 timeout까지 간 끝에서 개입(end, 위를 --start t_press로 만든 파일)
 # 사람 시간 제한 없음, 성공 또는 [q](회복 불가 → data.attrs["replay_skipped"])로 끝. [r]은 원본 처음부터라 쓰지 않는다
+# 관절이 꼬여 안 풀리면 [u]: 관절을 처음 자세 쪽으로 되돌린다(다 풀리거나 [u]를 다시 누르면 멈춤, 그 뒤 그립을 다시 쥔다).
+# 그리퍼가 물체에 끼어 있으면 손끝이 못 움직여 안 풀린다 — 먼저 빼낸 뒤 [u].
 $PY -m square_assembly.scripts.collect_square_scripted_intervention \
     --mode quest --base-ckpt <policy_epochN.pt> --replay-src data/square_intv_delay.hdf5 --replay-at press \
     --out data/square_intv_immediate.hdf5
