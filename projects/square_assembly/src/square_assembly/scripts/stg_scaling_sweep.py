@@ -57,18 +57,40 @@ def n_grid(pool_size):
     return sorted(set(range(0, pool_size, 10)) | {pool_size})
 
 
-def plan_runs(policy, pools, heldout, caches, num_steps, root):
-    """pools = stg_scaling_data.rollout_pools, caches[kind] = {"path", "demos", "intv": {원본: 캐시 이름}, "solo": {...}}."""
+def _pools(pools, heldout):
     held = set(heldout["intervention"]) | set(heldout["policy_success"])
     solo = set(pools["solo"]) - held
     eligible_by = {("delay", "all"): set(pools["intv"]) - held, ("immediate", "all"): set(pools["immediate"]) - held}
     common = set(pools["common"]) - held
     full = eligible_by[("delay", "all")] | solo
-    orders = [order_names(full, o) for o in range(N_ORDERS)]
+    return solo, common, eligible_by, [order_names(full, o) for o in range(N_ORDERS)]
+
+
+def _names(c, rollouts, solo):
+    return c["demos"] + sorted(c["solo" if r in solo else "intv"][r] for r in rollouts)
+
+
+def _job(jobs, policy, c, cache_kind, obs, seed, rollouts, names, num_steps, priority, root, tag_steps=False):
+    """job을 만들거나(같은 학습이면) 기존 것을 돌려준다. tag_steps면 step 수도 학습을 가르는 키다(민감도 실험)."""
+    key = [policy, cache_kind, obs, seed, sorted(names)] + ([num_steps] if tag_steps else [])
+    digest = hashlib.sha1(json.dumps(key).encode()).hexdigest()[:10]
+    steps = f"_t{num_steps}" if tag_steps else ""
+    job_id = f"{policy}/{obs}/{cache_kind}/r{len(rollouts):02d}_s{seed}{steps}_{digest}"
+    job = jobs.setdefault(job_id, {
+        "id": job_id, "policy": policy, "kind": cache_kind, "cache": c["path"],
+        "eval_cache": eval_cache_path(root, policy), "obs_parts": obs, "seed": seed,
+        "num_bins": POLICY_BINS[policy], "num_steps": num_steps, "n_rollouts": len(rollouts),
+        "train_episodes": names, "priority": priority})
+    job["priority"] = min(job["priority"], priority)
+    return job_id
+
+
+def plan_runs(policy, pools, heldout, caches, num_steps, root):
+    """pools = stg_scaling_data.rollout_pools, caches[kind] = {"path", "demos", "intv": {원본: 캐시 이름}, "solo": {...}}."""
+    solo, common, eligible_by, orders = _pools(pools, heldout)
     jobs, runs = {}, []
     for kind, pairing, with_success, obs, priority in conditions():
         eligible = (common if pairing == "same" else eligible_by[(kind, pairing)]) | solo
-        assert eligible <= full
         for n in n_grid(len(eligible)):
             for o in range(N_ORDERS):
                 for s in range(N_SEEDS):
@@ -76,29 +98,59 @@ def plan_runs(policy, pools, heldout, caches, num_steps, root):
                     rollouts = select(orders[o], eligible, solo, n, with_success)
                     cache_kind = kind if n else "delay"   # n=0(데모만)은 조건끼리 같은 job
                     c = caches[cache_kind]
-                    names = c["demos"] + sorted(c["solo" if r in solo else "intv"][r] for r in rollouts)
-                    key = json.dumps([policy, cache_kind, obs, seed, sorted(names)])
-                    digest = hashlib.sha1(key.encode()).hexdigest()[:10]
-                    job_id = f"{policy}/{obs}/{cache_kind}/r{len(rollouts):02d}_s{seed}_{digest}"
-                    job = jobs.setdefault(job_id, {
-                        "id": job_id, "policy": policy, "kind": cache_kind, "cache": c["path"],
-                        "eval_cache": eval_cache_path(root, policy), "obs_parts": obs, "seed": seed,
-                        "num_bins": POLICY_BINS[policy], "num_steps": num_steps, "n_rollouts": len(rollouts),
-                        "train_episodes": names, "priority": priority})
-                    job["priority"] = min(job["priority"], priority)
+                    job_id = _job(jobs, policy, c, cache_kind, obs, seed, rollouts, _names(c, rollouts, solo),
+                                  num_steps, priority, root)
                     runs.append({"policy": policy, "kind": kind, "pairing": pairing, "with_success": with_success,
                                  "obs_parts": obs, "n": n, "order": o, "seed": seed, "job": job_id,
                                  "rollouts": rollouts})
     return sorted(jobs.values(), key=lambda j: (j["priority"], j["seed"], j["id"])), runs
 
 
+SENS_BASE_STEPS, SENS_FLOOR, SENS_GRID_STEPS = 4000, 300, (1000, 2000, 8000)
+
+
+def plan_sensitivity(policy, pools, heldout, caches, root):
+    """학습 step 수 민감도(2026-11-21). 입력 all, 성공 포함, 같은 에피소드(가), 세 kind, 본 스윕과 같은 순서·시드.
+
+    (E) arm="E", steps="matched": n마다 num_steps = max(300, round(4000 × 학습 프레임(n) / 학습 프레임(최대 n))) —
+        모든 n이 최대 n의 4,000 step과 비슷한 epoch를 본다(프레임은 그 순서·kind의 실제 학습 세트로 센다).
+    (G) arm="G", steps ∈ {1000, 2000, 8000}: n ∈ {0, 10, 최대}. 4,000은 본 스윕 결과로 채운다.
+    """
+    solo, common, _, orders = _pools(pools, heldout)
+    eligible = common | solo
+    grid = n_grid(len(eligible))
+    jobs, runs = {}, []
+    for kind in KINDS:
+        frames_max = sum(caches[kind]["frames"][x] for x in _names(caches[kind], sorted(eligible), solo))
+        for n in grid:
+            for o in range(N_ORDERS):
+                for s in range(N_SEEDS):
+                    seed = N_SEEDS * o + s
+                    rollouts = select(orders[o], eligible, solo, n, True)
+                    cache_kind = kind if n else "delay"
+                    c = caches[cache_kind]
+                    names = _names(c, rollouts, solo)
+                    matched = max(SENS_FLOOR, round(SENS_BASE_STEPS * sum(c["frames"][x] for x in names) / frames_max))
+                    arms = [("E", "matched", matched, 0)]
+                    if n in (0, 10, grid[-1]):
+                        arms += [("G", st, st, 1) for st in SENS_GRID_STEPS]
+                    for arm, label, steps, priority in arms:
+                        job_id = _job(jobs, policy, c, cache_kind, "all", seed, rollouts, names, steps, priority,
+                                      root, tag_steps=True)
+                        runs.append({"policy": policy, "kind": kind, "pairing": "same", "with_success": True,
+                                     "obs_parts": "all", "n": n, "order": o, "seed": seed, "job": job_id,
+                                     "rollouts": rollouts, "arm": arm, "steps": label})
+    return sorted(jobs.values(), key=lambda j: (j["priority"], j["seed"], j["id"])), runs
+
+
 def read_cache_names(path):
     import h5py
 
-    out = {"path": path, "demos": [], "intv": {}, "solo": {}}
+    out = {"path": path, "demos": [], "intv": {}, "solo": {}, "frames": {}}
     with h5py.File(path, "r") as f:
         for name in by_index(f["data"]):
             a = f["data"][name].attrs
+            out["frames"][name] = int(a["length"]) - int(a["score_from"])   # success_tail_only로 학습하는 프레임 수
             if a["role"] == "demo":
                 out["demos"].append(name)
             else:
@@ -106,13 +158,15 @@ def read_cache_names(path):
     return out
 
 
-def build_jobs(root, num_steps):
+def build_jobs(root, num_steps, plan=None):
+    """plan=None이면 본 스윕(plan_runs, num_steps), 아니면 plan(policy, pools, heldout, caches, root)."""
     from square_assembly.scripts.stg_scaling_data import load_heldout, rollout_pools
 
     jobs, runs = [], []
     for policy in POLICY_BINS:
         caches = {k: read_cache_names(train_cache_path(root, policy, k)) for k in KINDS}
-        j, r = plan_runs(policy, rollout_pools(policy), load_heldout(policy), caches, num_steps, root)
+        args = (policy, rollout_pools(policy), load_heldout(policy), caches)
+        j, r = plan(*args, root) if plan else plan_runs(*args, num_steps, root)
         jobs += j
         runs += r
     return sorted(jobs, key=lambda j: (j["priority"], j["seed"], j["id"])), runs
@@ -204,9 +258,11 @@ def aggregate(root, n_boot=1000, plots=True):
     from square_assembly.scripts.eval_stg_scaling import RATIOS, bootstrap_ci, ratio_metrics
 
     plan = json.loads(Path(root, "jobs.json").read_text())
+    group = GROUP + tuple(k for k in ("arm", "steps") if plan["runs"] and k in plan["runs"][0])   # 민감도 실험
+    plots = plots and group == GROUP
     groups = {}
     for r in plan["runs"]:
-        groups.setdefault(tuple(r[k] for k in GROUP), []).append(r)
+        groups.setdefault(tuple(r[k] for k in group), []).append(r)
     cache, rows = {}, []
     for key, runs in sorted(groups.items(), key=lambda kv: [str(v) for v in kv[0]]):
         ms = []
@@ -218,7 +274,7 @@ def aggregate(root, n_boot=1000, plots=True):
                 ms.append(cache[r["job"]])
         if not ms:
             continue
-        row = dict(zip(GROUP, key), n_predictors=len(ms), n_runs=len(runs),
+        row = dict(zip(group, key), n_predictors=len(ms), n_runs=len(runs),
                    n_rollouts_mean=float(np.mean([len(r["rollouts"]) for r in runs])),
                    n_train_samples_mean=float(np.mean([m["n_train_samples"] for m in ms])))
         ci = bootstrap_ci([m["units"] for m in ms], n_boot=n_boot)
@@ -239,7 +295,7 @@ def aggregate(root, n_boot=1000, plots=True):
         rows.append(row)
     Path(root, "summary.json").write_text(json.dumps(rows, indent=1))
     with open(Path(root, "summary.csv"), "w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]) if rows else list(GROUP))
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]) if rows else list(group))
         writer.writeheader()
         writer.writerows(rows)
     if plots and rows:
@@ -307,6 +363,9 @@ def main():
     p = sub.add_parser("plan", help="jobs.json 만들기")
     p.add_argument("--root", default="outputs/stg_rollout_scaling_20261120")
     p.add_argument("--num-steps", type=int, required=True)
+    ps = sub.add_parser("plan-sensitivity", help="학습 step 수 민감도 job 목록(캐시는 --root, 결과는 --out)")
+    ps.add_argument("--root", default="outputs/stg_rollout_scaling_20261120")
+    ps.add_argument("--out", default="outputs/stg_rollout_scaling_20261120/sensitivity")
     r = sub.add_parser("run", help="job 돌리기(끝난 것은 건너뜀)")
     r.add_argument("--root", default="outputs/stg_rollout_scaling_20261120")
     r.add_argument("--shards", type=int, nargs="+", default=None, help="이 기계가 맡을 shard 번호들(기본: 전부)")
@@ -326,6 +385,12 @@ def main():
         Path(args.root, "jobs.json").write_text(json.dumps({"num_steps": args.num_steps, "jobs": jobs, "runs": runs}))
         print(f"runs {len(runs)} -> jobs {len(jobs)} "
               f"(main {sum(j['priority'] == 0 for j in jobs)}, inputs {sum(j['priority'] == 1 for j in jobs)})")
+    elif args.command == "plan-sensitivity":
+        jobs, runs = build_jobs(args.root, None, plan=plan_sensitivity)
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        Path(args.out, "jobs.json").write_text(json.dumps({"num_steps": None, "jobs": jobs, "runs": runs}))
+        print(f"runs {len(runs)} -> jobs {len(jobs)} (E {sum(j['priority'] == 0 for j in jobs)}, "
+              f"G {sum(j['priority'] == 1 for j in jobs)}), steps total {sum(j['num_steps'] for j in jobs)}")
     elif args.command == "run":
         jobs = json.loads(Path(args.root, "jobs.json").read_text())["jobs"]
         if args.shards is not None:

@@ -70,7 +70,7 @@ def test_assemble_cache_keeps_source_names_modes_and_rejects_mixed_meta(tmp_path
                                                       dict(cache=other_c, hdf5=other_h, name="demo_1", role="demo")])
 
 
-def _fake_plan(num_steps=100):
+def _fake_plan(num_steps=100, plan=None):
     """개입 demo_0..39(공통 demo_0..34), 정책 단독 성공 demo_40..49, 평가용 개입 demo_0·demo_10, 성공 demo_40."""
     from square_assembly.scripts.stg_scaling_sweep import plan_runs
     intv = [f"demo_{k}" for k in range(40)]
@@ -81,7 +81,11 @@ def _fake_plan(num_steps=100):
     for kind in ("delay", "immediate", "timeout"):
         names = pools["intv" if kind == "delay" else kind]
         caches[kind] = {"path": f"c/{kind}.vip.h5", "demos": ["demo_0", "demo_1"],
-                        "intv": {n: f"intv_{n}" for n in names}, "solo": {n: f"solo_{n}" for n in pools["solo"]}}
+                        "intv": {n: f"intv_{n}" for n in names}, "solo": {n: f"solo_{n}" for n in pools["solo"]},
+                        "frames": {"demo_0": 100, "demo_1": 100, **{f"intv_{n}": 50 for n in names},
+                                   **{f"solo_{n}": 20 for n in pools["solo"]}}}
+    if plan is not None:
+        return plan("random30", pools, heldout, caches, root="R")
     return plan_runs("random30", pools, heldout, caches, num_steps, root="R")
 
 
@@ -256,3 +260,23 @@ def test_aggregate_averages_seeds_and_reports_ci(tmp_path):
     assert row["success_mae_lo"] == pytest.approx(15.0) and row["false_progress_mean"] == pytest.approx(0.5)
     assert row["n_train_samples_mean"] == pytest.approx(1000.5) and row["auroc_fail_vs_intv_mean"] == pytest.approx(0.6)
     assert (root / "summary.csv").exists()
+
+
+def test_sensitivity_plan_matches_epochs_and_adds_a_step_grid():
+    """(E) n마다 학습 프레임에 비례한 step(최대 n = 4,000, 하한 300), (G) n ∈ {0, 10, 최대} × step {1000, 2000, 8000}."""
+    from square_assembly.scripts.stg_scaling_sweep import plan_sensitivity
+    jobs, runs = _fake_plan(plan=plan_sensitivity)
+    main_jobs, main_runs = _fake_plan(num_steps=4000)
+    job = {j["id"]: j for j in jobs}
+    full = 200 + 33 * 50 + 9 * 20                                  # 최대 n: 데모 2 + 공통 개입 33 + 성공 9
+    e = [r for r in runs if r["arm"] == "E"]
+    assert {r["kind"] for r in e} == {"delay", "immediate", "timeout"} and {r["pairing"] for r in e} == {"same"}
+    assert all(job[r["job"]]["num_steps"] == 4000 for r in e if r["n"] == 42)
+    assert all(job[r["job"]]["num_steps"] == max(300, round(4000 * 200 / full)) for r in e if r["n"] == 0)
+    g = [r for r in runs if r["arm"] == "G"]
+    assert {r["n"] for r in g} == {0, 10, 42} and {r["steps"] for r in g} == {1000, 2000, 8000}
+    assert all(job[r["job"]]["num_steps"] == r["steps"] for r in g)
+    same = {(r["kind"], r["n"], r["order"], r["seed"]): r["rollouts"] for r in main_runs
+            if r["pairing"] == "same" and r["with_success"] and r["obs_parts"] == "all"}
+    assert all(r["rollouts"] == same[(r["kind"], r["n"], r["order"], r["seed"])] for r in runs)   # 본 스윕과 같은 에피소드
+    assert len(job) == len({j["id"] for j in jobs}) and len(e) == 3 * 6 * 10 and len(g) == 3 * 3 * 3 * 10
