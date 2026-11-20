@@ -101,18 +101,32 @@ Tk 창은 Shift 단독과 떼기를 그대로 받으므로 "누름~뗌 사이 = 
 Space도 남겨둔다(로컬 키보드나 X11 클라이언트에선 된다).
 """
 
+import json
 import time
 
 import numpy as np
 
 from square_assembly.runners.square_oracle import (
-    _POS_SCALE, read_privileged_state, rot_delta_toward, yaw_of,
+    _POS_SCALE, _ROT_SCALE, read_privileged_state, rot_delta_toward, yaw_of,
 )
 
 # 손목 카메라(robot0_eye_in_hand)는 그리퍼 중심에서 5.8cm, 손가락 축에서 −90도 쪽에 달려 수직 아래를 본다
 # (2026-10-02 시뮬 실측: 그리퍼 site 좌표 [−1.1, 5.8, −8.7]cm, site +y = 야우 − 90도). 그쪽에 놓인 것이 화면에 잡힌다.
 _GUIDE_R = 0.075   # 손목 한계 가이드 고리의 반지름(m) — 카메라 표시 바로 바깥
 _STG_ASPECT = 21 / 9  # STG 패널을 붙인 화면 전체의 가로:세로 — 사용자 모니터(21:9)를 꽉 채우게 패널이 남는 폭을 쓴다
+
+
+def unwind_action(J, q, q_home, grip, step=0.05, pos_cap=1.0, rot_cap=0.4):
+    """관절을 처음 자세(q_home) 쪽으로 한 스텝(관절마다 최대 step rad) 옮기는 손끝 움직임을 OSC delta 액션(7)으로.
+
+    J: 손끝 site의 (6, 7) 야코비안(위치 3 + 회전 3, 월드). 손끝 명령으로 안 잡히는 나머지는 OSC의 영공간 항이
+    같은 처음 자세로 당긴다 — 관절이 한계에 붙어 꼬였을 때 사람 입력으로 못 풀던 것을 푼다(2026-11-20)."""
+    v = np.asarray(J) @ np.clip(np.asarray(q_home) - np.asarray(q), -step, step)
+    a = np.zeros(7, dtype=np.float32)
+    a[:3] = np.clip(v[:3] / _POS_SCALE, -pos_cap, pos_cap)
+    a[3:6] = np.clip(v[3:] / _ROT_SCALE, -rot_cap, rot_cap)
+    a[6] = grip
+    return a
 
 
 def _cam_dir(yaw):
@@ -244,6 +258,14 @@ class MouseTeleopController:
         self._z_err_sum = float(np.clip(self._z_err_sum + err, -0.1, 0.1))
         a[2] = np.clip((self.kp_z * err + self.ki_z * self._z_err_sum) / _POS_SCALE, -self.z_cap, self.z_cap)
 
+        a[3:6] = self.yaw_rot(state, R)
+
+        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
+        a[6] = self.grip_cmd
+        return a
+
+    def yaw_rot(self, state, R):
+        """손목 수직 아래 + target_yaw(손목 범위 안으로 접음)로 가는 회전 delta 액션(3)."""
         lo, hi = self.yaw_limits(state)
         yaw = self.yaw
         if self.target_yaw is not None:
@@ -253,11 +275,7 @@ class MouseTeleopController:
                 self.target_yaw = float(near[np.argmin(np.abs(same - near))])
             # 반 바퀴 안쪽만 앞세운다 — rot_delta_toward는 가까운 쪽으로 돌므로, 이래야 굴린 방향으로 돈다
             yaw = yaw + np.clip(self.target_yaw - yaw, -2.5, 2.5)
-        a[3:6], _ = rot_delta_toward(R, yaw, self.rot_cap)
-
-        self.grip_cmd = 1.0 if self.grip_pressed else -1.0
-        a[6] = self.grip_cmd
-        return a
+        return rot_delta_toward(R, yaw, self.rot_cap)[0]
 
 
 class TopDownMap:
@@ -300,17 +318,25 @@ class MouseTeleopIntervention:
         키 인자들은 Tk keysym이다("Tab", "Left", 소문자 한 글자).
     """
 
-    _HELP = ("[Tab] human/policy   [<-] last switch   [b] back 1s   [r] restart",
+    _HELP = ("[Tab] human/policy   [<-] last switch   [b] back 1s   [r] restart   [u] unwind",
              "[s] pause   [q] give up   Ctrl/Shift up/down   wheel yaw   LMB grip")
 
     def __init__(self, env, controller=None, map_size=480, map_extent=0.8, window_name="rollout",
-                 toggle_key="Tab", switch_key="Left", pause_key="s", quit_key="q",
+                 toggle_key="Tab", switch_key="Left", pause_key="s", quit_key="q", force_key="g",
                  back_key="b", restart_key="r", back_steps=20, state_fn=None,
                  snap_radius=0.025, field_radius=0.045, pull_rate=16.0, snap_hz=7.0, snap_zeta=0.65,
                  hold_gain=0.35, hold_tau=0.2, break_dist=0.045, pop_dist=0.012, human_only=False,
-                 zoom=1.0, fullscreen=False, stg_bins=None):
+                 zoom=1.0, fullscreen=False, stg_bins=None, mouse_input=True,
+                 random_delay=False, max_steps=None, handback=True):
         self.raw = getattr(env, "env", env)
+        if random_delay and max_steps is None:
+            raise ValueError("random_delay는 max_steps가 있어야 한다 — 지연을 남은 스텝 안에서 뽑는다")
+        self.random_delay, self.max_steps = random_delay, max_steps
+        self.handback = handback and not random_delay   # 지연 개입은 넘겨받으면 끝까지 사람
         self.human_only = human_only
+        self.mouse_input = mouse_input   # False(Quest): 마우스 이동·휠·좌클릭을 무시한다 — 자석·포인터 warp도 없다
+        if not mouse_input:
+            self._HELP = (self._HELP[0], "[s] pause   [q] give up   [u] unwind   Quest: grip=move  trigger=gripper  B=restart")
         self.stg_bins = stg_bins
         self.stg_show = {"bars": True, "mean": True}  # 분포 막대 / 기댓값 곡선
         self._bar = None           # 체크박스 띠(Tk) — 화면 배율을 잴 때 그 높이를 뺀다
@@ -325,10 +351,12 @@ class MouseTeleopIntervention:
         self.map_extent = map_extent
         self.window_name = window_name
         self.back_steps = back_steps
+        self.restart_key, self.toggle_key = restart_key, toggle_key
         self.keys = {toggle_key: "toggle", switch_key: "last_switch",
                      pause_key: "pause", quit_key: "quit",
-                     back_key: "back", restart_key: "restart", "Return": "confirm", "Escape": "cancel",
-                     "F11": "fullscreen"}
+                     back_key: "back", restart_key: "restart", force_key: "force",
+                     "Return": "confirm", "Escape": "cancel",
+                     "F11": "fullscreen", "u": "unwind"}
         self.redo_label = None     # 다시 모을 수 있는 이전 에피소드 설명(수집기가 채움) — None이면 없음
         self._state_fn = state_fn or (lambda: read_privileged_state(self.raw))
         self._root = None          # Tk 창, render()에서 지연 생성(테스트는 창 없이 돈다)
@@ -344,9 +372,13 @@ class MouseTeleopIntervention:
     def reset(self):
         self._active = False
         self._paused = False
+        self._grip_low = False     # Quest: 멈춘 뒤 그립을 놓은 것을 봤는지 — 새로 당겨야 풀린다
+        self._btn_prev = {}        # Quest: 버튼별로 직전에 눌려 있었는지 — 누르는 순간 한 번만
         self._quit_requested = False
         self._back, self._restart, self._switches, self._resync = 0, False, 0, False
+        self._unwinding = False    # [u] 관절 풀기 중 — 사람 입력 대신 처음 자세 쪽으로 간다
         self._goto = None          # rewind_to로 지정한 스텝(렌더 노이즈 복구) — 키 되감기보다 우선
+        self._goto_noise = False   # _goto가 rewind_to(렌더 노이즈 복구)에서 왔는지 — 지연 요청을 살린다
         self._modes = []           # 스텝별 사람 제어 여부 — 되감으면 그 스텝의 모드로 돌아간다
         self._rewound = None       # (되감기 전 스텝, 돌아간 스텝) — 멈춘 화면에 띄운다
         self._confirm_redo = self.redo_requested = False
@@ -358,6 +390,11 @@ class MouseTeleopIntervention:
         self._stg_probs = None     # 지금 스텝의 STG 분포
         self._release_grab()
         self.num_triggers = 0
+        self._next_step = 0        # 다음에 실행될 스텝 — 지금 Tab을 누르면 즉시 개입이 시작될 스텝(t_press)
+        self._delay_req = None       # 랜덤 지연 중인 개입 요청(delay_events의 한 항목)
+        self.delay_events = []     # 이번 에피소드의 개입 요청들: t_press, d, t0, max_delay, status
+        self.delay_seed = int(np.random.SeedSequence().entropy % 2**32)
+        self._rng = np.random.default_rng(self.delay_seed)
         self.controller.reset()
         if self.human_only:
             self.start_as_human()
@@ -375,8 +412,9 @@ class MouseTeleopIntervention:
         return self._quit_requested or self.redo_requested
 
     def rewind_to(self, step):
-        """수집기가 돌아갈 스텝을 직접 지정한다(렌더 노이즈 직전의 정상 스텝) — 되돌린 뒤 일시정지."""
-        self._goto = step
+        """수집기가 돌아갈 스텝을 직접 지정한다(렌더 노이즈 직전의 정상 스텝) — 되돌린 뒤 일시정지.
+        사람이 고른 되감기가 아니라서 랜덤 지연 요청(기다린 시간·뽑힌 t0)은 그대로 살린다."""
+        self._goto, self._goto_noise = step, True
         self._paused = True
 
     def idle(self, seconds):
@@ -409,11 +447,28 @@ class MouseTeleopIntervention:
             t = step
             for _ in range(self._switches):
                 t = self._last_switch_before(t)
-        self._back, self._restart, self._switches, self._goto = 0, False, 0, None
+        noise = self._goto_noise and self._goto is not None
+        self._back, self._restart, self._switches, self._goto, self._goto_noise = 0, False, 0, None, False
         self._release_grab()       # 되돌린 장면에선 그리퍼가 딴 데 있다
         if t < len(self._modes):
             self._active = self._modes[t]
             del self._modes[t:]
+        # 지워진 미래의 개입 요청: t 이후에 누른 것은 없던 일, 그 전에 눌렀지만 정책 구간(t < t0)으로 돌아간 것은
+        # rewound. t == t0면 모드가 사람 그대로라 넘겨받기도 그대로다. [g]로 뽑은 t0로 가는 되감기면 요청을 살려
+        # 그 스텝에서 넘겨받는다.
+        r = self._delay_req
+        keep = r if r is not None and "t_force" in r and r["t0"] == t else None
+        self.delay_events = [e for e in self.delay_events if e["t_press"] < t or e is keep]
+        if noise:   # 렌더 노이즈 복구: 기다리던 요청은 그대로, t 뒤에 넘겨받았던 것은 같은 t0로 다시 기다린다
+            for e in self.delay_events:
+                if e["status"] == "taken" and e["t0"] > t:
+                    e["status"] = "pending"
+            pend = [e for e in self.delay_events if e["status"] == "pending"]
+            keep = pend[-1] if pend else None
+        for e in self.delay_events:
+            if e is not keep and (e["status"] == "pending" or (e["status"] == "taken" and e["t0"] > t)):
+                e["status"] = "rewound"
+        self._delay_req = keep
         self._resync = True
         self._rewound = (step, t)
         return t
@@ -436,10 +491,19 @@ class MouseTeleopIntervention:
 
     def __call__(self, step, obs_raw):
         self._last_obs = obs_raw
+        self._next_step = step + 1
+        if self._delay_req is not None and step >= self._delay_req["t0"]:   # 지연이 끝났다 — 즉시 개입과 똑같이 넘겨받는다
+            self._delay_req["status"], self._delay_req = "taken", None
+            self._toggle()
         self._modes[step:] = [self._active]
         resync, self._resync = self._resync, False
         if not self._active:
             return None
+        if self._unwinding:
+            a, left = self._unwind()
+            if left < 0.05:   # 다 풀었다 — 사람 입력으로 돌아간다(Quest는 다시 잡아야 따라간다)
+                self._stop_unwind()
+            return a
         if resync:  # 되감기 전 목표(커서·야우·그리퍼)를 들고 가면 재개하자마자 팔이 튄다
             self.controller.take_over(self._state_fn())
         return self.controller.action(self._state_fn())
@@ -473,18 +537,39 @@ class MouseTeleopIntervention:
             self._left_t = now
         if what == "toggle" and self.human_only:
             self._toast = ("human-only: no policy to hand over to", time.time() + 1.5)
+        elif what == "toggle" and self._delay_req is not None:   # 지연 중 다시 누르면 요청 취소
+            self._delay_req["status"], self._delay_req = "cancelled", None
+        elif what == "force" and self._delay_req is not None and "t_force" not in self._delay_req:
+            # 지연 중 "더는 안 되겠다": t_press..지금 사이에서 균등하게 뽑은 스텝으로 되감아 거기서 넘겨받는다
+            r, now = self._delay_req, self._next_step
+            t0 = int(self._rng.integers(r["t_press"], now + 1))
+            r.update(t_force=now, d_drawn=r["d"], d=t0 - r["t_press"], t0=t0)
+            if t0 < now:
+                self._goto = t0   # rewind_to와 달리 멈추지 않는다 — 곧장 t0에서 넘겨받고, Quest는 그립을 쥘 때 풀린다
+        elif what == "toggle" and self._active and not self.handback:
+            self._toast = ("no hand-back: human keeps control until the episode ends", time.time() + 1.5)
+        elif what == "toggle" and not self._active and self.random_delay:
+            # d ~ U{0, …, R−1}, R = 남은 스텝 — t0가 항상 max_steps 안에 들어 시간 제한 전에 넘겨받는다
+            t, R = self._next_step, max(1, self.max_steps - self._next_step)
+            d = int(self._rng.integers(0, R))
+            self._delay_req = {"t_press": t, "d": d, "t0": t + d, "max_delay": R - 1, "status": "pending"}
+            self.delay_events.append(self._delay_req)
         elif what == "toggle":
-            self._release_grab()
-            self._active = not self._active
-            if self._active:
-                self.num_triggers += 1
-                self.controller.take_over(self._state_fn())
+            self._toggle()
         elif what == "pause":
             self._paused = not self._paused
             if not self._paused:
                 self._rewound = None
+                if not self.mouse_input:   # Quest: 멈춘 동안 손이 움직였으면 재개 때 목표가 튄다 — 다시 잡게 한다
+                    self._resync = True
         elif what == "quit":
             self._quit_requested = True
+        elif what == "unwind" and self._active:
+            if self._unwinding:
+                self._stop_unwind()
+            else:
+                self._unwinding = True
+                self._toast = ("unwinding joints — [u] again to stop", time.time() + 2.0)
         elif what == "last_switch":
             self._switches += 1
             self._paused = True
@@ -494,6 +579,79 @@ class MouseTeleopIntervention:
         elif what == "restart":
             self._restart = True
             self._paused = True
+
+    def _stop_unwind(self):
+        self._unwinding, self._resync = False, True   # 풀기 전 목표를 들고 가면 팔이 꼬인 자세로 되돌아간다
+        self._toast = ("unwind done — grip to move", time.time() + 2.0)
+
+    def _unwind(self):
+        """(액션, 처음 자세까지 남은 최대 관절 차 rad)."""
+        import mujoco
+
+        sim, robot = self.raw.sim, self.raw.robots[0]
+        jp, jr = np.zeros((3, sim.model.nv)), np.zeros((3, sim.model.nv))
+        mujoco.mj_jacSite(sim.model._model, sim.data._data, jp, jr, robot.eef_site_id[robot.arms[0]])
+        cols, q = robot._ref_joint_vel_indexes, sim.data.qpos[robot._ref_joint_pos_indexes]
+        c = self.controller
+        a = unwind_action(np.vstack([jp[:, cols], jr[:, cols]]), q, robot.init_qpos, c.grip_cmd,
+                          pos_cap=c.pos_cap, rot_cap=c.rot_cap)
+        return a, float(np.abs(robot.init_qpos - q).max())
+
+    def _toggle(self):
+        self._release_grab()
+        self._active = not self._active
+        if self._active:
+            self.num_triggers += 1
+            self.controller.take_over(self._state_fn())
+
+    def delay_record(self):
+        """에피소드 attrs로 남길 랜덤 지연 기록. t0=-1이면 넘겨받지 않았다; ended_during_delay면 지연 중에 끝났다
+        (정책이 그 사이 스스로 성공한 경우 등 — 무개입 성공과 구분). t_press·d·max_delay는 마지막 요청(-1 = 없음)."""
+        ev = [e for e in self.delay_events if e["status"] in ("taken", "pending")]
+        last = ev[-1] if ev else None
+        return {
+            "intv_random_delay": True, "delay_seed": self.delay_seed,
+            "t_press": last["t_press"] if last else -1, "delay_d": last["d"] if last else -1,
+            "max_delay": last["max_delay"] if last else -1,
+            "t0": last["t0"] if last and last["status"] == "taken" else -1,
+            "ended_during_delay": bool(last and last["status"] == "pending"),
+            "t_force": last.get("t_force", -1) if last else -1,   # [g]를 누른 스텝(-1 = 안 누름)
+            "delay_events": json.dumps(self.delay_events),
+        }
+
+    def _quest_buttons(self):
+        """Quest 컨트롤러 버튼 → 키. B는 [r](에피소드 처음으로), A는 Tab과 같다. 누르는 순간 한 번만."""
+        if self.mouse_input:
+            return
+        for attr, key in (("restart_button", self.restart_key), ("toggle_button", self.toggle_key)):
+            f = getattr(self.controller, attr, None)
+            if f is None:
+                continue
+            b = f()
+            if b and not self._btn_prev.get(attr):
+                self._handle_key(key)
+            self._btn_prev[attr] = b
+
+    def _quest_gate(self):
+        """Quest 사람 모드에선 클러치(중지 그립)를 잡은 동안만 시뮬레이터가 돈다. 놓으면 멈추고, 멈춘 동안
+        그립을 놓았다가 새로 당기면 풀린다([s]·되감기로 멈춘 것도 같다). 풀 때 지금 EE에서 새로 잡아 손이
+        멈춘 동안 움직인 만큼 튀지 않는다."""
+        if self.mouse_input or not self._active or self._confirm_redo:
+            return
+        if self._unwinding:   # [u] 풀기는 그립 없이 돈다 — 끝나면 _resync로 다시 잡아야 이어진다
+            self._paused = False
+            return
+        c = self.controller
+        if not self._paused:
+            if not c.clutched:
+                self._paused, self._grip_low = True, False
+            return
+        g = c.read_grip()
+        if g < c.grip_release_threshold:
+            self._grip_low = True
+        elif self._grip_low and g >= c.grip_threshold:
+            self._paused, self._rewound, self._resync = False, None, False
+            c.take_over(self._state_fn(), armed=True)
 
     def _on_key(self, keysym, down):
         """Tk 누름/뗌 이벤트. 올리기/내리기 키는 누르고 있는 동안만 z를 움직이고, 나머지는 누를 때 한 번."""
@@ -527,11 +685,12 @@ class MouseTeleopIntervention:
         view.pack(expand=True)        # 비율이 안 맞아 남는 자리는 검게, 화면은 가운데
         c = self.controller
 
-        view.bind("<Motion>", lambda e: self._on_motion(e.x, e.y))
-        view.bind("<ButtonPress-1>", lambda e: setattr(c, "grip_pressed", True))
-        view.bind("<ButtonRelease-1>", lambda e: setattr(c, "grip_pressed", False))
-        view.bind("<Button-4>", lambda e: self._on_wheel(+1))   # X11 휠 위
-        view.bind("<Button-5>", lambda e: self._on_wheel(-1))   # X11 휠 아래
+        if self.mouse_input:
+            view.bind("<Motion>", lambda e: self._on_motion(e.x, e.y))
+            view.bind("<ButtonPress-1>", lambda e: setattr(c, "grip_pressed", True))
+            view.bind("<ButtonRelease-1>", lambda e: setattr(c, "grip_pressed", False))
+            view.bind("<Button-4>", lambda e: self._on_wheel(+1))   # X11 휠 위
+            view.bind("<Button-5>", lambda e: self._on_wheel(-1))   # X11 휠 아래
         root.bind("<KeyPress>", lambda e: self._on_key(e.keysym, True))
         root.bind("<KeyRelease>", lambda e: self._on_key(e.keysym, False))
         root.bind("<FocusOut>", lambda e: setattr(c, "z_up", False) or setattr(c, "z_down", False))
@@ -557,11 +716,13 @@ class MouseTeleopIntervention:
         self._tick_t = None
 
     def _magnet_on(self):
-        return self._paused and self._active
+        return self.mouse_input and self._paused and self._active
 
     def _on_motion(self, x, y):
         """왼쪽 카메라 열 위에서는 목표를 안 바꾼다 — 맵은 그 오른쪽에 붙어 있다.
         멈춘 사람 모드에선 손이 움직인 양만 받아 자석에 넘기고 포인터를 바로 옮긴다(모듈 docstring '붙잡기')."""
+        if not self.mouse_input:
+            return
         if self._suppress_motion:  # 우리가 포인터를 옮기며 Tk가 바로 부르는 합성 이벤트
             return
         x, y = x / self._z, y / self._z  # 늘린 화면의 좌표 -> 캔버스 좌표
@@ -644,6 +805,8 @@ class MouseTeleopIntervention:
     def _on_wheel(self, notches):
         """휠 = 야우 목표. 자석에 붙어 있는 동안엔 끈적하게 비틀기만 하고 원래 각도로 돌아온다(모듈 docstring).
         사람이 그리퍼를 쥐고 있으면(조종 중·붙어 있음) 손목 범위에서 멈추고, 막힌 쪽을 _bump에 남긴다."""
+        if not self.mouse_input:
+            return
         c = self.controller
         self._wheel_t = time.time()
         if not (self._magnet_on() and self._snapped):
@@ -719,6 +882,7 @@ class MouseTeleopIntervention:
 
         if self._root is None:
             self._open_window()
+        self._grip_low = False   # 이 장면에서 멈췄다면 그립을 새로 당겨야 풀린다
         frames = frame if isinstance(frame, (list, tuple, dict)) else [frame]
         while True:
             arr = self._compose(frames)
@@ -742,6 +906,8 @@ class MouseTeleopIntervention:
             else:
                 self._photo.paste(img)
             self._root.update()
+            self._quest_buttons()
+            self._quest_gate()
             if (self._quit_requested or self.redo_requested or not self._paused
                     or self._back or self._restart or self._switches):
                 return not (self._quit_requested or self.redo_requested)
@@ -836,9 +1002,15 @@ class MouseTeleopIntervention:
         label = "HUMAN" if self._active else "POLICY"
         x = hud.pill(d, (x0 + 16 * k, 16 * k), label, mode_col + (255,),
                      color=(255, 255, 255) if self._active else (16, 24, 18), size=round(18 * k))
+        if self._delay_req is not None:   # 랜덤 지연 중 — 남은 시간은 안 보여 준다
+            x = hud.pill(d, (x + 8 * k, 16 * k), "TAKEOVER PENDING   Tab  cancel   g  take over", hud.PAUSED + (255,),
+                         size=round(15 * k), pad=(10, 6))
+        if self._active and not self.mouse_input:   # Quest 클러치 상태
+            x = hud.pill(d, (x + 8 * k, 16 * k), "CLUTCH ON" if c.clutched else "GRIP TO MOVE",
+                         hud.PANEL, color=hud.TEXT, size=round(13 * k), bold=False, pad=(10, 6))
         if self._paused:
             x = hud.pill(d, (x + 8 * k, 16 * k), "PAUSED", hud.PAUSED + (255,), size=round(18 * k))
-            msg = "S  resume"
+            msg = "S  resume" if self.mouse_input or not self._active else "grip  resume"
             if self._rewound is not None:
                 msg = f"step {self._rewound[0]} \u2192 {self._rewound[1]}     " + msg
             if self._active and not self._snapped:
@@ -912,9 +1084,12 @@ class MouseTeleopIntervention:
                                        ("text", "last switch"), ("key", "B"), ("text", "back 1s"),
                                        ("key", "R"), ("text", "restart"), ("key", "F11"), ("text", "fullscreen")],
                 size=sz)
-        hud.row(d, (lx, ly + 64 * k), [("key", "S"), ("text", "pause"), ("key", "Q"), ("text", "give up"),
-                                       ("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"),
-                                       ("key", "Wheel"), ("text", "yaw"), ("key", "LMB"), ("text", "grip")], size=sz)
+        row2 = [("key", "S"), ("text", "pause"), ("key", "Q"), ("text", "give up")]
+        row2 += ([("key", "Ctrl"), ("key", "Shift"), ("text", "up/down"), ("key", "Wheel"), ("text", "yaw"),
+                  ("key", "LMB"), ("text", "grip")] if self.mouse_input else
+                 [("text", "Quest:"), ("key", "Grip"), ("text", "move"), ("key", "Trigger"), ("text", "gripper"),
+                  ("key", "Stick"), ("text", "tilt"), ("key", "B"), ("text", "restart")])
+        hud.row(d, (lx, ly + 64 * k), row2, size=sz)
         now = time.time()
         if self._toast is not None and now < self._toast[1]:
             f = hud.font(round(15 * k), True)

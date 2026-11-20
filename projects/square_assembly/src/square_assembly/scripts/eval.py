@@ -9,10 +9,10 @@ attach_viewer로 달라 여기 대상 아님, save_gif로 대체). OpenVLA는 pr
 루프로 분기한다.
 
 사용:
-    python -m square_assembly.scripts.eval checkpoint_path=outputs/train/square_diffusion_unet/policy_epoch300.pt
-    python -m square_assembly.scripts.eval task=square_stage checkpoint_path=... render=true
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval checkpoint_path=outputs/train/square_diffusion_unet/policy_epoch300.pt
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval task=square_stage checkpoint_path=... render=true
     unset MUJOCO_GL  # low_dim 화면(mjviewer)일 때만 필요
-    python -m square_assembly.scripts.eval task=square policy_name=openvla policy=openvla \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.eval task=square policy_name=openvla policy=openvla \
         checkpoint_path=outputs/train/square_openvla/lora_final/policy \
         stats_path=outputs/train/square_openvla/normalization_stats.json save_gif=outputs/openvla_rollout.gif
 """
@@ -131,6 +131,12 @@ def _apply_run_config(cfg):
     cfg.task = saved.task
     cfg.policy = saved.policy
     cfg.policy_name = saved.policy_name
+    if cfg.get("nut_yaw_full_range", False) and cfg.task.get("env_kwargs"):
+        # 너트 yaw 제한으로 학습한 정책도 전체 범위에서 평가한다(OOD 확인용, 2026-11-17)
+        from omegaconf import open_dict
+
+        with open_dict(cfg.task.env_kwargs):
+            cfg.task.env_kwargs.pop("nut_yaw_exclude", None)
     logger.info(f"run_config.yaml에서 자동 적용: task={saved.task.name} policy_name={saved.policy_name}")
     return cfg
 
@@ -143,6 +149,25 @@ def _to_pil(img_chw01):
     img_hwc = np.transpose(np.asarray(img_chw01), (1, 2, 0))
     img_uint8 = np.clip(img_hwc * 255.0, 0, 255).astype(np.uint8)
     return Image.fromarray(img_uint8)
+
+
+def _record_init_nut_yaw(env):
+    """NutAssembly면 reset마다 너트 초기 yaw(도)를 리스트에 쌓는다 — 한 번의 전체 범위 평가에서
+    yaw 구간별 성공률을 나중에 다시 계산하려고(2026-11-17). 다른 env면 빈 리스트."""
+    yaws = []
+    if not hasattr(env.env, "nuts"):
+        return yaws
+    from square_assembly.envs.robomimic.factory import nut_yaw_deg
+
+    reset = env.reset
+
+    def reset_and_record(*a, **kw):
+        obs = reset(*a, **kw)
+        yaws.append(nut_yaw_deg(env.env))
+        return obs
+
+    env.reset = reset_and_record
+    return yaws
 
 
 def _run_dp_eval(cfg, device):
@@ -236,6 +261,7 @@ def _run_dp_eval(cfg, device):
             return _mjviewer_is_running(env_)
     else:
         env = make_eval_env(cfg.task)
+    init_nut_yaws = _record_init_nut_yaw(env)
 
     if cfg.eval_seed is not None:
         np.random.seed(cfg.eval_seed)  # env reset(너트 초기 위치) 시퀀스 고정 — 공정 비교용
@@ -276,8 +302,14 @@ def _run_dp_eval(cfg, device):
                             duration=60, loop=0, optimize=True)
         logger.info(f"GIF 저장: {cfg.save_gif} ({len(gif_frames)} 프레임)")
     env.env.close()
+    if init_nut_yaws:
+        for e, yaw in zip(metrics["episodes"], init_nut_yaws):
+            e["init_nut_yaw"] = round(yaw, 2)
     if cfg.get("use_wandb", False):
-        _log_eval_to_wandb(cfg, metrics, policy, normalizer, device)
+        try:   # wandb는 부가 기록이다 — 실패해도 metrics.json/episodes.csv 저장은 막지 않는다(2026-11-17 yawlim30 평가 유실)
+            _log_eval_to_wandb(cfg, metrics, policy, normalizer, device)
+        except Exception as e:
+            logger.warning(f"wandb 기록 실패, 건너뜀: {e!r}")
     return metrics
 
 
@@ -559,7 +591,7 @@ def main(cfg: DictConfig):
 
         episodes_path = os.path.join(output_dir, "episodes.csv")
         with open(episodes_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["episode", "success", "steps"])
+            writer = csv.DictWriter(f, fieldnames=list(episodes[0]))
             writer.writeheader()
             writer.writerows(episodes)
         logger.info(f"에피소드별 기록 저장: {episodes_path} ({len(episodes)}개)")

@@ -171,46 +171,31 @@ xcb 커넥션 초기화 중 확장 버전 질의(`xcb_shm_query_version`, `QT_XC
 tmux 안 거침, `~/.Xauthority` 마운트)을 갖추면 정상일 가능성이 높다 — 다만 EGL 순서를 고친
 뒤로 ssh -X를 다시 검증하진 않았다(RustDesk로 진행했기 때문).
 
-### 렌더가 노이즈로 나온다: 컨테이너에선 env 생성 후 첫 에피소드가 항상 노이즈 (2026-09-18 확정)
+### 렌더가 노이즈로 나온다: 원인은 robosuite 렌더 컨텍스트 해제 버그 (2026-11-20 확정·수정)
 
-**증상**: 에러 없이 화면이 지지직거리고 정책이 갑자기 아무것도 못 한다. MuJoCo 오프스크린
-렌더가 초기화되지 않은 메모리(노이즈) 또는 검은 화면을 돌려주며, 화면뿐 아니라 **정책이 보는
-obs도 같이 노이즈**라 그대로 수집하면 데이터가 통째로 쓸모없다. `env.reset()` 직후 첫 프레임은
-정상이고 step 프레임부터 깨지는 게 서명이라, "reset 후 한 장" 점검으로는 못 잡는다.
+**증상**: 에러 없이 화면이 지지직거리거나(노이즈) 단색·검은 화면이 되고, 정책도 같은 obs를 보므로 갑자기 아무것도
+못 한다. 한 번 깨지면 그 에피소드 끝(다음 reset)까지 계속 깨진다. 도커에서 더 자주 보였지만 도커 문제가 아니다.
 
-**확정된 사실**(pororo, 세 조건을 1분 간격으로 번갈아 30회 — `outputs/interleaved_probe.log`):
-- 컨테이너(이미지 그대로): **env 생성 후 첫 에피소드 30/30 노이즈**, 두 번째 reset부터 0/60.
-- 호스트 네이티브(conda `sig`): numpy 2.2.6이든 2.4.6이든 첫 에피소드 1/30 노이즈, 이후 0/60.
-- 즉 컨테이너는 결정적, 네이티브는 드물게(3%) 같은 현상이 난다. numpy 버전은 무관하다(한때
-  numpy 2.4가 원인이라고 적었던 건 시간대 효과를 통제 못 한 오판이었다). 실험으로 배제한 것:
-  GPU 부하, DISPLAY, TTY, 마운트 디렉터리, cv2 창, X11 MIT-SHM, NVIDIA ICD 고정, glFinish,
-  EGL device id. 근본 원인(드라이버/glvnd 조합으로 추정)은 못 잡았다.
+**원인**(재현·수정 확인): robosuite 1.5.1 기본 renderer(`mjviewer`)의 hard reset은 옛 `MjSim`을 정리하지 않고 새
+것으로 바꿔 끼운다. 옛 sim과 그 렌더 컨텍스트는 서로를 참조하는 순환이라 파이썬 GC가 **임의의 시점**에 치우는데,
+`MjRenderContext.__del__`이 (1) 지금 붙어 있는 **새** 컨텍스트에서 `con.free()`를 불러 번호가 겹치는 새 env의
+프레임버퍼·텍스처를 지우고 (2) `eglReleaseThread()`로 새 컨텍스트까지 떼어 낸다. 그 뒤 렌더는 아무것도 그리지 못하고
+`read_pixels`의 `np.empty`(초기화 안 된 메모리)가 그대로 이미지가 된다. GC가 새 컨텍스트가 생기기 **전**에 돌면
+무해하고 **후**에 돌면 깨지므로, 같은 코드인데 컨테이너·시각·프로그램(정책 추론 유무)에 따라 빈도가 달라 보였다.
+`gc.collect()`를 부르면 결정적으로 재현된다(gc를 끄고 reset 두 번 → `gc.collect()` → 렌더: 단색이나 노이즈).
 
-**방어**(원인과 무관하게 동작):
-- `make_eval_env`가 image env를 만들자마자 첫 에피소드(reset+30 step)를 버린다
-  (`_burn_first_episode`) — 학습 중 eval, eval.py, 수집 스크립트 모두 이 경로를 탄다.
-- collect_square_scripted_intervention.py: 시작 시 reset+5 step 프레임 점검 후 고장이면 env 재생성
-  (`wait_for_renderer`), 에피소드 도중 연속 3프레임 노이즈면 렌더 복구를 기다린 뒤 노이즈 직전
-  정상 스텝으로 되감아 이어서 수집(마우스 모드, 2026-09-30 — 첫 프레임부터 노이즈거나 오라클
-  모드면 예전처럼 그 에피소드를 버리고 같은 번호로 재수집), 저장 시 프레임 거칠기를 다시 재서 `render_ok` 속성을 남기고 노이즈면
-  실패로 기록(병합에서 제외).
+**수정**: `square_assembly/envs/robomimic/render_fix.py`의 `install()` — 해제는 자기 컨텍스트를 붙인 채 하고 원래
+컨텍스트를 되돌려 놓으며, 렌더·픽셀 읽기 직전마다 자기 컨텍스트를 붙인다. `make_image_env`가 env를 만들기 전에
+부르므로 수집·평가·학습 중 평가·RL 롤아웃이 모두 적용된다. robosuite env를 직접 `suite.make`로 만드는 코드는
+그 전에 `install()`을 직접 불러야 한다. 테스트: `tests/test_render_fix.py`(수정 없이는 실패한다).
 
-**직접 확인**(어디서든): reset 뒤 step을 20번 돌린 프레임의 이웃 픽셀 차이 평균 —
-정상 84px 장면은 4~10, 노이즈는 30~130, 검은 화면은 ~0. 두 에피소드를 찍어 첫 번째만 깨지면
-위 현상이다.
+**검사 방법**: 거칠기(이웃 픽셀 차이) 검사는 손목 카메라에서 정상 장면도 1.0까지 내려가 오탐이 난다(벽·단색 면을
+볼 때) 깨진 프레임을 정상으로 넘긴다(검은 바탕에 점 몇 개, 다른 카메라 그림이 든 프레임은 거칠기가 정상 범위다).
+확실한 검사는 저장된 sim 상태로 다시 그려 저장 이미지와 비교하는 것이고, 깨진 프레임은 같은 방법으로 고칠 수 있다:
+`python -m square_assembly.scripts.audit_render <hdf5들> --out audit.json [--repair]`(sim 상태가 없는 파일은 못 한다).
 
-```bash
-MUJOCO_GL=egl python -c "
-import numpy as np, robosuite as suite
-env = suite.make('NutAssemblySquare', robots='Panda', has_renderer=False, has_offscreen_renderer=True,
-                 use_camera_obs=True, camera_names='agentview', camera_heights=84, camera_widths=84, control_freq=20)
-for k in range(2):
-    o = env.reset(); rs = []
-    for _ in range(20):
-        o, *_ = env.step(np.zeros(env.action_dim)); rs.append(np.abs(np.diff(o['agentview_image'].astype(int), axis=1)).mean())
-    print(f'episode {k}: step frames max roughness {max(rs):.1f} ->', '정상' if max(rs) < 15 else '노이즈')
-"
-```
+**남겨 둔 방어**: `_burn_first_episode`와 수집 스크립트의 노이즈 가드는 수정 뒤로는 걸릴 일이 없지만, 평가 초기
+상태 재현성(첫 reset이 RNG를 쓴다)과 다른 렌더 고장에 대비해 그대로 둔다.
 
 ### cv2 창을 띄운 채 오프스크린 렌더 해상도를 키우면 죽는다 (2026-09-17 실측)
 

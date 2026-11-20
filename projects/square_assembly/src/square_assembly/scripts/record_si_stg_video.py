@@ -11,7 +11,7 @@ r"""`record_si_video.py`(장면만)에 STG 카테고리컬 분포 막대그래�
 **직후**에 호출되므로, 콜백 안에서 똑같은 길이의 obs_history를 별도로 유지하면
 STG 계산에 필요한 관측 이력을 안전하게 재현할 수 있다(메인 롤아웃 로직은 안 건드림).
 
-    python -m square_assembly.scripts.record_si_stg_video \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.record_si_stg_video \
         --si-ckpt outputs/si_full_env/predictor_best.pt \
         --base-ckpt /home/moai/hymm_ws/square_ckpt/policy_epoch1060.pt \
         --dstg-ckpt outputs/dstg/square_failaware/predictor.pt \

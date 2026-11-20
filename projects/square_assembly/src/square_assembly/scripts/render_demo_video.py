@@ -10,7 +10,7 @@ r"""저장된 hdf5 데모를 mp4로 재생한다 — 오른쪽에 STG 분포·�
 카메라 화면은 기본이 저장된 84x84를 보간 확대한 것이라 없던 디테일이 생기지 않는다. states가
 저장된 수집분(2026-09-21 이후)은 --from-states로 시뮬레이터를 되돌려 요청한 해상도로 다시 렌더한다.
 
-    python -m square_assembly.scripts.render_demo_video \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.render_demo_video \
         --hdf5 data/square_demo50_mouse50.hdf5 --demos demo_71 \
         --traces-dir outputs/traces_s1 --out-dir outputs/demo_videos
 """

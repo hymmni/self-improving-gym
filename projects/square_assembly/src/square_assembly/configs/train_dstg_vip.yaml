@@ -17,6 +17,7 @@ label_horizon: null      # 설정하면 라벨이 '남은 스텝 수' 대신 '�
 train_demos_limit: null  # train 데모 수 상한(규모 곡선용). val 데모는 영향받지 않는다.
 train_rollout_limit: null  # 전문가 시연은 다 두고 롤아웃·개입 train 데모만 이 수로(0 = 시연만). mode_hdf5 필요.
 train_rollout_kind: all    # all | no_intervention(개입 데모는 전부 빼고, 개입 없이 성공한 롤아웃 중에서만 고른다) | intervention(그 반대)
+train_episodes_file: null  # 한 줄에 캐시 에피소드 이름 하나 — 이 이름들만 학습(없는 이름이면 에러)
 mode_hdf5: null          # action_mode를 읽어올 원본 hdf5 — preintv 처리를 쓸 때만 필요
 preintv: none            # PREINTV 프레임 처리: none(그대로) | drop(train에서 제외) |
                          # flat(구간 내내 같은 라벨 = 진전 0) | rise(스텝마다 +1 = 후퇴) | anchor(끊김 없는 rise, stg_labels.py)
@@ -40,6 +41,7 @@ wandb_group: null
 wandb_mode: online
 
 obs_parts: all           # all | feat(모든 카메라) | lowdim(9차원) | agentview(main camera만) | wrist(손목 카메라만)
+                         # | agentview_lowdim | wrist_lowdim(그 카메라 하나 + lowdim)
 obs_horizon: 2           # configs/policy/diffusion_unet.yaml과 동일
 seed: 1
 device: cuda
@@ -49,10 +51,11 @@ batch_size: 64
 lr: 1.0e-4
 weight_decay: 1.0e-6
 num_epochs: 30
+num_steps: null          # 설정하면 epoch 대신 정확히 이만큼 gradient step(규모 곡선에서 모든 n을 같은 step으로)
 log_every: 5
 head_hidden: [256, 256]
 
-val_fraction: 0.2
+val_fraction: 0.2        # 0이면 검증 분할 없이 전부 학습(평가 세트를 따로 고정할 때)
 split_seed: 0
 
 hydra:

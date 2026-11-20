@@ -1,0 +1,30 @@
+{
+  "policy": "random30",
+  "intervention": [
+    "demo_5",
+    "demo_7",
+    "demo_20",
+    "demo_27",
+    "demo_32",
+    "demo_36",
+    "demo_45",
+    "demo_48",
+    "demo_54",
+    "demo_57",
+    "demo_66",
+    "demo_71",
+    "demo_74",
+    "demo_79",
+    "demo_85"
+  ],
+  "policy_success": [
+    "demo_4",
+    "demo_23",
+    "demo_33",
+    "demo_52",
+    "demo_73",
+    "demo_82"
+  ],
+  "seed": 0,
+  "method": "demo_k의 k 순으로 정렬 -> np.array_split(k) -> 구간마다 RandomState(0)로 하나 (개입은 지연·즉시·타임아웃 공통 에피소드에서)"
+}

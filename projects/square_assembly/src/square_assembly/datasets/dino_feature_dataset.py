@@ -23,8 +23,10 @@ import torch
 from square_assembly.datasets.stg_labels import build_labels
 
 OBS_PARTS = {"all": ("feat", "lowdim"), "feat": ("feat",), "lowdim": ("lowdim",),
-             "agentview": ("feat",), "wrist": ("feat",)}
-CAMERA_PARTS = {"agentview": "agentview_image", "wrist": "robot0_eye_in_hand_image"}   # 카메라 하나만 쓰는 obs_parts
+             "agentview": ("feat",), "wrist": ("feat",),
+             "agentview_lowdim": ("feat", "lowdim"), "wrist_lowdim": ("feat", "lowdim")}
+CAMERA_PARTS = {"agentview": "agentview_image", "wrist": "robot0_eye_in_hand_image",   # 카메라 하나만 쓰는 obs_parts
+                "agentview_lowdim": "agentview_image", "wrist_lowdim": "robot0_eye_in_hand_image"}
 
 
 def episode_split_by_name(demo_names, val_fraction, seed):
@@ -70,7 +72,8 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
         fail_bin (int | None): 실패 데모에 붙일 별도 클래스. 실패 데모가 있는데 None이면 죽는다.
         obs_parts (str): 캐시의 어느 부분을 입력으로 쓸지 — all(이미지 특징+고유수용) |
             feat(모든 카메라 특징만) | lowdim(eef pos/quat + gripper qpos 9차원만) |
-            agentview(main camera 특징만; wrist와 lowdim 제외) | wrist(손목 카메라 특징만). 예측기가
+            agentview(main camera 특징만; wrist와 lowdim 제외) | wrist(손목 카메라 특징만) |
+            agentview_lowdim / wrist_lowdim(그 카메라 하나 + lowdim, 2026-11-20). 예측기가
             진행도를 이미지가 아니라 고유수용 감각에서 읽는지 가르기 위한 축이다(2026-09-23).
     """
 
@@ -102,7 +105,7 @@ class DinoFeatureWindows(torch.utils.data.Dataset):
                 blocks = []
                 for part in OBS_PARTS[obs_parts]:
                     columns = slice(None)
-                    if obs_parts in CAMERA_PARTS:
+                    if obs_parts in CAMERA_PARTS and part == "feat":   # lowdim은 카메라 폭으로 자르지 않는다
                         feat = g["feat"]
                         if (feat.ndim != 2 or feat.shape[1] < len(cameras)
                                 or feat.shape[1] % len(cameras)):

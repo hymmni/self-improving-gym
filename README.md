@@ -117,7 +117,131 @@ python -m grasp_carry.scripts.train.train_carry_actor --help
 python -m square_assembly.scripts.train task=square
 ```
 
-## 4. 하네스 / 개발 워크플로우
+## 4. 자주 쓰는 작업 (square_assembly)
+
+옵션 전체는 `COMMANDS.md`와 각 스크립트 docstring에 있다. 여기는 자주 쓰는 순서대로 바로 복사해 쓰는 명령만 모았다.
+
+### 4.1 컨테이너
+
+```bash
+xhost +local:docker            # 호스트에서, 재부팅 뒤 한 번 (수집 창 등 GUI용)
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d   # GPU 있는 PC (정책 추론이 GPU로)
+docker compose up -d                                                    # GPU 없는 PC
+docker compose exec dev /opt/venvs/torch/bin/python -c "import torch;print(torch.cuda.is_available())"   # True 확인
+docker compose exec dev bash   # 셸이 필요하면
+```
+
+GPU 없이 띄우면 수집기가 조용히 CPU로 돌아 정책 추론이 몇 배 느려진다. 이미 떠 있는 컨테이너도 위 GPU 명령을 실행하면 다시 만들어진다(돌던 수집은 끊긴다).
+
+이미지에 venv가 둘이라 PATH에 `python`이 없다. 아래 명령은 모두 레포 루트에서 `docker compose exec dev /opt/venvs/torch/bin/python -m ...`로 실행한다(줄여서 `$PY`로 적는다).
+
+```bash
+PY="docker compose exec dev /opt/venvs/torch/bin/python"
+```
+
+### 4.2 Quest 3S 준비 (재부팅할 때마다)
+
+1. **PC-Service 켜기** — PC를 재부팅하면 꺼진다. 꺼져 있으면 Quest 앱 목록에 PC IP가 안 뜬다.
+   ```bash
+   bash /opt/apps/roboticsservice/runService.sh   # 호스트에서. 확인: pgrep -af RoboticsServiceProcess
+   ```
+2. Quest의 XRoboToolkit 앱에서 이 PC의 IP를 고른다. 안 뜨면 앱을 다시 열거나 IP를 직접 입력한다(Quest와 PC가 같은 네트워크여야 한다).
+3. **모니터를 정면으로 본 채** 오른쪽 Meta 버튼을 길게 눌러 recenter한다.
+
+### 4.3 데이터 수집 — `collect_square_scripted_intervention`
+
+```bash
+# Quest로 사람 시연만 (BC 초기 데모). --task can이면 Can
+$PY -m square_assembly.scripts.collect_square_scripted_intervention \
+    --mode quest --human-only --task square --episodes 20 --max-steps 700 \
+    --out data/quest_square_demos.hdf5
+
+# 정책을 돌리다 사람이 개입 (Tab으로 넘겨받기). --mode mouse면 마우스로 조종
+$PY -m square_assembly.scripts.collect_square_scripted_intervention \
+    --mode quest --base-ckpt <policy_epochN.pt> --episodes 50 --max-steps 700 \
+    --out data/square_intv_r1.hdf5 [--stg-ckpt <predictor.pt>]
+
+# 랜덤 지연 개입: Tab 뒤 U{0..max_steps−t_press−1} 스텝 지나 넘겨받는다(지연 중 Tab = 취소, g = t_press~지금 사이 랜덤 스텝으로 되감아 넘겨받기, 넘겨받은 뒤엔 돌려주지 않음)
+$PY -m square_assembly.scripts.collect_square_scripted_intervention \
+    --mode quest --base-ckpt <policy_epochN.pt> --episodes 50 --max-steps <데모 최대 길이×2> \
+    --random-delay --out data/square_intv_delay.hdf5
+
+# 이미 저장한 에피소드를 개입 시작 상태부터 다시 모으기
+$PY -m square_assembly.scripts.collect_square_scripted_intervention \
+    --mode mouse --base-ckpt <policy_epochN.pt> --out data/square_intv_r1.hdf5 --redo demo_113 demo_161
+
+# 반사실 분기: 랜덤 지연 에피소드를 t0(또는 t_press)에서 되살려 정책 혼자 timeout까지 (헤드리스, 야매 성공 자동 판정)
+$PY -m square_assembly.scripts.branch_rollout --src data/square_intv_delay.hdf5 \
+    --base-ckpt <policy_epochN.pt> --start t0 --out data/square_intv_delay_branch_t0.hdf5
+
+# 지연 어블레이션: 같은 버튼 시점에서 즉시 개입(press) / 정책이 timeout까지 간 끝에서 개입(end, 위를 --start t_press로 만든 파일)
+# 사람 시간 제한 없음, 성공 또는 [q](회복 불가 → data.attrs["replay_skipped"])로 끝. [r]은 원본 처음부터라 쓰지 않는다
+# 관절이 꼬여 안 풀리면 [u]: 관절을 처음 자세 쪽으로 되돌린다(다 풀리거나 [u]를 다시 누르면 멈춤, 그 뒤 그립을 다시 쥔다).
+# 그리퍼가 물체에 끼어 있으면 손끝이 못 움직여 안 풀린다 — 먼저 빼낸 뒤 [u].
+$PY -m square_assembly.scripts.collect_square_scripted_intervention \
+    --mode quest --base-ckpt <policy_epochN.pt> --replay-src data/square_intv_delay.hdf5 --replay-at press \
+    --out data/square_intv_immediate.hdf5
+```
+
+- `--episodes`는 저장할 **성공** 에피소드 수다. 같은 `--out`에 다시 실행하면 이어서 저장하고, 새로 쓰려면 `--overwrite`.
+- `--stg-ckpt`를 주면 화면 오른쪽에 STG 예측 패널이 붙는다(VIP 예측기면 `-e HOME=/workspace/outputs/.model_cache`가 필요하다, DOCKER.md §6-1).
+- `--quest-rot pose`면 손목 회전을 조이스틱 대신 컨트롤러 회전으로 따라간다. `--quest-pos-scale`은 손 이동 배율.
+
+**키보드** (mouse·quest 공통)
+
+| 키 | 동작 |
+|---|---|
+| `Tab` | 사람 ↔ 정책 전환 (`--human-only`에선 안 먹는다) |
+| `s` | 일시정지 / 재개 |
+| `←` | 직전 모드 전환점으로 되감기. 0.4초 안에 두 번 + `Enter`면 직전 저장 에피소드를 지우고 다시 모으기 |
+| `b` | 1초 되감기 |
+| `r` | 같은 배치로 에피소드 처음부터 |
+| `q` | 에피소드 포기 (버린 배치는 다시 못 만나므로 보통 `r`을 쓴다) |
+| `F11` | 전체화면 |
+
+**Quest 오른쪽 컨트롤러**
+
+| 입력 | 동작 |
+|---|---|
+| 중지 그립 쥐기 | 쥔 동안 팔이 손을 따라온다. 사람 모드에선 **쥔 동안만 시뮬레이터가 돈다** — 놓으면 멈추고 다시 쥐면 그 자리에서 이어간다 |
+| 검지 트리거 | 그리퍼 닫기(당긴 동안) |
+| 컨트롤러 수평 회전 | 손목 야우 (그립 쥔 동안) |
+| 조이스틱 | 손목 롤·피치(헬기식, 놓으면 수직) |
+| `A` | `Tab`과 같다 (넘겨받기, 랜덤 지연 모드에선 요청·취소) |
+| `B` | `r`과 같다 (에피소드 처음부터) |
+
+조이스틱 좌우로 앱이 시점을 돌리는 것은 자동으로 되돌린다(끄려면 `--quest-no-yaw-comp`). 쥔 물체를 정책에서 넘겨받을 때는 트리거를 당긴 채 `A`(또는 `Tab`).
+
+### 4.4 데이터 합치기 — `merge_demo_hdf5`
+
+수집은 세션마다 파일이 따로 생긴다. 학습 전에 하나로 합친다(기본은 성공 에피소드만, 실패도 넣으려면 `--keep-failures`). `env_args`는 robomimic 원본 데이터셋에서 가져온다.
+
+```bash
+$PY -m square_assembly.scripts.merge_demo_hdf5 \
+    --sources data/quest_square_demos.hdf5 data/square_intv_r1.hdf5 \
+    --env-args-from <robomimic square_image_v15.hdf5> \
+    --out data/square_demos_intv_r1.hdf5
+```
+
+### 4.5 학습·평가
+
+```bash
+$PY -m square_assembly.scripts.train task=square use_wandb=true            # Diffusion Policy BC
+$PY -m square_assembly.scripts.train_dstg policy_ckpt=<policy.pt> hdf5_path=<data.hdf5> out=<predictor.pt>   # STG 예측기
+$PY -m square_assembly.scripts.train_si policy_ckpt=<policy.pt> dstg_ckpt=<predictor.pt> \
+    algo=dppo iterations=50 episodes_per_iter=8 use_wandb=true out=<si.pt>  # 자기개선(RL)
+$PY -m square_assembly.scripts.eval checkpoint_path=<policy.pt> num_episodes=50
+```
+
+학습은 `use_wandb=true`로 돌린다(`.env`에 `WANDB_API_KEY`).
+
+### 4.6 테스트
+
+```bash
+docker compose exec -T dev bash -lc "cd /workspace && /opt/venvs/torch/bin/python -m pytest projects/square_assembly/tests -q"
+```
+
+## 5. 하네스 / 개발 워크플로우
 
 에이전트 작업 규칙은 [agent-harness](https://github.com/hymmni/agent-harness) 템플릿(copier, `research` 옵션)으로 설치한 `AGENTS.md`와 `docs/RESEARCH.md`가 단일 진처입니다. `CLAUDE.md`는 `@AGENTS.md` 한 줄입니다. 하네스 파일은 직접 고치지 않고 `copier update`로 갱신합니다(명령은 `COMMANDS.md` 4절).
 
@@ -130,7 +254,7 @@ python -m square_assembly.scripts.train task=square
 - 연구·데이터 수집·시각화 스크립트 목록과 옵션은 `COMMANDS.md`에 있다.
 - 서브프로젝트가 별도 스택·환경을 쓰면 `docs/ADR.md`에 근거를 남기고 독립 conda env로 분리한다.
 
-## 5. 문서 지도
+## 6. 문서 지도
 
 - `docs/ARCHITECTURE.md` — 디렉토리 구조·기술 스택 스냅샷
 - `docs/ADR.md` — 결정-이유-트레이드오프 로그

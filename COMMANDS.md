@@ -407,6 +407,25 @@ python -m square_assembly.scripts.record_si_stg_video --si-ckpt outputs/si/squar
 | `--fps` | 8 | — |
 | `--out` | `outputs/si_stg_video.mp4` | — |
 
+#### stg_scaling_data.py · stg_scaling_sweep.py · eval_stg_scaling.py (STG 롤아웃 규모 실험, 2026-11-20)
+스펙 `docs/superpowers/specs/2026-11-20-stg-rollout-scaling-design.md`, 플랜 `docs/superpowers/plans/2026-11-20-stg-rollout-scaling.md`.
+출처별 VIP 캐시(`cache_vip_feats`)를 `<root>/caches/src/<hdf5 이름>.vip.h5`에 먼저 굽는다.
+
+```bash
+python -m square_assembly.scripts.stg_scaling_data heldout --policy random30        # 평가용 목록(이미 커밋됨, 같은지 확인만)
+python -m square_assembly.scripts.stg_scaling_data caches --policy random30 --root outputs/stg_rollout_scaling_20261120
+python -m square_assembly.scripts.stg_scaling_sweep plan --root outputs/stg_rollout_scaling_20261120 --num-steps 4000
+python -m square_assembly.scripts.stg_scaling_sweep run --root outputs/stg_rollout_scaling_20261120 \
+    --shards 0 --num-shards 2 --workers 8 [--no-new-after 2026-11-21T09:50+09:00]
+python -m square_assembly.scripts.stg_scaling_sweep aggregate --root outputs/stg_rollout_scaling_20261120
+python -m square_assembly.scripts.eval_stg_scaling --predictor <predictor.pt> --eval-cache <root>/caches/random30_eval.vip.h5 --out <폴더>
+```
+
+- `run`은 `metrics.json`이 있는 job을 건너뛴다. 다른 기계의 `runs/`를 합친 뒤 같은 명령을 다시 실행하면 남은 job만 돈다.
+- job 순서는 주 곡선(입력 all) → 입력 비교, 그 안에서 시드 슬롯 순. `--no-new-after` 이후엔 새 job을 시작하지 않는다.
+- `aggregate`는 `summary.csv`/`summary.json`(조건·n별 예측기 평균, 시드 표준편차, 평가 에피소드 부트스트랩 95%)과 `figures/`를 만든다.
+- `train_dstg_vip`의 관련 옵션: `num_steps`(고정 step), `train_episodes_file`(학습 에피소드 목록), `val_fraction=0`, `obs_parts=wrist_lowdim|agentview_lowdim`.
+
 ---
 
 ## 3. 테스트

@@ -312,6 +312,22 @@ def test_wrist_selects_eye_in_hand_camera_only(tmp_path):
     np.testing.assert_array_equal(ds[2][0].numpy(), [20, 21, 30, 31])
 
 
+@pytest.mark.parametrize("parts,camera", [("wrist_lowdim", [10, 11]), ("agentview_lowdim", [90, 91])])
+def test_camera_plus_lowdim_parts_keep_one_camera_and_all_proprioception(tmp_path, parts, camera):
+    """손목+고유수용, agentview+고유수용(2026-11-20 롤아웃 규모 실험) — 카메라 열은 하나만, lowdim은 카메라 폭으로 자르지 않는다."""
+    import json
+
+    cache = tmp_path / "c.h5"
+    _write_fake_cache(cache, lengths=[2], feat_dim=4, low_dim=2)
+    with h5py.File(cache, "r+") as f:
+        f.attrs["meta"] = json.dumps({"rgb_keys": ["agentview_image", "robot0_eye_in_hand_image"]})
+        f["data/demo_0/feat"][:] = [[90, 91, 10, 11], [90, 91, 10, 11]]
+        f["data/demo_0/lowdim"][:] = [[-1, -2], [-1, -2]]
+    ds = DinoFeatureWindows(cache, 2, obs_parts=parts)
+    assert ds.frame_dim == 4
+    np.testing.assert_array_equal(ds[1][0].numpy(), (camera + [-1, -2]) * 2)
+
+
 @pytest.mark.parametrize("keys,width", [([], 4), (["wrist"], 4),
                                       (["agentview_image", "agentview_image"], 4),
                                       (["agentview_image", "wrist"], 3)])
@@ -506,3 +522,49 @@ def test_interval_and_relative_gauss_training_run_and_are_recorded(tmp_path, ext
                                     record_curves=True, num_epochs=1, batch_size=2, device="cpu", **extra))
     train_dstg_vip.main.__wrapped__(cfg)
     assert torch.load(tmp_path / "best_predictor.pt", weights_only=False)[key] == value
+
+
+def _scaling_cfg(tmp_path, n_demos=5, length=6, **extra):
+    """롤아웃 규모 실험(2026-11-20) 설정: 검증 분할 없이(val_fraction=0) 성공-tail로 학습."""
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from square_assembly.scripts import train_dstg_vip
+    cache, source = tmp_path / "c.h5", tmp_path / "m.h5"
+    _write_fake_cache(cache, lengths=[length] * n_demos)
+    with h5py.File(source, "w") as f:
+        for i in range(n_demos):
+            f.create_dataset(f"data/demo_{i}/action_mode", data=[-1] * length)
+    cfg = OmegaConf.load(Path(train_dstg_vip.__file__).parents[1] / "configs/train_dstg_vip.yaml")
+    return OmegaConf.merge(cfg, dict(cache_path=str(cache), mode_hdf5=str(source), out=str(tmp_path / "p.pt"),
+                                    success_tail_only=True, val_fraction=0, batch_size=2, device="cpu",
+                                    num_bins_override=8, num_epochs=1, **extra))
+
+
+def test_fixed_steps_train_exactly_that_many_batches(tmp_path, monkeypatch):
+    from square_assembly.scripts import train_dstg_vip
+    steps, step = [], torch.optim.AdamW.step
+
+    def counting_step(self, *args, **kwargs):
+        steps.append(1)
+        return step(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", counting_step)
+    train_dstg_vip.main.__wrapped__(_scaling_cfg(tmp_path, num_steps=7))
+    ck = torch.load(tmp_path / "p.pt", weights_only=False)
+    assert len(steps) == 7 and ck["num_steps"] == 7
+    assert ck["val_mae"] is None and ck["n_val_samples"] == 0 and ck["n_train_samples"] == 30
+
+
+def test_train_episodes_file_keeps_only_listed_episodes(tmp_path):
+    from square_assembly.scripts import train_dstg_vip
+    (tmp_path / "eps.txt").write_text("demo_3\ndemo_1\n")
+    train_dstg_vip.main.__wrapped__(_scaling_cfg(tmp_path, train_episodes_file=str(tmp_path / "eps.txt")))
+    ck = torch.load(tmp_path / "p.pt", weights_only=False)
+    assert ck["train_episodes"] == ["demo_1", "demo_3"] and ck["n_train_samples"] == 12
+
+
+def test_train_episodes_file_rejects_unknown_names(tmp_path):
+    from square_assembly.scripts import train_dstg_vip
+    (tmp_path / "eps.txt").write_text("demo_1\ndemo_9\n")
+    with pytest.raises(ValueError, match="demo_9"):
+        train_dstg_vip.main.__wrapped__(_scaling_cfg(tmp_path, train_episodes_file=str(tmp_path / "eps.txt")))

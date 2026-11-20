@@ -71,7 +71,7 @@ def task_lowdim_keys(task_cfg):
     return list(task_cfg.lowdim_keys) if is_image_task(task_cfg) else list(task_cfg.obs_keys)
 
 
-_RELEVANT_ENV_KWARGS = ("env_configuration", "controller_configs", "lite_physics")
+_RELEVANT_ENV_KWARGS = ("env_configuration", "controller_configs", "lite_physics", "nut_yaw_exclude")
 
 
 def derive_task_meta_from_hdf5(task_cfg):

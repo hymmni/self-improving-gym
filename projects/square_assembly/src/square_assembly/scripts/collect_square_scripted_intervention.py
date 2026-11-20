@@ -17,9 +17,9 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
   RuntimeError를 낼 수 있다(2026-09-09 서버에서 실측) — `NUMBA_CACHE_DIR=/tmp/numba_cache`
   같은 쓰기 가능한 경로를 지정해 우회한다.
 
-사용(컨테이너 WORKDIR=/workspace, 즉 레포 루트에서 실행 기준):
+사용(컨테이너 WORKDIR=/workspace, 즉 레포 루트에서 실행 기준. 이미지에 venv가 둘이라 PATH에 python이 없다 — torch venv를 쓴다):
     MUJOCO_GL=egl NUMBA_CACHE_DIR=/tmp/numba_cache \
-    python -m square_assembly.scripts.collect_square_scripted_intervention \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.collect_square_scripted_intervention \
         --base-ckpt projects/square_assembly/checkpoints/square_base_policy/policy_epoch1060.pt \
         --episodes 20 --max-steps 700 \
         --out data/square_scripted_intv_v1.hdf5
@@ -36,8 +36,33 @@ pynput)이 필요 없다. 오라클 구간은 INTV로 라벨되고, 에피소드
 [q]는 그 에피소드를 건너뛴다. 성공으로 끝났을 때만 기존 에피소드를 새 것으로 바꾼다.
 
 정책 없이 사람 시연만 모으려면 `--mode mouse --human-only`: 체크포인트를 안 읽고(--base-ckpt 무시, task는
-configs/task/square.yaml) 에피소드마다 사람 제어로 멈춘 채 시작한다([s]로 시작, Tab은 안 먹는다). 모든 스텝이
+configs/task/{--task}.yaml, 기본 square) 에피소드마다 사람 제어로 멈춘 채 시작한다([s]로 시작, Tab은 안 먹는다). 모든 스텝이
 INTV로 라벨되고 attrs["sampler"]는 "human"이다.
+
+## Quest 컨트롤러(--mode quest)
+mouse와 같은 Tk 창·키 조작을 쓰되 마우스는 무시하고 Quest 3S 컨트롤러로 조종한다.
+  1. `bash /opt/apps/roboticsservice/runService.sh`
+  2. Quest XRoboToolkit 앱에서 이 PC의 IP를 선택한다.
+  3. **모니터를 정면으로 본 채** 오른쪽 Meta 버튼을 길게 눌러 recenter한다.
+  4. `--mode quest [--human-only --task can]`으로 실행한다. 그립을 누른 동안 팔이 따라오고, 트리거로 그리퍼를
+     조작한다. 쥔 물체를 넘겨받을 때는 트리거를 당긴 채 Tab을 누른다. 야우는 그립을 쥔 동안 컨트롤러를
+     수평으로 돌린 만큼, 롤·피치는 오른쪽 조이스틱으로 헬기처럼 민 쪽으로 손목 위가
+     기운다(그리퍼 끝은 반대쪽, 놓으면 수직). 컨트롤러 회전을 그대로
+     따르게 하려면 `--quest-rot pose`. 사람 모드에선 그립을 쥔 동안만 시뮬레이터가 돈다 — 놓으면 멈추고,
+     다시 당기면 그 자리에서 이어 잡으며 풀린다([s]·되감기로 멈춘 것도 그립을 놓았다 당기면 풀린다).
+     B 버튼은 [r](에피소드 처음으로), A 버튼은 Tab(넘겨받기)과 같다.
+
+`--nut-yaw-exclude LO HI`면 너트 초기 yaw에서 그 구간(도)을 빼고 나머지에서 뽑는다. 값은 hdf5(data.attrs)에 남고
+merge_demo_hdf5가 env_args.env_kwargs로 옮기므로 그 데이터로 학습한 정책의 학습 중 평가·eval·train_si도 같은 범위를 쓴다.
+
+`--random-delay`(mouse/quest): Tab을 누른 스텝 t_press에서 d ~ U{0..max_steps−t_press−1}를 뽑아 t0 = t_press+d에
+넘겨받는다. 그동안 정책이 계속 몰고 화면엔 TAKEOVER PENDING만 뜬다(남은 시간은 안 보임). 지연 중 Tab을 다시 누르면 취소.
+지연 중 [g]는 "더는 못 기다린다": t_press..지금 사이에서 균등하게 뽑은 스텝으로 되감아 거기서 넘겨받는다(t_force에 기록,
+d_drawn은 원래 뽑힌 지연).
+넘겨받은 뒤엔 정책에 돌려주지 않고 max_steps도 안 걸린다(성공 또는 [q]). 개입 시점이 "실패를 알아챈 순간"에 몰리지 않고
+실패 경로 위에 퍼지게 하려는 것(2026-11-18). INTV/PREINTV 라벨은 t0 기준이라 학습 코드는 그대로다. 에피소드 attrs:
+t_press·delay_d·max_delay·t0(-1 = 안 넘겨받음)·ended_during_delay(지연 중 끝남, 예: 정책이 스스로 성공)·t_force·delay_seed·
+delay_events(JSON, 취소·되감기 포함).
 
 창이 작으면 최대화 버튼을 누르거나 테두리를 끌어 키운다 — 다 그린 화면을 창에 맞춰 늘려 띄운다. `--zoom 1.5`는 처음 창 크기,
 `--fullscreen`은 전체화면으로 시작(실행 중 F11로 오간다).
@@ -58,6 +83,7 @@ image_size 그대로 84픽셀 — 사람이 보기엔 84픽셀이 너무 작아�
 """
 
 import argparse
+import json
 import time
 import os
 
@@ -72,6 +98,7 @@ from square_assembly.datasets.labels import LABEL_INTV, LABEL_PREINTV, LABEL_ROL
 from square_assembly.runners.scripted_intervention import ScriptedFailureIntervention, open_window
 from square_assembly.runners.mouse_teleop import MouseTeleopController, MouseTeleopIntervention
 from square_assembly.runners.square_oracle import SquareAssemblyOracle
+from square_assembly.scripts.branch_rollout import delay_points
 
 
 # robosuite 오프스크린 버퍼는 640x480(MJCF 기본)으로 잡히고, 그보다 큰 렌더를 요청하면
@@ -324,18 +351,34 @@ def sampler_label(policy):
     return f"{name}{policy.num_inference_steps}" + ("" if eta is None else f" eta={eta:g}")
 
 
+def load_human_only_task_cfg(task):
+    """--human-only는 체크포인트가 없으므로 configs/task/{task}.yaml에서 task 설정을 읽는다."""
+    from omegaconf import OmegaConf
+
+    return OmegaConf.load(os.path.join(os.path.dirname(__file__), "..", "configs", "task", f"{task}.yaml"))
+
+
 def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         control_fps, display_size, window_name="rollout", mode="oracle", teleop=None, overwrite=False,
-        ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False, stg_ckpt=None):
+        ddim_steps=10, ddim_eta=1.0, redo=None, human_only=False, zoom=1.0, fullscreen=False, stg_ckpt=None,
+        task="square", quest=None, nut_yaw_exclude=None, random_delay=False, handback=True,
+        replay_src=None, replay_at="press"):
     # 반드시 아래 임포트들(robosuite/robomimic → EGL 초기화)보다 먼저 — 순서가 바뀌면 첫
     # cv2.imshow가 영영 멈춘다. mouse 모드는 cv2 창이 아니라 Tk 창이라 필요 없다.
-    if mode != "mouse":
+    human_ui = mode in ("mouse", "quest")   # 사람이 Tk 창에서 조종하는 모드 — quest도 같은 창을 쓴다
+    if not human_ui:
         open_window(window_name)
 
-    if redo and (mode != "mouse" or overwrite):
-        raise ValueError("--redo는 --mode mouse에서만, --overwrite 없이 쓴다")
-    if (human_only or stg_ckpt) and mode != "mouse":
-        raise ValueError("--human-only, --stg-ckpt는 --mode mouse에서만 쓴다")
+    if redo and (not human_ui or overwrite):
+        raise ValueError("--redo는 --mode mouse/quest에서만, --overwrite 없이 쓴다")
+    if replay_src and (not human_ui or random_delay or human_only):
+        raise ValueError("--replay-src는 --mode mouse/quest에서만, --random-delay·--human-only 없이 쓴다")
+    if replay_src:
+        handback = False   # 시간 제한이 없어서 정책에 돌려주면 끝나지 않는다
+    if random_delay and (not human_ui or human_only or redo):
+        raise ValueError("--random-delay는 --mode mouse/quest의 정책 롤아웃 수집에서만 쓴다(--human-only·--redo 제외)")
+    if (human_only or stg_ckpt) and not human_ui:
+        raise ValueError("--human-only, --stg-ckpt는 --mode mouse/quest에서만 쓴다")
     if display_size > _MAX_DISPLAY:
         raise ValueError(
             f"--display-size는 {_MAX_DISPLAY} 이하여야 한다(요청 {display_size}) — "
@@ -352,9 +395,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if human_only:   # 정책이 한 스텝도 안 움직인다 — 체크포인트 없이 task 설정만 읽는다
-        from omegaconf import OmegaConf
-
-        task_cfg = OmegaConf.load(os.path.join(os.path.dirname(__file__), "..", "configs", "task", "square.yaml"))
+        task_cfg = load_human_only_task_cfg(task)
         policy = normalizer = None
         obs_horizon = action_horizon = 1
         sampler = "human"
@@ -371,6 +412,15 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
         stats_path = os.path.join(os.path.dirname(base_ckpt), "normalization_stats.json")
         normalizer = MinMaxNormalizer(load_stats(stats_path))
+    if nut_yaw_exclude is not None:   # 초기 너트 yaw에서 뺄 구간(도) — make_image_env가 sampler에 건다
+        from omegaconf import OmegaConf
+
+        OmegaConf.set_struct(task_cfg, False)
+        ek = task_cfg.get("env_kwargs")
+        task_cfg.env_kwargs = {**(OmegaConf.to_container(ek, resolve=True) if ek else {}),
+                               "nut_yaw_exclude": [float(v) for v in nut_yaw_exclude]}
+    exclude = (task_cfg.get("env_kwargs") or {}).get("nut_yaw_exclude")   # 정책 run_config에 있던 것도
+    exclude = None if exclude is None else [float(v) for v in exclude]
     obs_keys = task_obs_keys(task_cfg)
     rgb_keys = list(task_cfg.rgb_keys) if is_image_task(task_cfg) else []
     if camera not in rgb_keys:
@@ -387,14 +437,20 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
     env = wait_for_renderer(lambda: make_eval_env(task_cfg), camera, display_size)
     # 마우스 모드는 모든 카메라(--camera가 맨 위)를 맵 왼쪽에 쌓아 보여주고, 맵은 그 높이 합만큼 키운다.
-    shown = [camera] + [k for k in rgb_keys if k != camera] if mode == "mouse" else [camera]
+    shown = [camera] + [k for k in rgb_keys if k != camera] if human_ui else [camera]
     display_cameras = [k[: -len("_image")] for k in shown]
 
-    if mode == "mouse":
+    if human_ui:
+        if mode == "quest":
+            from square_assembly.runners.quest_teleop import QuestTeleopController
+
+            controller = QuestTeleopController(**(quest or {}))
+        else:
+            controller = MouseTeleopController(**(teleop or {}))
         interv = MouseTeleopIntervention(
-            env, controller=MouseTeleopController(**(teleop or {})), map_size=display_size * len(shown),
+            env, controller=controller, mouse_input=mode == "mouse", map_size=display_size * len(shown),
             window_name=window_name, quit_key=quit_key, human_only=human_only, zoom=zoom, fullscreen=fullscreen,
-            stg_bins=stg_bins,
+            stg_bins=stg_bins, random_delay=random_delay, max_steps=max_steps, handback=handback,
         )
     else:
         interv = ScriptedFailureIntervention(
@@ -407,7 +463,7 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
     def recover_render():
         wait_for_render_recovery(env, camera, display_size, sleep_fn=getattr(interv, "idle", time.sleep))
 
-    def collect_once(start_state=None, stored=None, resume=None, grip_at_start=None):
+    def collect_once(start_state=None, stored=None, resume=None, grip_at_start=None, steps=max_steps):
         """에피소드 하나를 돌린다. start_state가 있으면 그 sim 상태에서 시작한다. stored·resume(--redo)이면
         저장된 앞부분을 이어받고, 첫 스텝 전에 되돌린 장면을 먼저 띄운다(멈춘 채 시작했으면 거기서 기다린다)."""
         pre_step, obs_ep, states_ep = make_recorder(env, interv, obs_keys, rgb_keys, stored)
@@ -423,10 +479,10 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
 
         result = collect_episode(
             env, policy, normalizer, obs_keys, obs_horizon, action_horizon, device,
-            intervention_fn=interv, max_steps=max_steps, render=False, render_fn=track,
+            intervention_fn=interv, max_steps=steps, render=False, render_fn=track,
             pre_step_fn=pre_step, should_end_fn=interv.should_end, control_fps=control_fps,
             predict_fn=predict_fn, print_diagnostics=False,
-            reset_fn=reset_fn, resume=resume,
+            reset_fn=reset_fn, resume=resume, limit_policy_only=random_delay,
         )
         return result, obs_ep, states_ep, noise
 
@@ -440,6 +496,12 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             print(f"--overwrite: 기존 {out}를 비우고 처음부터 모은다", flush=True)
         with h5py.File(out, "w" if overwrite else "a") as f:
             data_grp = f.require_group("data")
+            prev = data_grp.attrs.get("nut_yaw_exclude")
+            prev = None if prev is None else [float(v) for v in prev]
+            if any(k.startswith(("demo_", "fail_")) for k in data_grp.keys()) and prev != exclude:
+                raise ValueError(f"{out}의 너트 yaw 제외 구간({prev})과 이번 설정({exclude})이 다르다 — 다른 --out을 쓴다")
+            if exclude is not None:
+                data_grp.attrs["nut_yaw_exclude"] = exclude
             outcomes["success"] = sum(k.startswith("demo_") for k in data_grp.keys())
             outcomes["fail"] = sum(k.startswith("fail_") for k in data_grp.keys())
             total = int(data_grp.attrs.get("total", 0))
@@ -453,13 +515,27 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
             # 개수에는 안 센다 — 라운드마다 "성공 N개"를 맞추려는 것이지 시도 횟수가 아니다.
             # ←← + Enter로 다시 모으기: 이번 실행에서 바로 전에 저장한 에피소드와, 지운 뒤 다시 시작할 상태
             # --redo: 저장된 에피소드를 마지막 개입 시작 상태에서 이어받아 다시 모으고, 성공했을 때만 바꾼다.
-            replaced = []
-            for name in redo or []:
+            # --replay-src: 다른 파일의 에피소드를 같은 방식으로 이어받되, 시작 스텝을 고르고 결과는 이 파일에 새로 쓴다.
+            # --replay-src와 같이 주면 --redo는 "이 이름들만 다시"(이미 저장했거나 [q]로 건너뛴 것도). 없으면 둘 다 건너뛴다.
+            src_f = h5py.File(replay_src, "r") if replay_src else None
+            jobs = [] if src_f else [(data_grp[name], name, None) for name in redo or []]
+            done = set(data_grp) | set(json.loads(data_grp.attrs.get("replay_skipped", "[]")))
+            for name in sorted(src_f["data"], key=lambda n: int(n.split("_")[-1])) if src_f else []:
+                g = src_f["data"][name]
+                if (name not in redo) if redo else (name in done):
+                    continue
+                if replay_at == "press":
+                    pts = delay_points(g.attrs, np.asarray(g["action_mode"]))
+                    if pts is not None:
+                        jobs.append((g, name, pts[0]))
+                elif not g.attrs["is_success"]:   # end: 정책 혼자 timeout까지 간 분기(branch_rollout --start t_press)의 끝
+                    jobs.append((g, name, int(g.attrs["num_samples"]) - 1))
+            replaced, skipped = [], json.loads(data_grp.attrs.get("replay_skipped", "[]"))
+            for old, name, t_start in jobs:
                 if "redo_tmp" in data_grp:      # 지난 실행이 중간에 죽으며 남긴 것
                     del data_grp["redo_tmp"]
-                old = data_grp[name]
                 old_modes = np.asarray(old["action_mode"])
-                t0 = last_intervention_onset(old_modes)
+                t0 = last_intervention_onset(old_modes) if t_start is None else t_start
                 if t0 is None:
                     print(f"{name}: 사람 개입이 없는 에피소드 — 건너뜀", flush=True)
                     continue
@@ -478,13 +554,19 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     interv.reset()
                     interv.start_as_human(earlier=old_modes[:t0] == LABEL_INTV)
                     result, obs_ep, states_ep, noise = collect_once(states[t0], (obs_st, states[:t0], ramp[:t0]),
-                                                                    resume, ramp[t0])
+                                                                    resume, ramp[t0],
+                                                                    None if src_f else max_steps)   # 재현: 사람 시간 무제한
                     if noise["streak"] < 3:
                         break
                     print("  !! 렌더 노이즈 — 복구를 기다렸다가 같은 상태에서 다시", flush=True)
                     recover_render()
                 if not result["success"]:
-                    print(f"  {name}: 성공으로 끝나지 않음 — 기존 에피소드를 그대로 둔다", flush=True)
+                    print(f"  {name}: 성공으로 끝나지 않음 — " + ("건너뜀(replay_skipped에 기록)" if src_f
+                                                              else "기존 에피소드를 그대로 둔다"), flush=True)
+                    if src_f and name not in data_grp:   # --redo가 실패한 거면 기존 것을 그대로 둔다
+                        skipped.append(name)
+                        data_grp.attrs["replay_skipped"] = json.dumps(sorted(set(skipped)))
+                        f.flush()
                     continue
                 actions = np.asarray(result["actions"], dtype=np.float64)
                 assert len(actions) == len(obs_ep) == len(states_ep), "obs/state/action 스텝 수 불일치"
@@ -495,6 +577,31 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                     print(f"  !! {name}: 렌더 노이즈가 섞였다 — 기존 에피소드를 그대로 둔다", flush=True)
                     continue
                 new.attrs["render_ok"] = new.attrs["is_success"] = True
+                if src_f:   # 되감아서 더 앞에서 잡았을 수 있다 — 실제로 넘겨받은 스텝은 replay_onset
+                    new.attrs.update(replay_src=replay_src, replay_at=replay_at, replay_step=t0,
+                                     replay_onset=last_intervention_onset(result["action_modes"]))
+                    for k in ("delay_events", "orig_t_press", "orig_t0", "seed"):
+                        if k in old.attrs:
+                            new.attrs[k] = old.attrs[k]
+                    if name in data_grp:   # --redo로 다시 모은 것 — 성공했을 때만 바꾼다
+                        total -= int(data_grp[name].attrs["num_samples"])
+                        del data_grp[name]
+                    if name in skipped:
+                        skipped.remove(name)
+                        data_grp.attrs["replay_skipped"] = json.dumps(sorted(set(skipped)))
+                    data_grp.move("redo_tmp", name)
+                    total += len(actions)
+                    data_grp.attrs["total"] = total
+                    f.flush()
+                    replaced.append(name)
+                    print(f"  {name}: 저장({len(actions)}스텝, step {t0}부터)", flush=True)
+                    continue
+                for k, v in old.attrs.items():   # 랜덤 지연 기록(t_press·t0·delay_events 등)은 개입 시작 전 일이라 그대로 유효
+                    if k not in new.attrs:
+                        new.attrs[k] = v
+                if int(new.attrs.get("t0", -1)) >= 0:   # [b]·[←]로 더 앞에서 넘겨받았으면 그 스텝이 t0
+                    onset = last_intervention_onset(result["action_modes"])
+                    new.attrs["t0"], new.attrs["delay_d"] = onset, onset - int(new.attrs["t_press"])
                 new.attrs["redo_from_step"] = t0
                 del data_grp[name]
                 data_grp.move("redo_tmp", name)
@@ -503,9 +610,11 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 f.flush()
                 replaced.append(name)
                 print(f"  {name}: 저장({T_old} -> {len(actions)}스텝)", flush=True)
-            if redo:
-                print(f"다시 수집: {len(replaced)}/{len(redo)}개 교체 {replaced}", flush=True)
+            if redo or src_f:
+                print(f"{'재현' if src_f else '다시 수집'}: {len(replaced)}/{len(jobs)}개 {replaced}", flush=True)
                 episodes = 0   # 새 에피소드는 모으지 않는다
+                if src_f:
+                    src_f.close()
 
             last_saved, redo_state = None, None
             while outcomes["success"] < episodes:
@@ -549,6 +658,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                         demo_grp = data_grp[f"fail_{outcomes['fail']}"]
                     is_success = False
                 demo_grp.attrs["is_success"] = is_success
+                delay = interv.delay_record() if random_delay else None
+                for k, v in (delay or {}).items():
+                    demo_grp.attrs[k] = v
                 outcomes["success" if is_success else "fail"] += 1
                 total += T
                 name = demo_grp.name.split("/")[-1]
@@ -556,7 +668,9 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
                 redo_state = None
                 print(
                     f"ep {ep}: steps={T} success={is_success} triggers={interv.num_triggers}  "
-                    f"성공 {outcomes['success']}/{episodes} (시도 {ep + 1})",
+                    + (f"t_press={delay['t_press']} d={delay['delay_d']} t0={delay['t0']}"
+                       f"{' (지연 중 종료)' if delay['ended_during_delay'] else ''}  " if delay else "")
+                    + f"성공 {outcomes['success']}/{episodes} (시도 {ep + 1})",
                     flush=True,
                 )
                 ep += 1
@@ -566,6 +680,10 @@ def run(base_ckpt, episodes, max_steps, out, camera, trigger_key, quit_key,
         interv.close()
         if hasattr(env, "close"):
             env.close()
+        if mode == "quest":
+            from square_assembly.runners.quest_teleop import close_xrt
+
+            close_xrt()
 
     print(f"\n수집 완료: 성공 {outcomes['success']} / 실패 {outcomes['fail']} (총 {outcomes['success'] + outcomes['fail']}에피소드)  saved {out}")
 
@@ -580,9 +698,10 @@ def main():
     ap.add_argument("--max-steps", type=int, default=700)
     ap.add_argument("--out", default="data/square_scripted_intv.hdf5")
     ap.add_argument("--camera", default="agentview_image")
-    ap.add_argument("--mode", choices=["oracle", "mouse"], default="oracle",
+    ap.add_argument("--mode", choices=["oracle", "mouse", "quest"], default="oracle",
                     help="oracle: 트리거 키로 스크립트 오라클에 넘김 / mouse: 사람이 2D 맵 위에서 직접 조종"
-                         "(Tab=사람/정책 전환 ←=직전 전환점으로 s=일시정지, runners/mouse_teleop.py 참고)")
+                         "(Tab=사람/정책 전환 ←=직전 전환점으로 s=일시정지, runners/mouse_teleop.py 참고) / "
+                         "quest: Meta Quest 3S 컨트롤러로 조종(그립=이동, 트리거=그리퍼, runners/quest_teleop.py 참고)")
     ap.add_argument("--trigger-key", default="s", help="[oracle] 실패 판단 시 오라클에 넘기는 키")
     ap.add_argument("--kp", type=float, default=2.0, help="[mouse] xy P 게인")
     ap.add_argument("--kd", type=float, default=2.0, help="[mouse] xy D 게인(0이면 멈출 때 0.4~0.7cm 넘친다)")
@@ -613,6 +732,34 @@ def main():
                          "사람 제어로 멈춘 채 시작한다([s]로 시작)")
     ap.add_argument("--stg-ckpt", default=None,
                     help="[mouse] STG 예측기 체크포인트(VIP·ResNet) — 맵 오른쪽에 실시간 예측 패널을 띄운다(저장 데이터와 무관)")
+    ap.add_argument("--task", choices=["square", "can"], default="square",
+                    help="--human-only에서만 쓴다(정책이 있으면 체크포인트의 task를 쓴다)")
+    ap.add_argument("--quest-pos-scale", type=float, default=1.0, help="[quest] 손 이동 배율(1.0=1:1)")
+    ap.add_argument("--quest-rot-scale", type=float, default=1.0, help="[quest] 손 회전 배율(--quest-rot pose일 때)")
+    ap.add_argument("--quest-rot", choices=["stick", "pose"], default="stick",
+                    help="[quest] stick: 컨트롤러 야우 + 오른쪽 조이스틱 롤·피치(헬기식), pose: 컨트롤러 회전 추종")
+    ap.add_argument("--quest-no-yaw-comp", action="store_true",
+                    help="[quest] 조이스틱 좌우로 앱 기준점이 돈 것을 되돌리지 않는다")
+    ap.add_argument("--quest-max-tilt", type=float, default=30.0, help="[quest] 조이스틱 끝까지 밀 때 기울기(도)")
+    ap.add_argument("--quest-grip-threshold", type=float, default=0.9, help="[quest] 이 이상 쥐면 클러치 연결")
+    ap.add_argument("--quest-grip-release-threshold", type=float, default=0.7,
+                    help="[quest] 클러치가 물린 뒤 이 미만으로 내려가야 놓음(히스테리시스)")
+    ap.add_argument("--quest-euro-min-cutoff", type=float, default=1.0, help="[quest] 1-Euro 필터 min_cutoff(Hz)")
+    ap.add_argument("--quest-euro-beta", type=float, default=0.01, help="[quest] 1-Euro 필터 beta")
+    ap.add_argument("--quest-trigger-threshold", type=float, default=0.5, help="[quest] 이 이상 당기면 그리퍼 닫힘")
+    ap.add_argument("--nut-yaw-exclude", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="너트 초기 yaw에서 뺄 구간(도), 예: -10 125 — 손목 카메라에 구멍이 보이게 못 잡는 초기화. "
+                         "hdf5에 기록되고 merge_demo_hdf5가 env_args로 옮겨 학습 중 평가·RL까지 따라간다")
+    ap.add_argument("--random-delay", action="store_true",
+                    help="[mouse/quest] Tab을 누르면 d ~ U{0..max_steps−t_press−1} 스텝 뒤에 넘겨받는다(그동안 정책이 계속 몬다, "
+                         "다시 Tab = 취소). 넘겨받은 뒤엔 정책에 돌려주지 않고 max_steps도 안 걸린다(성공 또는 [q]로 끝). "
+                         "에피소드 attrs에 t_press·delay_d·t0·max_delay·delay_seed·delay_events를 남긴다")
+    ap.add_argument("--replay-src", default=None,
+                    help="[mouse/quest] 이 파일의 에피소드를 --replay-at 스텝에서 사람 제어로 이어받아 --out에 새로 쓴다(시간 제한 없음)")
+    ap.add_argument("--replay-at", choices=["press", "end"], default="press",
+                    help="press: 원본 랜덤 지연 수집의 t_press(즉시 개입) / end: branch_rollout --start t_press 출력의 끝(timeout 뒤 개입)")
+    ap.add_argument("--no-handback", action="store_true",
+                    help="[mouse/quest] 넘겨받은 뒤 Tab으로 정책에 돌려주지 않는다(--random-delay면 자동)")
     ap.add_argument("--overwrite", action="store_true",
                     help="--out 파일이 있으면 지우고 처음부터 모은다(기본: 기존 에피소드 뒤에 이어서)")
     args = ap.parse_args()
@@ -620,6 +767,16 @@ def main():
         args.trigger_key, args.quit_key, args.control_fps, args.display_size,
         mode=args.mode, overwrite=args.overwrite, ddim_steps=args.ddim_steps, ddim_eta=args.ddim_eta, redo=args.redo,
         human_only=args.human_only, zoom=args.zoom, fullscreen=args.fullscreen, stg_ckpt=args.stg_ckpt,
+        task=args.task, nut_yaw_exclude=args.nut_yaw_exclude,
+        random_delay=args.random_delay, handback=not args.no_handback,
+        replay_src=args.replay_src, replay_at=args.replay_at,
+        quest=dict(pos_scale=args.quest_pos_scale, rot_scale=args.quest_rot_scale,
+                   grip_threshold=args.quest_grip_threshold,
+                   trigger_threshold=args.quest_trigger_threshold,
+                   grip_release_threshold=args.quest_grip_release_threshold,
+                   euro_min_cutoff=args.quest_euro_min_cutoff, euro_beta=args.quest_euro_beta,
+                   rot_source=args.quest_rot, max_tilt=np.deg2rad(args.quest_max_tilt),
+                   headset_yaw_comp=not args.quest_no_yaw_comp),
         teleop=dict(kp=args.kp, kd=args.kd, pos_cap=args.pos_cap, down_speed=args.z_down / 100, up_speed=args.z_up / 100,
                     yaw_step=np.deg2rad(args.yaw_step), rot_cap=args.rot_cap))
 

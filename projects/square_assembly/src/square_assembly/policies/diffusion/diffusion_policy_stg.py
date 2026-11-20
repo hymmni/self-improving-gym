@@ -178,5 +178,5 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) != 3:
-        sys.exit("usage: python -m square_assembly.policies.diffusion.diffusion_policy_stg <policy_epochN.pt> <out predictor.pt>")
+        sys.exit("usage: /opt/venvs/torch/bin/python -m square_assembly.policies.diffusion.diffusion_policy_stg <policy_epochN.pt> <out predictor.pt>")
     print(export_dstg_ckpt(sys.argv[1], sys.argv[2]))

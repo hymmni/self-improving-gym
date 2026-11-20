@@ -32,10 +32,12 @@ hydra-core==1.3.2
 omegaconf==2.3.0
 wandb>=0.24.2
 
-# PICO VR 개입 수집(collect_intervention device=pico)용 — 하드웨어 전용, 선택 설치.
-#   xrobotoolkit_sdk: PICO 앱과 통신하는 XRoboToolkit SDK 바인딩(PyPI 아님, 별도 설치).
-#   scipy: pico_intervention의 pose→delta 변환. robosuite/robomimic가 이미 끌어오지만 명시.
-# 키보드 개입·학습·평가만 쓰면 불필요.
+# Quest/PICO 텔레옵(collect_square_scripted_intervention.py --mode quest, runners/quest_teleop.py)용.
+#   xrobotoolkit_sdk: XRoboToolkit 바인딩. PyPI 배포(GitHub: XR-Robotics/XRoboToolkit-PC-Service-Pybind).
+#   quest 모드에서만 lazy import하므로 런타임에는 선택 사항이지만, 호스트에서 XRoboToolkit
+#   PC-Service가 실행 중이어야 동작한다. 키보드 개입·학습·평가만 쓰면 불필요.
+#   scipy: 컨트롤러 pose→delta 변환. robosuite/robomimic가 이미 끌어오지만 명시.
+xrobotoolkit-sdk==1.1.0
 scipy
 
 # 데이터·시각화

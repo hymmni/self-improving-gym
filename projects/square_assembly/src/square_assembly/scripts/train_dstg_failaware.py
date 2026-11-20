@@ -18,7 +18,7 @@ hdf5(`collect_square_rollouts.py` 산출물) 대상.
 - fail_bin = (성공 라벨 중 최댓값) + 1, NUM_BINS = fail_bin + 1.
 
 사용:
-    python -m square_assembly.scripts.train_dstg_failaware \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train_dstg_failaware \
         policy_ckpt=/path/to/policy_epoch1060.pt \
         hdf5_path=data/square_rollouts_v1.hdf5 \
         out=outputs/dstg/square_failaware/predictor.pt

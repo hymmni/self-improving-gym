@@ -9,7 +9,7 @@ train_dstg_dino.py와 학습 루프·평가 지표·분할 규칙이 완전히 �
 DINO/ResNet 기준선과 같은 값을 기본값으로 둔다 — configs/train_dstg_vip.yaml 참고.
 
 사용:
-    python -m square_assembly.scripts.train_dstg_vip \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train_dstg_vip \
         cache_path=data/square_scale3_0_seed1.vip.h5 \
         out=outputs/dstg_vip/square_scale3_0_seed1/predictor.pt
 """
@@ -220,6 +220,9 @@ def main(cfg: DictConfig):
     if success_tail_from not in ("first", "last"):
         raise ValueError(f"success_tail_from는 first 또는 last다: {success_tail_from}")
     record_curves = bool(cfg.get("record_curves", False))
+    num_steps = cfg.get("num_steps")
+    if num_steps is not None and (int(num_steps) < 1 or record_curves):
+        raise ValueError("num_steps must be positive and cannot be combined with record_curves")
     if cfg.get("use_wandb", False) and not record_curves:
         raise ValueError("use_wandb requires record_curves=true")
     if success_tail_only and (cfg.get("label_horizon") is not None
@@ -258,9 +261,22 @@ def main(cfg: DictConfig):
         feat_dim = next(iter(f["data"].values()))["feat"].shape[-1]
     logger.info(f"cache={cfg.cache_path} meta={cache_meta}")
 
-    train_idx, val_idx, val_demos = dataset.split_indices(cfg.val_fraction, cfg.split_seed)
+    if cfg.val_fraction:
+        train_idx, val_idx, val_demos = dataset.split_indices(cfg.val_fraction, cfg.split_seed)
+    else:   # 평가 세트를 따로 고정한 실험(2026-11-20 롤아웃 규모): 검증 분할 없이 전부 학습
+        train_idx, val_idx, val_demos = list(range(len(dataset))), [], set()
     n_val_demos = len(val_demos)
     n_train_demos = len(dataset.frames) - n_val_demos
+
+    # train_episodes_file: 한 줄에 캐시 에피소드 이름 하나 — 이 이름들만 학습한다(롤아웃 규모 실험의 부분집합).
+    if cfg.get("train_episodes_file"):
+        with open(cfg.train_episodes_file) as stream:
+            keep = {line.strip() for line in stream if line.strip()}
+        missing = sorted(keep - set(dataset.frames))
+        if missing:
+            raise ValueError(f"train_episodes_file에 캐시에 없는 에피소드가 있다: {missing[:5]}")
+        train_idx = [i for i in train_idx if dataset.samples[i][0] in keep]
+        n_train_demos = len({dataset.samples[i][0] for i in train_idx})
 
     if success_tail_only:
         before = len(train_idx)
@@ -344,8 +360,12 @@ def main(cfg: DictConfig):
                   else Subset(dataset, train_idx))
     if pair_weight:
         logger.info(f"valid training pairs={sum(j is not None for j in train_data.pairs)}")
+    # num_steps: epoch 대신 정확히 이만큼 step — 비복원 순열을 이어 붙여 batch_size·num_steps개를 뽑는다.
+    sampler = (torch.utils.data.RandomSampler(train_data, num_samples=int(num_steps) * cfg.batch_size)
+               if num_steps else None)
+    num_epochs = 1 if num_steps else cfg.num_epochs
     train_loader = DataLoader(
-        train_data, batch_size=cfg.batch_size, shuffle=True,
+        train_data, batch_size=cfg.batch_size, shuffle=sampler is None, sampler=sampler,
         num_workers=cfg.num_workers, drop_last=True,
     )
     val_loader = DataLoader(
@@ -395,13 +415,13 @@ def main(cfg: DictConfig):
             val_starts[name] = success_tail_start(mode, success_tail_from == "first")
             cohorts[name] = "intervention_tail" if human.any() else "expert" if (mode == -1).all() else "policy_success"
 
-    for epoch in range(cfg.num_epochs):
+    for epoch in range(num_epochs):
         train_nll, train_mae = _run_epoch(
             head, train_loader, device, num_bins, optimizer=optimizer,
             gauss_sigma=gauss_sigma, pair_weight=pair_weight, pair_stride=pair_stride,
             modality_dropout=modality_dropout, obs_horizon=cfg.obs_horizon, feat_dim=feat_dim, values=values,
             encode=encode, gauss_sigma_rel=gauss_sigma_rel, gauss_sigma_t0=gauss_sigma_t0)
-        if epoch % cfg.log_every == 0 or epoch == cfg.num_epochs - 1:
+        if epoch % cfg.log_every == 0 or epoch == num_epochs - 1:
             msg = f"epoch {epoch} train_nll={train_nll:.4f} train_mae={train_mae:.3f}"
             logger.info(msg)
             print(msg, flush=True)
@@ -431,10 +451,12 @@ def main(cfg: DictConfig):
                   f"val_retained_mae={row['val_retained']['mae']:.3f} "
                   f"val_retained_k8={row['val_retained']['k8']}", flush=True)
 
-    val_nll, val_mae = _run_epoch(head, val_loader, device, num_bins, optimizer=None, values=values, encode=encode)
-    logger.info(
-        f"[val] nll={val_nll:.4f} mae={val_mae:.3f} (n={len(val_idx)} samples, {n_val_demos} demos)"
-    )
+    val_nll = val_mae = None
+    if val_idx:
+        val_nll, val_mae = _run_epoch(head, val_loader, device, num_bins, optimizer=None, values=values, encode=encode)
+        logger.info(
+            f"[val] nll={val_nll:.4f} mae={val_mae:.3f} (n={len(val_idx)} samples, {n_val_demos} demos)"
+        )
     print({"val_nll": val_nll, "val_mae": val_mae, "num_bins": num_bins,
            "n_train_demos": n_train_demos, "n_val_demos": n_val_demos}, flush=True)
 
@@ -472,7 +494,9 @@ def main(cfg: DictConfig):
         "frame_std": frame_std,
         "cache_path": os.path.abspath(cfg.cache_path),
         "cache_meta": cache_meta,
-        "epoch": cfg.num_epochs,
+        "epoch": num_epochs,
+        "num_steps": int(num_steps) if num_steps else None,
+        "train_episodes": sorted({dataset.samples[i][0] for i in train_idx}),
         "val_nll": val_nll,
         "val_mae": val_mae,
         "n_train_demos": n_train_demos,

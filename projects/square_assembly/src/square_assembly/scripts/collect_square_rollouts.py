@@ -17,7 +17,7 @@ __getitem__`이 로드 시점에 permute+/255.0을 하므로) — `env.step()`�
 obs_raw의 이미지 키는 robomimic ObsUtils.process_obs가 이미 CHW,float[0,1]로
 바꿔둔 상태라 저장 전에 역변환(HWC,uint8)해야 한다.
 
-    python -m square_assembly.scripts.collect_square_rollouts \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.collect_square_rollouts \
         --base-ckpt /home/moai/hymm_ws/square_ckpt/policy_epoch1060.pt \
         --episodes 120 --max-steps 500 \
         --out data/square_rollouts_v1.hdf5

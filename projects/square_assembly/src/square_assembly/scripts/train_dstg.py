@@ -11,7 +11,7 @@ robomimic PH 데모는 전부 성공 시연이라 이 스크립트는 succ 버�
 버전(실패 bin 포함)은 실패 롤아웃 데이터가 쌓인 뒤의 다음 phase로 미룬다.
 
 사용:
-    python -m square_assembly.scripts.train_dstg \
+    /opt/venvs/torch/bin/python -m square_assembly.scripts.train_dstg \
         policy_ckpt=/path/to/policy_epoch1060.pt \
         hdf5_path=/path/to/square_image_v15.hdf5 \
         out=outputs/dstg/square_demo50_succ/predictor.pt

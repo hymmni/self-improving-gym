@@ -20,6 +20,25 @@ def _ensure_obs_utils_initialized(obs_keys, rgb_keys=()):
     ObsUtils.initialize_obs_utils_with_obs_specs({"obs": {"low_dim": list(obs_keys), "rgb": list(rgb_keys)}})
 
 
+def nut_yaw_deg(rs_env):
+    """robosuite NutAssembly env의 현재 (첫) 너트 body yaw(도)."""
+    w, x, y, z = rs_env.sim.data.body_xquat[rs_env.sim.model.body_name2id(rs_env.nuts[0].root_body)]
+    return float(np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))))
+
+
+def _exclude_nut_yaw(env, exclude_deg):
+    """NutAssembly 너트 초기 yaw에서 [lo, hi]도 구간을 빼고 나머지에서 균등하게 뽑는다.
+
+    손목 카메라에 너트 구멍이 보이게 잡을 수 없는 초기화를 학습·평가에서 빼려고 쓴다(2026-11-17).
+    robosuite sampler의 회전값 == 너트 body yaw(오프셋 없음, 실측)."""
+    if exclude_deg is None:
+        return
+    lo, hi = (float(v) for v in exclude_deg)
+    assert 0 < hi - lo < 360, exclude_deg
+    for sampler in env.env.placement_initializer.samplers.values():
+        sampler.rotation = (np.deg2rad(hi), np.deg2rad(lo + 360))
+
+
 def make_lowdim_env(env_name, robots, obs_keys, render=False, renderer="mjviewer", gripper_types=None, env_kwargs=None):
     """low_dim obs만 쓰는 robosuite env 생성.
 
@@ -42,6 +61,7 @@ def make_lowdim_env(env_name, robots, obs_keys, render=False, renderer="mjviewer
     """
     _ensure_obs_utils_initialized(obs_keys)
     kwargs = dict(env_kwargs) if env_kwargs else {}
+    nut_yaw_exclude = kwargs.pop("nut_yaw_exclude", None)   # robosuite 인자가 아니다
     if gripper_types is not None:
         kwargs["gripper_types"] = gripper_types
     if not isinstance(robots, str):
@@ -55,6 +75,7 @@ def make_lowdim_env(env_name, robots, obs_keys, render=False, renderer="mjviewer
         reward_shaping=False,
         **kwargs,
     )
+    _exclude_nut_yaw(env, nut_yaw_exclude)
     if render:
         env.env.has_renderer = True
         env.env.renderer = renderer
@@ -118,8 +139,12 @@ def make_image_env(env_name, robots, lowdim_keys, rgb_keys, camera_names, image_
 
     오프스크린 렌더이므로 MUJOCO_GL=egl 환경에서 실행한다.
     """
+    from square_assembly.envs.robomimic.render_fix import install
+
+    install()   # GC가 옛 렌더 컨텍스트를 치울 때 지금 env의 렌더가 깨지는 robosuite 결함(render_fix.py)
     _ensure_obs_utils_initialized(lowdim_keys, rgb_keys)
     kwargs = dict(env_kwargs) if env_kwargs else {}
+    nut_yaw_exclude = kwargs.pop("nut_yaw_exclude", None)   # robosuite 인자가 아니다
     if gripper_types is not None:
         kwargs["gripper_types"] = gripper_types
     if not isinstance(robots, str):
@@ -136,4 +161,5 @@ def make_image_env(env_name, robots, lowdim_keys, rgb_keys, camera_names, image_
         reward_shaping=False,
         **kwargs,
     )
+    _exclude_nut_yaw(env, nut_yaw_exclude)
     return env
