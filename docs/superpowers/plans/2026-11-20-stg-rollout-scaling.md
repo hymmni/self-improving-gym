@@ -34,7 +34,12 @@
 1. **gradient step 수(모든 n 공통):** Task 7에서 가장 큰 학습 세트(학습 프레임이 가장 많은 조건의 풀 전체)로 학습 곡선을 잰 뒤 정한다.
    - 방법: `record_curves=true`, `val_fraction=0.2`(학습 풀 안의 에피소드 분할 — 평가 세트는 건드리지 않아 고정 평가 세트가 길이 선택에 새지 않는다), 충분히 긴 epoch.
    - 규칙: 검증 성공-구간 MAE(`val_retained.mae`)가 최솟값의 2% 안으로 들어온 첫 step을 S80으로 두고, 학습 풀이 80%라 ×1.25 한 뒤 1,000 단위로 올린다.
-   - 결과: (Task 7에서 채움)
+   - 결과(2026-11-21): **num_steps = 4,000** (배치 64).
+     - random30 지연·타임아웃 중 학습 프레임이 가장 많은 타임아웃 풀 전체(개입 52 + 성공 16, 학습 23,388프레임/epoch 365 step): 검증 MAE 최소 36.97 @ 3,285 step, 2% 안 첫 지점 2,555 step.
+     - turn30 가장 큰 세트 = 지연 (나) 풀 전체(개입 49 + 성공 20, 24,848프레임/epoch 388 step): 최소 41.18 @ 4,656 step, 2% 안 첫 지점 3,104 step.
+     - max(2,555, 3,104) × 1.25 = 3,880 → 4,000.
+     - 두 곡선 모두 최소 뒤로 계속 나빠진다(random30 3.3k step 37.0 → 14.6k 43.7 → 34k 49.9). 학습 MAE는 4k step에서도 계속 준다(약 6~8). 즉 4k는 "학습 손실 수렴"이 아니라 "처음 보는 에피소드 오차가 바닥에 닿은 지점"이다.
+     - 주의: step이 고정이라 작은 n은 같은 프레임을 훨씬 많이 본다(n=0 데모 6,370프레임이면 4,000 step ≈ 40 epoch). 큰 n에서 본 과적합이 작은 n에서 더 클 수 있어, 작은 n 쪽 오차가 데이터 부족과 과적합을 같이 담는다. 스펙 설계 4(모든 n에서 같은 step)를 따른 결과이며 보고서에 적는다.
 2. **거짓 진전의 시작·끝:** 시작 = 분기 시작 프레임(`branch_step`)부터 8프레임의 d 평균, 끝 = 분기 마지막 8프레임의 d 평균. 거짓 진전 = 시작 − 끝 > 0.
    - 8 = 정책의 action chunk 길이(`action_horizon: 8`). RL에서 보상은 청크 경계마다 매겨지고 합치면 d(첫 관측) − d(마지막 관측)으로 접힌다. 한 프레임 값은 그 리턴과 정확히 같지만, 프레임마다 떠는 잡음(예전 `residual.step_noise_std`)이 0 근처 분기의 부호를 무작위로 뒤집는다. 한 청크 평균은 RL이 실제로 보는 시간 해상도 안에서 그 잡음만 줄인다.
    - 한 프레임 값(W=1)도 보조로 같이 낸다.
@@ -124,9 +129,9 @@
 - [x] **Step 2: 실행해 실패 확인**
 - [x] **Step 3: 구현** — `caches` 명령은 평가용 이름이 학습 캐시 어디에도 없음을 assert하고, 풀 크기를 출력한다.
 - [x] **Step 4: 전체 테스트 통과 확인**
-- [ ] **Step 5: 출처별 VIP 캐시 굽기** (정책당 7개 파일, `cache_vip_feats` 그대로, `HOME=/workspace/outputs/.model_cache`)
-- [ ] **Step 6: 목록·캐시 만들기**, 확인: (가) 풀 random30 68 = 개입 52 + 성공 16, turn30 60 = 40 + 20; (나) 풀 둘 다 69.
-- [ ] **Step 7: 커밋** `feat(data): build held-out lists and per-condition VIP caches for the rollout-scaling sweep` (목록 json 포함)
+- [x] **Step 5: 출처별 VIP 캐시 굽기** (정책당 7개 파일, `cache_vip_feats` 그대로, `HOME=/workspace/outputs/.model_cache`)
+- [x] **Step 6: 목록·캐시 만들기**, 확인: (가) 풀 random30 68 = 개입 52 + 성공 16, turn30 60 = 40 + 20; (나) 풀 둘 다 69.
+- [x] **Step 7: 커밋** `feat(data): build held-out lists and per-condition VIP caches for the rollout-scaling sweep` (목록 json 포함 — 코드 커밋 ff41107에 같이 들어감, 캐시는 git 밖)
 
 ### Task 4: 짝을 지키는 부분집합과 job 목록
 
@@ -208,9 +213,15 @@
 - Modify: 이 플랜("플랜에서 정한 값과 근거" 1번 결과)
 - Create (git 밖): `experiments/feat-stg-rollout-scaling/2026-11-20-stg-rollout-scaling.md`(결과 전에 가설 기록), `outputs/stg_rollout_scaling_20261120/phase1_report.md`
 
-- [ ] **Step 1: 실험 기록에 가설을 먼저 적는다** — 성공 라벨만으로는 실패로 가는 상태가 직접 감독을 받지 않아 거짓 진전 비율이 n을 늘려도 0으로 가지 않을 수 있다; 고유수용 지름길; 개입 라벨 잡음으로 곡선이 단조롭지 않을 수 있다.
-- [ ] **Step 2: 학습 곡선** — 학습 프레임이 가장 많은 두 조건(정책별)의 풀 전체로 `record_curves=true val_fraction=0.2 num_epochs=…`. 규칙대로 S를 정해 이 플랜 1번에 적는다.
-- [ ] **Step 3: 시험 실행(로컬)** — 정책 둘 × (n = 0, 10, 풀 전체) × 지연·성공 포함·(가)·`all` 몇 개 + 새 입력 조합 하나, `run --only-ids`. 평가 결과와 aggregate까지 확인.
-- [ ] **Step 4: 동시 실행 수 측정** — workers 1, 4, 8, 12(…)에서 같은 job 묶음의 처리량(job/시간), GPU 메모리, RAM.
-- [ ] **Step 5: 전체 시간 추정** — 로컬 단독, 로컬 + Eddy.
-- [ ] **Step 6: 보고서 작성**, 플랜 커밋 `docs(stg): record the chosen step count and the phase-1 smoke results in the plan`
+- [x] **Step 1: 실험 기록에 가설을 먼저 적는다** — 성공 라벨만으로는 실패로 가는 상태가 직접 감독을 받지 않아 거짓 진전 비율이 n을 늘려도 0으로 가지 않을 수 있다; 고유수용 지름길; 개입 라벨 잡음으로 곡선이 단조롭지 않을 수 있다.
+- [x] **Step 2: 학습 곡선** — 학습 프레임이 가장 많은 두 조건(정책별)의 풀 전체로 `record_curves=true val_fraction=0.2 num_epochs=…`. 규칙대로 S를 정해 이 플랜 1번에 적는다.
+- [x] **Step 3: 시험 실행(로컬)** — 정책 둘 × (n = 0, 10, 풀 전체) × 지연·성공 포함·(가)·`all` 몇 개 + 새 입력 조합 하나, `run --only-ids`. 평가 결과와 aggregate까지 확인.
+- [x] **Step 4: 동시 실행 수 측정** — workers 1, 4, 8, 12(…)에서 같은 job 묶음의 처리량(job/시간), GPU 메모리, RAM.
+- [x] **Step 5: 전체 시간 추정** — 로컬 단독, 로컬 + Eddy.
+- [x] **Step 6: 보고서 작성**, 플랜 커밋 `docs(stg): record the chosen step count and the phase-1 smoke results in the plan`
+
+## Phase 1 결과 (2026-11-21)
+
+- job 목록(`num_steps=4000`): 논리 실행 2,440개 → 실제 학습 job 2,134개(주 곡선 1,234, 입력 비교 900). 겹치는 학습은 n=0 공유, (나)에 추가 에피소드가 아직 없는 n, 성공 없는 성공 제외 조건.
+- 시험 실행(로컬 3080 Ti): job 하나 약 9초(학습 6.5초 = 시작 1.6초 + 4,000 step 4.9초, 평가 2.5초). 동시 실행 처리량은 workers 4 → 0.27, 8 → 0.29, 12 → 0.29, 16 → 0.30 job/초로 8에서 포화(GPU 하나를 여러 프로세스가 번갈아 쓰는 데서 막힌다). RAM은 job당 약 1.2GB, 16개면 27GB까지 찬다. 로컬 권장 workers 8.
+- 상세 수치, 전체 시간 추정, 실행 명령은 `outputs/stg_rollout_scaling_20261120/phase1_report.md`(git 밖).
