@@ -118,12 +118,12 @@
   - 역할(role): 학습 캐시 `demo` | `intv` | `solo`; 평가 캐시 `demo` | `policy_success` | `intv_delay` | `intv_immediate` | `intv_timeout` | `branch_t0` | `branch_t_press`. `score_from` = 개입 시작(개입), `branch_step`(분기), 0(나머지).
   - CLI: `python -m square_assembly.scripts.stg_scaling_data heldout --policy P`, `... caches --policy P --root R`.
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
   - `test_pick_heldout_spreads_over_collection_order` — 이름 `demo_0..demo_29`, k=6 → 6개, 구간 `[0..4], [5..9], …`마다 정확히 하나, 같은 seed면 같은 결과, `demo_10`이 `demo_2` 뒤로 정렬된다(숫자 순).
   - `test_assemble_cache_keeps_source_names_modes_and_rejects_mixed_meta` — 가짜 출처 캐시 두 개 + 가짜 hdf5에서 이어 붙인 결과의 attrs `source_name`, `role`, `score_from`, `action_mode`가 맞고, `DinoFeatureWindows(out, 2, mode_hdf5=out, strict_modes=True)`가 열린다. `rgb_keys` 순서가 다른 캐시를 섞으면 `ValueError`.
-- [ ] **Step 2: 실행해 실패 확인**
-- [ ] **Step 3: 구현** — `caches` 명령은 평가용 이름이 학습 캐시 어디에도 없음을 assert하고, 풀 크기를 출력한다.
-- [ ] **Step 4: 전체 테스트 통과 확인**
+- [x] **Step 2: 실행해 실패 확인**
+- [x] **Step 3: 구현** — `caches` 명령은 평가용 이름이 학습 캐시 어디에도 없음을 assert하고, 풀 크기를 출력한다.
+- [x] **Step 4: 전체 테스트 통과 확인**
 - [ ] **Step 5: 출처별 VIP 캐시 굽기** (정책당 7개 파일, `cache_vip_feats` 그대로, `HOME=/workspace/outputs/.model_cache`)
 - [ ] **Step 6: 목록·캐시 만들기**, 확인: (가) 풀 random30 68 = 개입 52 + 성공 16, turn30 60 = 40 + 20; (나) 풀 둘 다 69.
 - [ ] **Step 7: 커밋** `feat(data): build held-out lists and per-condition VIP caches for the rollout-scaling sweep` (목록 json 포함)
