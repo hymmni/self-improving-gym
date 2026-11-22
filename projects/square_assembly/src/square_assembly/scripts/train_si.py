@@ -166,10 +166,21 @@ def _episode_split(dataset, val_fraction, seed):
 
 # --------------------------------------------------------------------- 롤아웃
 
+def judge_success(env_success, grasp_parts, hacky_as_failure):
+    """(성공, 야매). 야매 = 환경 성공인데 성공 전 마지막 파지가 손잡이가 아님(branch_rollout.is_hacky와 같은 규칙).
+
+    사람 시연·개입·정책 단독 성공은 모두 손잡이를 쥐고 끝났고, 몸통 파지는 정책이 꼬인 상태를 혼자 수습할 때만
+    나왔다(2026-11-22 확인). hacky_as_failure면 실패로 친다(성공 보상 없음, 성공률에서도 빠짐) — 사용자 결정."""
+    from square_assembly.scripts.branch_rollout import is_hacky
+
+    hacky = is_hacky(env_success, grasp_parts)
+    return bool(env_success and not (hacky and hacky_as_failure)), hacky
+
+
 def collect_episode_si(env, policy, ddpo_fns, dstg_reward, normalizer, obs_keys, rgb_keys,
                         obs_horizon, action_horizon, pred_horizon, action_dim, max_steps,
                         device, gamma, generator, termination, success_bonus=0.0, failure_penalty=0.0,
-                        zero_failure_dense=False, dense=True):
+                        zero_failure_dense=False, dense=True, hacky_as_failure=False):
     """한 에피소드를 실제로 굴리고, 결정(청크)별 (global_cond, xs, R) 리스트를 반환한다.
 
     "결정" = predict_action_chunk 1회에 대응하는 `ddpo_fns.sample_with_trace` 1회 호출
@@ -190,6 +201,9 @@ def collect_episode_si(env, policy, ddpo_fns, dstg_reward, normalizer, obs_keys,
     global_conds, xs_list, rewards = [], [], []
     n_env_steps = 0
     env_success = False  # 진단 전용(ground truth) — 학습 신호로 쓰지 않는다.
+    from square_assembly.scripts.branch_rollout import grasp_part
+    track_grasp = hasattr(env.env, "nuts")   # NutAssembly만 손잡이/몸통이 있다
+    grasp_parts = []
 
     while n_env_steps < max_steps:
         obs_batch = _build_obs_batch(obs_history, obs_keys, rgb_keys, normalizer, device, extra_obs_fn=None)
@@ -209,6 +223,8 @@ def collect_episode_si(env, policy, ddpo_fns, dstg_reward, normalizer, obs_keys,
             obs_raw, _reward, done, _info = env.step(action)
             obs_history.append(obs_raw)
             n_env_steps += 1
+            if track_grasp:
+                grasp_parts.append(grasp_part(env.env))
             if env.is_success()["task"]:
                 env_success = True
             if env_success or done or n_env_steps >= max_steps:
@@ -231,11 +247,12 @@ def collect_episode_si(env, policy, ddpo_fns, dstg_reward, normalizer, obs_keys,
         if stop:
             break
 
+    env_success, hacky = judge_success(env_success, grasp_parts, hacky_as_failure)
     stg_rewards = np.asarray(rewards, dtype=np.float32)   # 종료 보상·0 처리 전 STG 보상(필터·출렁임 기록용)
     rewards = add_terminal_reward(rewards, env_success, success_bonus, failure_penalty, zero_failure_dense, dense)
     returns = compute_returns(rewards, gamma)
     decisions = list(zip(global_conds, xs_list, returns, rewards))
-    return decisions, env_success, n_env_steps, stg_rewards
+    return decisions, env_success, n_env_steps, stg_rewards, hacky
 
 
 # --------------------------------------------------------------------- 진단
@@ -539,18 +556,20 @@ def main(cfg: DictConfig):
         ep_lens, ep_decision_counts, ep_env_succ, ep_returns = [], [], [], []
         ep_filtered, upd_decision_counts = [], []   # 업데이트에서 뺀 에피소드(해킹형 실패), 남은 에피소드의 결정 수
         ep_stg_net, ep_stg_tv = [], []   # STG 보상 합(순 진전)과 |보상| 합(출렁임) — 종료 보상·0 처리 전
+        ep_hacky = []   # 환경 성공인데 마지막 파지가 손잡이가 아닌 에피소드(hacky_as_failure면 실패로 셈)
 
         with torch.no_grad():
             for ep_i in range(cfg.episodes_per_iter):
                 np.random.seed(env_seed_counter)  # robosuite 초기 배치 시퀀스 고정(eval.py와 동일 방식)
                 env_seed_counter += 1
-                decisions, env_success, n_env_steps, stg_rewards = collect_episode_si(
+                decisions, env_success, n_env_steps, stg_rewards, hacky = collect_episode_si(
                     env, policy, ddpo_fns, dstg_reward, normalizer, obs_keys, rgb_keys,
                     policy_cfg.obs_horizon, policy_cfg.action_horizon, policy_cfg.pred_horizon,
                     task_cfg.action_dim, cfg.max_steps, device, cfg.gamma, generator, cfg.termination,
                     cfg.get("success_bonus", 0.0), cfg.get("failure_penalty", 0.0), cfg.get("zero_failure_dense", False),
-                    cfg.get("dense_reward", True),
+                    cfg.get("dense_reward", True), cfg.get("hacky_as_failure", False),
                 )
+                ep_hacky.append(hacky)
                 skip = is_hack_failure(stg_rewards, env_success, 0.0, cfg.get("hack_filter_threshold"))
                 ep_filtered.append(skip)
                 ep_stg_net.append(float(stg_rewards.sum())); ep_stg_tv.append(float(np.abs(stg_rewards).sum()))
@@ -568,7 +587,7 @@ def main(cfg: DictConfig):
                 print(f"  it={it} ep {ep_i + 1}/{cfg.episodes_per_iter}: steps={n_env_steps} "
                       f"decisions={len(decisions)} success={env_success}  "
                       f"누적 성공 {sum(ep_env_succ)}/{ep_i + 1} ({sum(ep_env_succ) / (ep_i + 1):.1%})"
-                      + ("  [해킹형 실패 — 업데이트에서 뺌]" if skip else ""), flush=True)
+                      + ("  [해킹형 실패 — 업데이트에서 뺌]" if skip else "") + ("  [야매]" if hacky else ""), flush=True)
 
         # 전부 걸러지면(해킹형 실패만) 업데이트 없이 통계·저장만 한다.
         global_cond_all = torch.stack(all_global_cond) if all_global_cond else None  # (N, cond_dim), CPU
@@ -640,7 +659,7 @@ def main(cfg: DictConfig):
             f"it={it:4d}  R_mean={R_all.mean():+8.4f}  |R|_mean={np.abs(R_all).mean():7.4f}  "
             f"env_succ_rate={n_env_succ / cfg.episodes_per_iter:5.1%}  "
             f"decisions_per_ep={np.mean(ep_decision_counts):5.1f}  ep_len_mean={np.mean(ep_lens):6.1f}  "
-            f"drift_L2={drift:7.4f}  loss={np.mean(losses):+9.5f}  filtered={sum(ep_filtered)}  time={iter_time:5.1f}s"
+            f"drift_L2={drift:7.4f}  loss={np.mean(losses):+9.5f}  filtered={sum(ep_filtered)}  hacky={sum(ep_hacky)}  time={iter_time:5.1f}s"
             + ("".join(f"  {k}={v:+.4f}" for k, v in ppo_info.items()) if ppo_info else "")
         )
         print(msg, flush=True)
@@ -660,6 +679,7 @@ def main(cfg: DictConfig):
             "ep_lens": ep_lens, "ep_env_succ": ep_env_succ, "ep_returns": ep_returns,
             "n_filtered": int(sum(ep_filtered)), "ep_filtered": ep_filtered,
             "ep_stg_net": ep_stg_net, "ep_stg_tv": ep_stg_tv,
+            "n_hacky": int(sum(ep_hacky)), "ep_hacky": ep_hacky,
         }
         with open(stats_jsonl_path, "a") as f:
             f.write(json.dumps(stats_row) + "\n")

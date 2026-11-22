@@ -11,7 +11,8 @@ import numpy as np
 import torch
 
 from square_assembly.policies.diffusion.diffusion_policy_image import DiffusionPolicyImage
-from square_assembly.scripts.train_si import add_terminal_reward, compute_decision_reward, compute_returns, is_hack_failure
+from square_assembly.scripts.train_si import (add_terminal_reward, compute_decision_reward, compute_returns, is_hack_failure,
+                                              judge_success)
 
 DEVICE = "cpu"
 IMAGE_HW = (32, 32)
@@ -121,3 +122,13 @@ def test_no_dense_reward_leaves_only_sparse_outcome():
     rewards = np.array([90.0, -80.0, 40.0], dtype=np.float32)
     np.testing.assert_allclose(add_terminal_reward(rewards, True, 1.0, 0.0, dense=False), [0.0, 0.0, 1.0])
     np.testing.assert_allclose(add_terminal_reward(rewards, False, 1.0, 0.0, dense=False), [0.0, 0.0, 0.0])
+
+
+def test_hacky_success_counts_as_failure_only_when_asked():
+    # 야매 = 환경 성공인데 마지막 파지가 손잡이가 아님(branch_rollout.is_hacky). 2026-11-22 사용자: RL에서는 실패로 친다
+    body_last = [None, "handle", None, "body", None]
+    assert judge_success(True, body_last, hacky_as_failure=True) == (False, True)
+    assert judge_success(True, body_last, hacky_as_failure=False) == (True, True)    # 기록만
+    assert judge_success(True, [None, "body", "handle", None], hacky_as_failure=True) == (True, False)
+    assert judge_success(True, [None, None], hacky_as_failure=True) == (True, False)  # 한 번도 안 쥠 = 판정 안 함
+    assert judge_success(False, ["body"], hacky_as_failure=True) == (False, False)
