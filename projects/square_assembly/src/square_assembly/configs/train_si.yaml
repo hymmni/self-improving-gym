@@ -43,6 +43,8 @@ zero_failure_dense: false  # true면 실패 에피소드의 밀집(STG) 보상�
 hack_filter_threshold: null  # 숫자면 실패했는데 STG 보상 합(종료 벌점 제외)이 이보다 큰 에피소드를 업데이트에서 뺀다(10/6 "해킹형 실패" 정의는 100)
 hacky_as_failure: false     # true면 야매 성공(환경 성공인데 마지막 파지가 손잡이 아님)을 실패로 친다 — 성공 보상·성공률에서 빠짐. 개수는 늘 기록(n_hacky)
 drop_hacky: false           # true면 야매 성공 에피소드를 업데이트에서 뺀다(밀집 보상만 쓸 때 야매도 성공만큼 리턴을 받으므로). filtered에 함께 센다
+reward_scale_running: false  # DPPO 원본(cfg train.reward_scale_running=True): 보상을 역방향 할인합(γ 0.99 고정, 원본 기본값)의 이동 표준편차로 나눔, ±10 자름
+n_critic_warmup_itr: 0      # DPPO 원본 Square 이미지 설정은 2: 처음 n iteration은 크리틱만 학습(정책 고정)
 reinforce_scale: 5.0e-2    # 논문 c
 lr: 1.0e-6                 # (DPPO 원본의 이미지 정책 actor_lr은 1e-5 — algo=dppo로 돌릴 땐 재검토)
                            # 파인튜닝이라 사전학습 lr(1e-4)보다 훨씬 작게 — train.yaml의

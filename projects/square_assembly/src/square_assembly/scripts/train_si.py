@@ -358,9 +358,12 @@ def _dppo_update(policy, ddpo_module, optimizer, critic, critic_optimizer, globa
     discount, clip = dppo_module.denoising_weights(np.arange(len(steps)), len(steps), cfg.gamma_denoising,
                                                    cfg.clip_ratio, cfg.clip_ratio_base, cfg.clip_ratio_rate)
     horizon = cfg.policy.action_horizon   # 청크에서 실제 실행하는 앞쪽 스텝 수
+    # DPPO 원본(train_ppo_agent.py): 처음 n_critic_warmup_itr iteration은 크리틱만 배우고 정책은 그대로 둔다
+    # (원본 itr는 0부터, 우리 it는 1부터라 it <= n). 정책 쪽 로그확률 계산도 건너뛴다.
+    warmup = it <= cfg.get("n_critic_warmup_itr", 0)
 
-    logp_old = _pair_logp_nograd(policy, ddpo_module, global_cond_all, xs_all, timesteps_all,
-                                 j_idx, p_idx, cfg.logp_batch, device, horizon)
+    logp_old = None if warmup else _pair_logp_nograd(policy, ddpo_module, global_cond_all, xs_all, timesteps_all,
+                                                     j_idx, p_idx, cfg.logp_batch, device, horizon)
 
     # 결정별 V(o) -> 에피소드마다 끊어 GAE. 에피소드 경계를 무시하면 다음 에피소드의
     # 보상이 이번 에피소드 마지막 결정으로 새어든다.
@@ -394,6 +397,11 @@ def _dppo_update(policy, ddpo_module, optimizer, critic, critic_optimizer, globa
         perm = rng.permutation(len(j_idx))
         for start in range(0, len(perm), ppo_batch):
             mb = perm[start:start + ppo_batch]
+            if warmup:
+                losses.append(0.0); infos.append({})
+                if cfg.get("critic_per_minibatch"):
+                    infos[-1]["value_loss"] = critic_step(np.unique(j_idx[mb]))
+                continue
             optimizer.zero_grad()
             loss_sum, mb_infos = 0.0, []
             for c in range(0, len(mb), cfg.logp_batch):
@@ -421,7 +429,7 @@ def _dppo_update(policy, ddpo_module, optimizer, critic, critic_optimizer, globa
             # 크리틱은 결정 단위라 쌍 단위보다 훨씬 작다 — epoch마다 전부 한 번에 돌린다.
             infos[-1]["value_loss"] = critic_step(np.arange(n_decisions))
 
-    agg = {k: float(np.mean([i[k] for i in infos if k in i])) for k in
+    agg = {k: float(np.mean(v)) if (v := [i[k] for i in infos if k in i]) else 0.0 for k in
            ("ratio_mean", "clip_frac", "approx_kl", "value_loss")}
     agg["adv_std"] = float(adv_all.std())
     return losses, agg
@@ -524,7 +532,9 @@ def main(cfg: DictConfig):
         logger.info(f"DPPO: critic cond_dim={cond_dim} update_epochs={cfg.update_epochs} "
                     f"clip={cfg.clip_ratio_base}~{cfg.clip_ratio} gae_lambda={cfg.gae_lambda} "
                     f"gamma_denoising={cfg.gamma_denoising} min_denoising_std={min_std} "
-                    f"ft_denoising_steps={cfg.get('ft_denoising_steps')}")
+                    f"ft_denoising_steps={cfg.get('ft_denoising_steps')} "
+                    f"reward_scale_running={cfg.get('reward_scale_running')} n_critic_warmup_itr={cfg.get('n_critic_warmup_itr', 0)}")
+    reward_scaler = dppo_module.RunningRewardScaler(num_envs=1) if (cfg.algo == "dppo" and cfg.get("reward_scale_running")) else None
     generator = torch.Generator(device=device).manual_seed(cfg.seed0 + 1_000_000)
     env_seed_counter = cfg.seed0
 
@@ -615,9 +625,14 @@ def main(cfg: DictConfig):
             losses = [0.0]
             print(f"  it={it}: 모든 에피소드가 해킹형 실패라 업데이트를 건너뜀", flush=True)
         elif cfg.algo == "dppo":
+            rewards_upd = np.asarray(all_r, dtype=np.float32)
+            if reward_scaler is not None:   # DPPO 원본 reward_scale_running: 역방향 할인합의 이동 표준편차로 나눔
+                first = np.zeros(len(rewards_upd))
+                first[np.cumsum([0] + list(upd_decision_counts[:-1]))] = 1
+                rewards_upd = reward_scaler(rewards_upd[None], first[None])[0].astype(np.float32)
             losses, ppo_info = _dppo_update(
                 policy, ddpo_fns, optimizer, critic, critic_optimizer, global_cond_all,
-                xs_all, np.asarray(all_r, dtype=np.float32), upd_decision_counts,
+                xs_all, rewards_upd, upd_decision_counts,
                 timesteps_all, n_pairs_per_decision, cfg, device, it)
             if not first_update_checked:
                 first_update_checked = True

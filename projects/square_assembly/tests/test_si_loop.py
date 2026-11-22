@@ -141,3 +141,20 @@ def test_drop_hacky_excludes_hacky_episodes_from_the_update():
     assert not skip_episode(r, False, hacky=True, hack_filter_threshold=None, drop_hacky=False)
     assert not skip_episode(r, True, hacky=False, hack_filter_threshold=None, drop_hacky=True)
     assert skip_episode(r, False, hacky=False, hack_filter_threshold=10.0, drop_hacky=False)   # 기존 해킹형 실패 필터
+
+
+def test_running_reward_scaler_matches_dppo_reference():
+    # DPPO 원본(util/reward_scaling.py)과 같은 계산: 에피소드 시작에서 끊긴 역방향 할인합의 분산으로 보상을 나누고 ±10에서 자름
+    from square_assembly.policies.diffusion.dppo import RunningRewardScaler
+
+    s = RunningRewardScaler(num_envs=1, gamma=0.5)
+    reward = np.array([[1.0, 1.0, 1.0, 4.0]])
+    first = np.array([[1, 0, 0, 1]])
+    out = s(reward, first)
+    rets = np.array([1.0, 1.5, 1.75, 4.0])                   # 4번째는 새 에피소드라 이전 합이 끊긴다
+    count, mean, var = 1e-4, 0.0, 1.0                         # RunningMeanStd 초기값
+    bm, bv, n = rets.mean(), rets.var(), len(rets)
+    delta, tot = bm - mean, count + n
+    var = (var * count + bv * n + delta ** 2 * count * n / tot) / (tot - 1)
+    assert np.allclose(out, reward / np.sqrt(var + 1e-8))
+    assert np.allclose(s.transform(np.array([[1e6, -1e6]])), [[10.0, -10.0]])   # cliprew(분산 갱신 없이 변환만)

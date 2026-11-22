@@ -95,6 +95,63 @@ def clipped_surrogate(logp_new, logp_old, adv, clip_ratio):
     return loss, info
 
 
+class RunningMeanStd:
+    """From: irom-princeton/dppo util/reward_scaling.py (openai/phasic-policy-gradient reward_normalizer.py)."""
+
+    def __init__(self, epsilon=1e-4, shape=()):   # epsilon = 초기 count(평균 0, 분산 1)
+        self.mean = np.zeros(shape)
+        self.var = np.ones(shape)
+        self.count = epsilon
+
+    def update(self, x):
+        self.update_from_moments(np.mean(x, axis=0), np.var(x, axis=0), x.shape[0])
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+        self.mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta**2 * self.count * batch_count / tot_count
+        self.var = M2 / (tot_count - 1)
+        self.count = tot_count
+
+
+class RunningRewardScaler:
+    """보상을 '역방향 할인합'의 이동 표준편차로 나누고 ±cliprew에서 자른다(평균은 빼지 않음).
+
+    From: irom-princeton/dppo util/reward_scaling.py — 원본 train_ppo_agent.py는 RunningRewardScaler(n_envs)로
+    만들어 gamma=0.99(기본값)를 쓴다(학습 γ와 별개). 우리는 환경 1개라 num_envs=1, reward·first는 (1, 결정 수).
+    """
+
+    def __init__(self, num_envs, cliprew=10.0, gamma=0.99, epsilon=1e-8, per_env=False):
+        self.ret_rms = RunningMeanStd(shape=(num_envs,) if per_env else ())
+        self.cliprew = cliprew
+        self.ret = np.zeros(num_envs)
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.per_env = per_env
+
+    def __call__(self, reward, first):
+        rets = backward_discounted_sum(prevret=self.ret, reward=reward, first=first, gamma=self.gamma)
+        self.ret = rets[:, -1]
+        self.ret_rms.update(rets if self.per_env else rets.reshape(-1))
+        return self.transform(reward)
+
+    def transform(self, reward):
+        return np.clip(reward / np.sqrt(self.ret_rms.var + self.epsilon), -self.cliprew, self.cliprew)
+
+
+def backward_discounted_sum(prevret, reward, first, gamma):
+    """From: irom-princeton/dppo util/reward_scaling.py. first = 에피소드 시작 표시(거기서 이전 합을 끊는다)."""
+    assert first.ndim == 2
+    _, nstep = reward.shape
+    ret = np.zeros_like(reward)
+    for t in range(nstep):
+        prevret = ret[:, t] = reward[:, t] + (1 - first[:, t]) * gamma * prevret
+    return ret
+
+
 def reduce_logp(logp_elem, horizon):
     """원소별 로그확률 (B, Tp, Da) -> PPO 비율에 쓰는 (B,).
 
