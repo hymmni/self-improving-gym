@@ -58,6 +58,16 @@ def grasp_part(raw_env):
     return "body" if raw_env._check_grasp(grip, BODY_GEOMS) else None
 
 
+def nut_state(raw_env):
+    """(너트 높이 z, 너트–기둥 xy 거리, 그리퍼–손잡이 거리), 단위 m — 실패 에피소드가 실제로 어디까지 갔나."""
+    d, nut, robot = raw_env.sim.data, raw_env.nuts[0], raw_env.robots[0]
+    p = d.body_xpos[raw_env.obj_body_id[nut.name]]
+    handle = d.site_xpos[raw_env.sim.model.site_name2id(nut.important_sites["handle"])]
+    eef = d.site_xpos[robot.eef_site_id[robot.arms[0]]]
+    peg = d.body_xpos[raw_env.peg1_body_id]
+    return float(p[2]), float(np.linalg.norm(p[:2] - peg[:2])), float(np.linalg.norm(eef - handle))
+
+
 def is_hacky(success, parts):
     """성공했는데 성공 전 마지막 파지가 손잡이가 아니었으면 야매 성공. 한 번도 쥐지 않았으면 판정하지 않는다(False)."""
     held = [p for p in parts if p is not None]

@@ -34,3 +34,16 @@ def test_square_success_requires_flat_nut():
     t = np.radians(MAX_NUT_TILT_DEG - 5) / 2
     _place_nut(env, 0.0, [np.cos(t), np.sin(t), 0, 0])                   # 25° 기운 것은 여전히 성공
     assert env.is_success()["task"]
+
+
+def test_nut_state_reports_nut_height_peg_distance_and_gripper_to_handle():
+    from square_assembly.envs.robomimic.factory import make_lowdim_env
+    from square_assembly.scripts.branch_rollout import nut_state
+
+    env = make_lowdim_env("NutAssemblySquare", "Panda", ["robot0_eef_pos"])
+    env.reset()
+    _place_nut(env, 0.10, [1, 0, 0, 0])
+    z, peg_xy, eef_handle = nut_state(env.env)
+    assert abs(peg_xy - 0.10) < 1e-6
+    assert abs(z - (env.env.table_offset[2] + 0.02)) < 1e-6
+    assert eef_handle > 0.0
