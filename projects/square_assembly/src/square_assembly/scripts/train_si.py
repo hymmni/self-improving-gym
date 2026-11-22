@@ -166,6 +166,14 @@ def _episode_split(dataset, val_fraction, seed):
 
 # --------------------------------------------------------------------- 롤아웃
 
+def skip_episode(stg_rewards, env_success, hacky, hack_filter_threshold, drop_hacky):
+    """업데이트에서 뺄 에피소드 — 해킹형 실패(is_hack_failure) 또는 drop_hacky일 때 야매 성공.
+
+    밀집 보상만 쓰면(보너스 0) 야매도 예측기가 끝을 성공으로 읽어 진짜 성공만큼 리턴을 받는다. 그래서 학습에서 뺀다
+    (2026-11-22 사용자 결정 ③ — 억제도 강화도 하지 않음)."""
+    return bool(is_hack_failure(stg_rewards, env_success, 0.0, hack_filter_threshold) or (drop_hacky and hacky))
+
+
 def judge_success(env_success, grasp_parts, hacky_as_failure):
     """(성공, 야매). 야매 = 환경 성공인데 성공 전 마지막 파지가 손잡이가 아님(branch_rollout.is_hacky와 같은 규칙).
 
@@ -570,7 +578,7 @@ def main(cfg: DictConfig):
                     cfg.get("dense_reward", True), cfg.get("hacky_as_failure", False),
                 )
                 ep_hacky.append(hacky)
-                skip = is_hack_failure(stg_rewards, env_success, 0.0, cfg.get("hack_filter_threshold"))
+                skip = skip_episode(stg_rewards, env_success, hacky, cfg.get("hack_filter_threshold"), cfg.get("drop_hacky", False))
                 ep_filtered.append(skip)
                 ep_stg_net.append(float(stg_rewards.sum())); ep_stg_tv.append(float(np.abs(stg_rewards).sum()))
                 if not skip:
@@ -587,7 +595,7 @@ def main(cfg: DictConfig):
                 print(f"  it={it} ep {ep_i + 1}/{cfg.episodes_per_iter}: steps={n_env_steps} "
                       f"decisions={len(decisions)} success={env_success}  "
                       f"누적 성공 {sum(ep_env_succ)}/{ep_i + 1} ({sum(ep_env_succ) / (ep_i + 1):.1%})"
-                      + ("  [해킹형 실패 — 업데이트에서 뺌]" if skip else "") + ("  [야매]" if hacky else ""), flush=True)
+                      + ("  [업데이트에서 뺌]" if skip else "") + ("  [야매]" if hacky else ""), flush=True)
 
         # 전부 걸러지면(해킹형 실패만) 업데이트 없이 통계·저장만 한다.
         global_cond_all = torch.stack(all_global_cond) if all_global_cond else None  # (N, cond_dim), CPU

@@ -12,7 +12,7 @@ import torch
 
 from square_assembly.policies.diffusion.diffusion_policy_image import DiffusionPolicyImage
 from square_assembly.scripts.train_si import (add_terminal_reward, compute_decision_reward, compute_returns, is_hack_failure,
-                                              judge_success)
+                                              judge_success, skip_episode)
 
 DEVICE = "cpu"
 IMAGE_HW = (32, 32)
@@ -132,3 +132,12 @@ def test_hacky_success_counts_as_failure_only_when_asked():
     assert judge_success(True, [None, "body", "handle", None], hacky_as_failure=True) == (True, False)
     assert judge_success(True, [None, None], hacky_as_failure=True) == (True, False)  # 한 번도 안 쥠 = 판정 안 함
     assert judge_success(False, ["body"], hacky_as_failure=True) == (False, False)
+
+
+def test_drop_hacky_excludes_hacky_episodes_from_the_update():
+    # 2026-11-22 사용자: 밀집 보상만 쓰면 야매도 진짜 성공만큼 리턴을 받으므로 업데이트에서 뺀다(drop_hacky)
+    r = np.array([5.0, 7.0])
+    assert skip_episode(r, False, hacky=True, hack_filter_threshold=None, drop_hacky=True)
+    assert not skip_episode(r, False, hacky=True, hack_filter_threshold=None, drop_hacky=False)
+    assert not skip_episode(r, True, hacky=False, hack_filter_threshold=None, drop_hacky=True)
+    assert skip_episode(r, False, hacky=False, hack_filter_threshold=10.0, drop_hacky=False)   # 기존 해킹형 실패 필터
