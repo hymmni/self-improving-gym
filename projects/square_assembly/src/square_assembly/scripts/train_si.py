@@ -567,7 +567,27 @@ def main(cfg: DictConfig):
                 "success_bonus", "failure_penalty", "hack_filter_threshold", "zero_failure_dense", "dense_reward",
                 "ppo_batch", "critic_per_minibatch", "gamma_denoising", "clip_ratio_base", "critic_hidden")})
 
-    for it in range(1, cfg.iterations + 1):
+    # 이어 돌리기(2026-11-22 사용자 요청): iteration마다 si_resume_state.pt를 덮어쓴다. resume=true면 거기서 이어
+    # cfg.iterations(전체 목표 iteration 수)까지 돈다. 인코더는 얼려져 있어 UNet·크리틱·옵티마이저·보상 정규화·시드만 있으면 된다.
+    resume_path = os.path.join(os.path.dirname(cfg.out) or ".", "si_resume_state.pt")
+    start_it = 1
+    if cfg.get("resume", False):
+        st = torch.load(resume_path, map_location=device, weights_only=False)
+        policy.unet.load_state_dict(st["unet"])
+        optimizer.load_state_dict(st["optimizer"])
+        if critic is not None:
+            critic.load_state_dict(st["critic"])
+            critic_optimizer.load_state_dict(st["critic_optimizer"])
+        if reward_scaler is not None:
+            reward_scaler = st["reward_scaler"]
+        generator.set_state(st["generator"].cpu() if hasattr(st["generator"], "cpu") else st["generator"])
+        env_seed_counter, first_update_checked = st["env_seed_counter"], st["first_update_checked"]
+        best_succ_rate, best_R_mean, best_it = st["best"]
+        start_it = st["it"] + 1
+        logger.info(f"이어 돌리기: {resume_path} it={st['it']} -> it {start_it}..{cfg.iterations}")
+        print(f"이어 돌리기: it {start_it}..{cfg.iterations} ({resume_path})", flush=True)
+
+    for it in range(start_it, cfg.iterations + 1):
         t_iter_start = time.time()
 
         all_global_cond, all_xs, all_R, all_r = [], [], [], []
@@ -714,6 +734,14 @@ def main(cfg: DictConfig):
                 f"it={it}: 리턴 또는 드리프트가 비유한(NaN/inf)이 됐다 — 중단. "
                 f"R_all finite={np.isfinite(R_all).all()}  drift={drift}"
             )
+
+        torch.save({"it": it, "unet": policy.unet.state_dict(), "optimizer": optimizer.state_dict(),
+                    "critic": critic.state_dict() if critic is not None else None,
+                    "critic_optimizer": critic_optimizer.state_dict() if critic_optimizer is not None else None,
+                    "reward_scaler": reward_scaler, "generator": generator.get_state(),
+                    "env_seed_counter": env_seed_counter, "first_update_checked": first_update_checked,
+                    "best": (best_succ_rate, best_R_mean, best_it)}, resume_path + ".tmp")
+        os.replace(resume_path + ".tmp", resume_path)   # 저장 도중 죽어도 이전 상태가 남는다
 
         if cfg.get("save_every") and it % cfg.save_every == 0:   # 중간 정책(끝·best만 남으면 경과를 못 본다)
             _save_checkpoint(policy, cfg, cfg.out.replace(".pt", f"_it{it}.pt"), it, task_cfg, policy_cfg, policy_name,
