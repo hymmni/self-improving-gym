@@ -5,7 +5,8 @@ SequenceDataset의 cache "all"은 인덱스마다 17프레임 이미지를 미�
 
 샘플마다 역할이 둘이다. 인덱스 i < N은 BC 역할(시연 프레임, 디퓨전 손실), i >= N은 같은 프레임 i-N의 STG 역할
 (CE 손실). 같은 PH 프레임이 두 역할로 다 뽑힐 수 있고, 역할은 JointBatchSampler가 배치 안 위치로 정한다.
-- BC 풀: action_mode가 전부 시연(-1)인 데모의 모든 프레임 — 기본 정책(PH 50)과 같은 BC 데이터. 검증 분할과 무관.
+- BC 풀: 정책이 몬 프레임(ROLLOUT·PREINTV)이 없는, 사람만 조작한 에피소드의 모든 프레임 — PH 시연(전부 -1)과
+  Quest 시연(전부 INTV=1). 기본 정책과 같은 BC 데이터. 검증 분할과 무관.
 - STG 풀: ① 예측기(experiments/2026-10-05_stg-ph50-r0v9-r0v10.md) split과 같은 학습 데모의 성공 구간(첫 개입부터,
   success_tail_from=first). 라벨 = 남은 스텝 L-1-t(build_labels), num_bins-1에서 자름.
 """
@@ -14,7 +15,7 @@ import h5py
 import numpy as np
 
 from square_assembly.datasets.dino_feature_dataset import episode_split_by_name
-from square_assembly.datasets.labels import LABEL_DEMO
+from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV
 from square_assembly.datasets.replay_buffer import ReplayBuffer
 from square_assembly.datasets.stg_labels import build_labels, success_tail_start
 from square_assembly.datasets.zarr_dataset import ZarrSequenceDataset
@@ -44,12 +45,12 @@ class JointStgDataset(ZarrSequenceDataset):
         ts = np.array([t for _, t in self._index])
         labels, _ = build_labels(sample_names, ts, dict(zip(names, lengths)), {n: True for n in names})
         self.stg_labels = np.minimum(labels, num_bins - 1)
-        val = episode_split_by_name(names, val_fraction, split_seed)
+        val = episode_split_by_name(names, val_fraction, split_seed) if val_fraction > 0 else set()   # 0이면 평가 세트를 병합 전에 뺐다
         # ponytail: ①은 성공 구간 첫 프레임의 이력(obs_horizon=2의 직전 프레임)을 구간 시작으로 고정했지만 여기선 안 한다
         # — 개입 데모마다 1프레임(약 200/32k)만 다르다.
         starts = {n: success_tail_start(modes[n], first=True) for n in names}
-        demo_only = {n: bool((modes[n] == LABEL_DEMO).all()) for n in names}
-        self.bc_idx = np.array([i for i, (d, _) in enumerate(self._index) if demo_only[names[d]]])
+        human_only = {n: bool(np.isin(modes[n], (LABEL_DEMO, LABEL_INTV)).all()) for n in names}
+        self.bc_idx = np.array([i for i, (d, _) in enumerate(self._index) if human_only[names[d]]])
         self.stg_idx = np.array([i for i, (d, t) in enumerate(self._index)
                                  if names[d] not in val and t >= starts[names[d]]])
         self._stg_set = set(self.stg_idx.tolist())

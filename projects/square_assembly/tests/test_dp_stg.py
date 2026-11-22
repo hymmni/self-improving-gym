@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from square_assembly.datasets.dino_feature_dataset import episode_split_by_name
 from square_assembly.datasets.joint_stg_dataset import JointBatchSampler, JointStgDataset
-from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_ROLLOUT
+from square_assembly.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABEL_ROLLOUT
 from square_assembly.policies.diffusion.diffusion_policy_stg import DiffusionPolicyImageStg, export_dstg_ckpt
 from square_assembly.policies.diffusion.dstg_reward import DstgReward
 from square_assembly.utils.checkpoints import save_epoch_checkpoint, save_run_config
@@ -153,6 +153,18 @@ def test_dataset_roles_labels_and_sampler(tmp_path):
     assert len(batches) == len(sampler) == 7 // 3
     for b in batches:
         assert all(i in set(ds.bc_idx) for i in b[:3]) and all(i - n in set(ds.stg_idx) for i in b[3:])
+
+
+def test_quest_demos_all_intv_form_bc_pool_and_val_zero_keeps_all(tmp_path):
+    # Quest 시연은 action_mode가 전부 사람(INTV)이다 — 정책이 몬 프레임(ROLLOUT·PREINTV)이 없는 에피소드가 BC 풀
+    I, R, P = LABEL_INTV, LABEL_ROLLOUT, LABEL_PREINTV
+    episodes = [(3, [I] * 3), (6, [R, P, P, I, I, I]), (3, [R] * 3)]
+    _write_hdf5(tmp_path / "q.hdf5", episodes)
+    ds = JointStgDataset(tmp_path / "q.hdf5", ["agentview_image", "robot0_eef_pos"], 2, 4, None, ["agentview_image"],
+                         val_fraction=0.0, split_seed=0, num_bins=20)
+    assert [ds._index[i] for i in ds.bc_idx] == [(0, 0), (0, 1), (0, 2)]
+    # val_fraction=0: 검증으로 빼는 에피소드 없음(평가 세트는 병합 전에 따로 뺐다). 개입 에피소드는 첫 개입(t=3)부터
+    assert [ds._index[i] for i in ds.stg_idx] == [(0, 0), (0, 1), (0, 2), (1, 3), (1, 4), (1, 5), (2, 0), (2, 1), (2, 2)]
 
 
 def test_camera_stats_scale_is_one_scalar_per_camera(tmp_path):
