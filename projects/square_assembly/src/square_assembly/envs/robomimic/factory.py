@@ -26,6 +26,27 @@ def nut_yaw_deg(rs_env):
     return float(np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))))
 
 
+MAX_NUT_TILT_DEG = 30   # 성공 판정의 너트 기울기 상한 — 실제 성공 341개는 모두 17° 이하(2026-11-22 확인)
+
+
+def nut_tilt_deg(rs_env):
+    """robosuite NutAssembly env의 (첫) 너트가 수평에서 기운 각도(도) — 0이면 누워 있다."""
+    R = rs_env.sim.data.body_xmat[rs_env.sim.model.body_name2id(rs_env.nuts[0].root_body)].reshape(3, 3)
+    return float(np.degrees(np.arccos(min(1.0, abs(R[2, 2])))))
+
+
+def _require_flat_nut(env):
+    """NutAssembly 성공 판정에 '너트가 누워 있음(기울기 ≤ MAX_NUT_TILT_DEG)'을 더한다.
+
+    robosuite on_peg는 너트 중심의 위치만 봐서, 기둥 옆에 세워진 너트도 성공으로 쳤다(turn30 branch_t0 demo_33).
+    env.is_success()·_check_success()를 부르는 모든 곳(RL·평가·수집)이 이 판정을 쓴다."""
+    rs = env.env
+    if not hasattr(rs, "nuts"):
+        return
+    check = rs._check_success
+    rs._check_success = lambda: bool(check()) and nut_tilt_deg(rs) <= MAX_NUT_TILT_DEG
+
+
 def _exclude_nut_yaw(env, exclude_deg):
     """NutAssembly 너트 초기 yaw에서 [lo, hi]도 구간을 빼고 나머지에서 균등하게 뽑는다.
 
@@ -76,6 +97,7 @@ def make_lowdim_env(env_name, robots, obs_keys, render=False, renderer="mjviewer
         **kwargs,
     )
     _exclude_nut_yaw(env, nut_yaw_exclude)
+    _require_flat_nut(env)
     if render:
         env.env.has_renderer = True
         env.env.renderer = renderer
@@ -162,4 +184,5 @@ def make_image_env(env_name, robots, lowdim_keys, rgb_keys, camera_names, image_
         **kwargs,
     )
     _exclude_nut_yaw(env, nut_yaw_exclude)
+    _require_flat_nut(env)
     return env
