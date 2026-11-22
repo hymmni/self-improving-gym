@@ -168,6 +168,23 @@ def test_false_progress_uses_chunk_means_and_skips_successful_branches():
     assert sum(s.get("nb", 0) for s in stats.values()) == 3
 
 
+def test_false_success_counts_failed_branches_ending_at_success_level():
+    # 2026-11-22 사용자: 조금 내려간 것(출렁임·실제 접근)은 착각이 아니다 — 끝 8프레임 평균이 성공 수준(d ≤ 50)일 때만 센다
+    from square_assembly.scripts.eval_stg_scaling import FALSE_SUCCESS_D, ratio_metrics, unit_stats
+    assert FALSE_SUCCESS_D == 50
+    series = {"slight": ([300] * 10 + [290] * 10, [0] * 20), "deep": ([200] * 10 + [40] * 10, [0] * 20),
+              "edge": ([60] * 10 + [50] * 10, [0] * 20), "start_low": ([5] * 20, [0] * 20),
+              "hk": ([9] * 20, [0] * 20)}
+    episodes = {"slight": _ep("branch_t0", "demo_1", 2, False), "deep": _ep("branch_t0", "demo_2", 2, False),
+                "edge": _ep("branch_t_press", "demo_3", 2, False), "start_low": _ep("branch_t_press", "demo_4", 2, False),
+                "hk": _ep("branch_t0", "demo_5", 2, True, hacky=True)}
+    m = ratio_metrics(unit_stats(*_frames(series), episodes))
+    # 기존 ②는 slight·deep·edge(내려감)를 세고 처음부터 낮은 start_low는 못 센다. 새 지표는 deep·edge·start_low
+    assert m["false_progress"] == pytest.approx(3 / 4)
+    assert m["false_success"] == pytest.approx(3 / 4)
+    assert m["false_success/branch_t0"] == pytest.approx(1 / 2) and m["false_success/branch_t_press"] == 1
+
+
 def test_bootstrap_ci_brackets_the_point_and_is_reproducible():
     from square_assembly.scripts.eval_stg_scaling import bootstrap_ci, ratio_metrics
     rng = np.random.RandomState(0)

@@ -5,6 +5,9 @@ r"""STG 롤아웃 규모 실험(2026-11-20) 예측기 하나를 그 정책의 �
   |E[d] − 남은 스텝| 평균. 라벨은 학습과 같게 마지막 bin으로 자른 값.
 - ② false_progress: 실패 분기 가운데 mean d(분기 시작 8프레임) − mean d(분기 끝 8프레임) > 0인 비율. 8 = action chunk.
   성공한 분기는 빼고 야매(hacky)·진짜 성공(branch_success)으로 센다. W=1 값은 false_progress_w1.
+- ② false_success(2026-11-22부터 그림의 ②): 실패 분기 가운데 끝 8프레임 평균 d ≤ FALSE_SUCCESS_D(성공 수준)인 비율.
+  조금 내려간 분기(출렁임·그리퍼가 다가간 실제 진전)는 세지 않고, 처음부터 "거의 끝"으로 읽은 분기는 센다(사용자 지적).
+  예측기를 다시 돌리지 않고 저장된 pred.npz로 다시 매기려면 --rescore <스윕 root>.
 보조: 세트별 MAE·NLL, 실패 분기 프레임 vs 개입 성공 구간 프레임 AUROC, eval_dstg.reward_metrics(stride 1·8).
 
 부트스트랩 단위 = 평가 에피소드(rollout/<원본 이름>: 개입 세 버전 + 분기 둘, solo/<이름>, demo/<이름>), 층 안 복원 추출.
@@ -25,6 +28,7 @@ SETS = ("policy_success", "intv_delay", "intv_immediate", "intv_timeout", "demo"
 INTV = ("intv_delay", "intv_immediate", "intv_timeout")
 BRANCHES = ("branch_t0", "branch_t_press")
 WINDOW = 8   # action_horizon — 거짓 진전의 시작·끝 평균 창
+FALSE_SUCCESS_D = 50   # 성공 수준 — 성공 50스텝 전 예측 d가 34~47(random30·turn30, 2026-11-22 확인)
 
 
 def _ratio(sets, kind="abs"):
@@ -35,7 +39,8 @@ RATIOS = {"success_mae": _ratio(("policy_success",) + INTV),
           "false_progress": (["fp"], ["nb"]), "false_progress_w1": (["fp_w1"], ["nb"]),
           "mae/intv": _ratio(INTV), "nll/success": _ratio(("policy_success",) + INTV, "nll"),
           **{f"mae/{s}": _ratio((s,)) for s in SETS}, **{f"nll/{s}": _ratio((s,), "nll") for s in SETS},
-          **{f"false_progress/{b}": ([f"fp_{b}"], [f"nb_{b}"]) for b in BRANCHES}}
+          **{f"false_progress/{b}": ([f"fp_{b}"], [f"nb_{b}"]) for b in BRANCHES},
+          "false_success": (["fs"], ["nb"]), **{f"false_success/{b}": ([f"fs_{b}"], [f"nb_{b}"]) for b in BRANCHES}}
 
 
 def _unit(info):
@@ -68,6 +73,9 @@ def unit_stats(d, nll, label, ep, t, episodes, window=WINDOW):
             s["fp"] += fp[window]
             s[f"fp_{role}"] += fp[window]
             s["fp_w1"] += fp[1]
+            fs = float(seg[-min(window, len(seg)):].mean() <= FALSE_SUCCESS_D)
+            s["fs"] += fs
+            s[f"fs_{role}"] += fs
             s["nb"] += 1
             s[f"nb_{role}"] += 1
         else:
@@ -183,27 +191,75 @@ def predict(predictor, eval_cache, device, batch_size=4096):
     return np.concatenate(d), np.concatenate(nll), ds.labels().astype(float), ep, t, ckpt
 
 
-def main():
-    import torch
-
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--predictor", required=True)
-    ap.add_argument("--eval-cache", required=True)
-    ap.add_argument("--out", required=True, help="metrics.json, pred.npz를 쓸 폴더")
-    ap.add_argument("--n-boot", type=int, default=1000)
-    ap.add_argument("--device", default="cuda")
-    args = ap.parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-
-    d, nll, label, ep, t, ckpt = predict(args.predictor, args.eval_cache, device)
-    episodes = read_episodes(args.eval_cache)
-    stats = unit_stats(d, nll, label, ep, t, episodes)
+def _counts(stats):
     counts = defaultdict(int)
     for s in stats.values():
         for k in ("nb", "hacky", "branch_success"):
             counts[k] += int(s.get(k, 0))
     for u in stats:
         counts[f"units/{u.split('/')[0]}"] += 1
+    return dict(counts)
+
+
+def rescore(root, n_boot=1000):
+    """<root>/jobs.json의 job마다 저장된 pred.npz로 metrics.json의 units·point·ci·counts를 다시 매긴다.
+
+    지표 정의가 바뀔 때 예측기를 다시 돌리지 않으려고 쓴다. 프레임 순서·라벨은 평가 캐시와 예측기의
+    obs_horizon·num_bins로 정해지므로 그 조합마다 한 번만 만든다(predict와 같은 DinoFeatureWindows)."""
+    import torch
+
+    from square_assembly.datasets.dino_feature_dataset import DinoFeatureWindows
+
+    jobs = json.load(open(os.path.join(root, "jobs.json")))["jobs"]
+    frames, episodes, done = {}, {}, 0
+    for job in jobs:
+        out = os.path.join(root, "runs", job["id"])
+        path = os.path.join(out, "metrics.json")
+        if not os.path.exists(path):
+            continue
+        m = json.load(open(path))
+        ckpt = torch.load(m["predictor"], map_location="cpu", weights_only=False)
+        key = (m["eval_cache"], int(ckpt["obs_horizon"]), int(ckpt["num_bins"]))
+        if key not in frames:
+            ds = DinoFeatureWindows(m["eval_cache"], key[1], fail_bin=-1)
+            ds.clamp_labels(key[2])
+            frames[key] = (ds.labels().astype(float), np.array([n for n, _ in ds.samples]), np.array([t for _, t in ds.samples]))
+        if m["eval_cache"] not in episodes:
+            episodes[m["eval_cache"]] = read_episodes(m["eval_cache"])
+        pred = np.load(os.path.join(out, "pred.npz"))
+        label, ep, t = frames[key]
+        assert len(pred["d"]) == len(label), (job["id"], len(pred["d"]), len(label))
+        stats = unit_stats(pred["d"].astype(np.float64), pred["nll"].astype(np.float64), label, ep, t, episodes[m["eval_cache"]])
+        m.update(point=ratio_metrics(stats), ci=bootstrap_ci([stats], n_boot=n_boot), counts=_counts(stats), units=stats)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as stream:
+            json.dump(m, stream, indent=1, ensure_ascii=False)
+        os.replace(tmp, path)
+        done += 1
+    print(f"rescored {done}/{len(jobs)} jobs in {root}", flush=True)
+
+
+def main():
+    import torch
+
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--predictor")
+    ap.add_argument("--eval-cache")
+    ap.add_argument("--out", help="metrics.json, pred.npz를 쓸 폴더")
+    ap.add_argument("--n-boot", type=int, default=1000)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--rescore", metavar="ROOT", help="스윕 root의 모든 job을 저장된 pred.npz로 다시 매긴다(다른 인자 무시)")
+    args = ap.parse_args()
+    if args.rescore:
+        return rescore(args.rescore, n_boot=args.n_boot)
+    if not (args.predictor and args.eval_cache and args.out):
+        ap.error("--predictor, --eval-cache, --out이 필요하다(--rescore가 아니면)")
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    d, nll, label, ep, t, ckpt = predict(args.predictor, args.eval_cache, device)
+    episodes = read_episodes(args.eval_cache)
+    stats = unit_stats(d, nll, label, ep, t, episodes)
+    counts = _counts(stats)
     metrics = {"predictor": args.predictor, "eval_cache": args.eval_cache, "window": WINDOW,
                "point": ratio_metrics(stats), "ci": bootstrap_ci([stats], n_boot=args.n_boot),
                "frame": frame_metrics(d, label, ep, t, episodes), "counts": dict(counts), "units": stats,
@@ -216,7 +272,7 @@ def main():
         json.dump(metrics, stream, indent=1, ensure_ascii=False)
     os.replace(tmp, os.path.join(args.out, "metrics.json"))   # 다 쓴 뒤에만 생긴다 — 스윕은 이 파일로 완료를 판단
     p = metrics["point"]
-    print(f"success_mae={p['success_mae']:.2f} false_progress={p['false_progress']:.3f} "
+    print(f"success_mae={p['success_mae']:.2f} false_progress={p['false_progress']:.3f} false_success={p['false_success']:.3f} "
           f"demo_mae={p['mae/demo']:.2f} n_failed_branches={counts['nb']}", flush=True)
 
 

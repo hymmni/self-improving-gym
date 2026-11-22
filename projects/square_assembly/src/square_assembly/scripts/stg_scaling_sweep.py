@@ -304,7 +304,7 @@ def aggregate(root, n_boot=1000, plots=True):
 
 
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")   # dataviz 기본 순서
-METRICS = (("success_mae", "(1) success-path MAE [steps]"), ("false_progress", "(2) false-progress rate"))
+METRICS = (("success_mae", "(1) success-path MAE [steps]"), ("false_success", "(2) failed branches read as success (end d <= 50)"))
 
 
 def plot_curves(rows, out_dir):
