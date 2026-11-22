@@ -4,7 +4,7 @@ r"""STG 롤아웃 규모 실험: 같은 평가 세트를 쓰는 두 조건의 �
 같은 (order, seed) 예측기끼리 짝을 짓고 양쪽에 같은 층별 재추출(eval_stg_scaling.bootstrap_values)을 적용해
 "A − B"의 분포를 낸다. 평가 에피소드를 고르는 운이 양쪽에 똑같이 들어가 상쇄된다.
 
-- 지표: ① success_mae, ② false_progress(8프레임 창). diff = 짝마다 (A − B)의 평균, [lo, hi] = 재추출마다 짝 평균 차이의 2.5/97.5%.
+- 지표: ① success_mae, ② false_success(실패 분기 끝 d ≤ 50, 2026-11-22부터), 옛 ② false_progress(8프레임 창). diff = 짝마다 (A − B)의 평균, [lo, hi] = 재추출마다 짝 평균 차이의 2.5/97.5%.
 - excludes_zero: 구간이 0을 포함하지 않는 칸.
 - 비교 묶음: --set main(개입 시점, 성공 넣기/빼기, (가)−(나), 입력 − all), --set sensitivity(학습 step 민감도: --roots에
   본 스윕과 sensitivity 결과를 같이 준다).
@@ -24,7 +24,7 @@ from square_assembly.scripts.eval_stg_scaling import bootstrap_values, ratio_met
 from square_assembly.scripts.stg_scaling_data import KINDS
 from square_assembly.scripts.stg_scaling_sweep import OBS_COMPARE, POLICY_BINS, SENS_GRID_STEPS
 
-METRICS = ("success_mae", "false_progress")
+METRICS = ("success_mae", "false_success", "false_progress")   # false_success가 2026-11-22부터 ②
 
 
 def _matches(run, flt):
